@@ -1,0 +1,22 @@
+{
+  "name": "jenkins-cicd-app",
+  "version": "1.0.0",
+  "scripts": {
+    "lint": "eslint src/**/*.js",
+    "build": "cp -r src dist",
+    "test": "jest",
+    "test:unit": "jest --testPathPattern=unit",
+    "test:integration": "jest --testPathPattern=integration",
+    "test:smoke": "jest smoke/smoke.test.js",
+    "start": "node dist/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "@jest/globals": "^29.7.0"
+  },
+  "type": "module"
+}

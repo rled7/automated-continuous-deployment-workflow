@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# setup.sh — Bootstrap the entire CI/CD infrastructure
+# Usage: ./scripts/setup.sh [--local | --k8s]
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+MODE="${1:---local}"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+info()    { echo -e "${GREEN}[INFO]${NC}  $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+# ── Prerequisites check ───────────────────────────────────────────────────────
+check_prereqs() {
+    info "Checking prerequisites..."
+    local missing=()
+    for cmd in docker docker-compose kubectl git node npm; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    [[ ${#missing[@]} -eq 0 ]] || error "Missing tools: ${missing[*]}"
+    info "All prerequisites found ✅"
+}
+
+# ── Environment file ──────────────────────────────────────────────────────────
+setup_env() {
+    if [[ ! -f "$ROOT_DIR/.env" ]]; then
+        info "Creating .env from .env.example..."
+        cp "$ROOT_DIR/.env.example" "$ROOT_DIR/.env"
+        warn "⚠️  Edit .env with your secrets before continuing"
+        exit 0
+    fi
+    set -a; source "$ROOT_DIR/.env"; set +a
+    info ".env loaded ✅"
+}
+
+# ── Local mode: Docker Compose ────────────────────────────────────────────────
+start_local() {
+    info "Starting local CI/CD stack (Docker Compose)..."
+    cd "$ROOT_DIR/docker"
+    docker-compose pull
+    docker-compose up -d
+
+    info "Waiting for Jenkins to be ready..."
+    until curl -s http://localhost:8080/login | grep -q 'Jenkins'; do
+        sleep 5; echo -n "."
+    done
+    echo ""
+    info "Jenkins ready at http://localhost:8080 ✅"
+    info "SonarQube ready at http://localhost:9000 ✅"
+    info "Docker Registry at http://localhost:5000 ✅"
+}
+
+# ── Kubernetes mode ───────────────────────────────────────────────────────────
+setup_k8s() {
+    info "Setting up Kubernetes namespaces..."
+    kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+    kubectl create namespace staging    --dry-run=client -o yaml | kubectl apply -f -
+    kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+    info "Creating Docker registry secret..."
+    kubectl create secret docker-registry docker-registry-secret \
+        --docker-server="$DOCKER_REGISTRY" \
+        --docker-username="$DOCKER_USER" \
+        --docker-password="$DOCKER_PASSWORD" \
+        --namespace=production --dry-run=client -o yaml | kubectl apply -f -
+
+    kubectl create secret docker-registry docker-registry-secret \
+        --docker-server="$DOCKER_REGISTRY" \
+        --docker-username="$DOCKER_USER" \
+        --docker-password="$DOCKER_PASSWORD" \
+        --namespace=staging --dry-run=client -o yaml | kubectl apply -f -
+
+    info "Creating app secrets..."
+    kubectl create secret generic my-app-secrets \
+        --from-literal=db-host="$DB_HOST" \
+        --from-literal=db-password="$DB_PASSWORD" \
+        --namespace=production --dry-run=client -o yaml | kubectl apply -f -
+
+    info "Applying monitoring stack..."
+    kubectl apply -f "$ROOT_DIR/monitoring/" --namespace=monitoring
+
+    info "Kubernetes setup complete ✅"
+}
+
+# ── Install app dependencies ──────────────────────────────────────────────────
+install_deps() {
+    info "Installing app dependencies..."
+    cd "$ROOT_DIR/app" && npm ci
+    info "Dependencies installed ✅"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+main() {
+    echo ""
+    echo "╔═══════════════════════════════════════╗"
+    echo "║     Jenkins CI/CD Setup Script        ║"
+    echo "╚═══════════════════════════════════════╝"
+    echo ""
+
+    check_prereqs
+    setup_env
+    install_deps
+
+    case "$MODE" in
+        --local) start_local ;;
+        --k8s)   setup_k8s  ;;
+        *)       error "Unknown mode: $MODE. Use --local or --k8s" ;;
+    esac
+
+    echo ""
+    info "🎉 Setup complete! Push a commit to trigger the pipeline."
+}
+
+main "$@"

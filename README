@@ -1,0 +1,172 @@
+# Jenkins CI/CD Pipeline — 24/7 Auto-Deploy
+
+A fully automated CI/CD pipeline: every `git push` triggers build → test → deploy → rollback (if anything fails). Zero manual intervention in production.
+
+---
+
+## Architecture
+
+```
+Developer Push
+     │
+     ▼
+┌─────────────┐    Webhook    ┌──────────────────────────────────────────────┐
+│   GitHub    │──────────────▶│              Jenkins Pipeline                │
+└─────────────┘               │                                              │
+                               │  1. Checkout                                 │
+                               │  2. Lint + SonarQube + Vuln Scan (parallel) │
+                               │  3. Build (npm run build)                    │
+                               │  4. Unit Tests + Integration Tests (parallel)│
+                               │  5. Docker Build + Trivy Scan + Push         │
+                               │  6. Deploy → Staging (develop branch)        │
+                               │  7. Performance Tests (k6)                   │
+                               │  8. Deploy → Production (main branch)        │
+                               │     └─ Auto-rollback on failure              │
+                               └──────────────────────────────────────────────┘
+```
+
+---
+
+## Project Structure
+
+```
+jenkins-cicd/
+├── Jenkinsfile                  # Full pipeline definition
+├── .env.example                 # Environment variables template
+├── app/
+│   └── src/
+│       ├── server.js            # Express app with graceful shutdown
+│       └── routes/health.js     # /health/live + /health/ready endpoints
+├── docker/
+│   ├── Dockerfile               # Multi-stage production image
+│   └── docker-compose.yml       # Local Jenkins + SonarQube + Registry
+├── jenkins/
+│   ├── jenkins.yaml             # Jenkins Configuration as Code (JCasC)
+│   └── plugins.txt              # Required Jenkins plugins
+├── k8s/
+│   ├── production/deployment.yaml   # HPA, PDB, rolling update, ingress
+│   └── staging/deployment.yaml
+├── monitoring/
+│   └── prometheus.yaml          # Prometheus scrape + alert rules
+├── tests/
+│   ├── performance/load-test.js # k6 load test (ramp → spike → ramp down)
+│   └── smoke/smoke.test.js      # Post-deploy smoke tests
+└── scripts/
+    └── setup.sh                 # Bootstrap script
+```
+
+---
+
+## Quick Start
+
+### 1. Clone & Configure
+
+```bash
+git clone https://github.com/YOUR_ORG/my-app
+cd jenkins-cicd
+cp .env.example .env
+# Edit .env with your credentials
+```
+
+### 2. Start Local CI Stack
+
+```bash
+chmod +x scripts/setup.sh
+./scripts/setup.sh --local
+```
+
+Opens:
+- Jenkins  → http://localhost:8080
+- SonarQube → http://localhost:9000
+
+### 3. Configure Jenkins
+
+Jenkins auto-configures itself via `jenkins/jenkins.yaml` (JCasC). Add these credentials manually in **Manage Jenkins → Credentials**:
+
+| ID | Type | Description |
+|----|------|-------------|
+| `docker-registry-credentials` | Username/Password | Docker registry |
+| `kubeconfig` | Secret file | Kubernetes config |
+| `sonarqube-token` | Secret text | SonarQube token |
+| `slack-token` | Secret text | Slack bot token |
+| `github-credentials` | Username/Password | GitHub PAT |
+
+### 4. Set Up Kubernetes (Production)
+
+```bash
+./scripts/setup.sh --k8s
+```
+
+### 5. Push to Trigger the Pipeline
+
+```bash
+git checkout -b develop
+git push origin develop   # → triggers staging deploy
+
+git checkout main
+git merge develop
+git push origin main      # → triggers production deploy (with approval gate)
+```
+
+---
+
+## Pipeline Stages
+
+| Stage | What it does | Fails pipeline? |
+|-------|-------------|-----------------|
+| Checkout | Pulls code, sets env vars | Yes |
+| SonarQube | Code quality gate | Yes |
+| Dependency Scan | OWASP CVE check (CVSS ≥ 8) | Yes |
+| Lint | ESLint | No (warns) |
+| Build | `npm run build` | Yes |
+| Unit Tests | Jest + coverage (≥80%) | Yes |
+| Integration Tests | Jest integration suite | Yes |
+| Docker Build | Multi-stage build | Yes |
+| Trivy Scan | Container image CVE scan | No (warns) |
+| Deploy → Staging | Rolling update to staging | Yes |
+| Performance Tests | k6 (p95 < 500ms, error rate < 1%) | Yes |
+| Deploy → Production | Rolling update, manual approval | Yes |
+| **Auto-Rollback** | **Reverts production on failure** | — |
+
+---
+
+## 24/7 Reliability Features
+
+- **Rolling updates** — `maxUnavailable: 0` means zero downtime deploys
+- **Liveness/Readiness probes** — Kubernetes only routes traffic to healthy pods
+- **HPA** — Auto-scales from 3 → 20 pods based on CPU/memory
+- **Pod Disruption Budget** — Guarantees ≥2 pods available during node maintenance
+- **Graceful shutdown** — SIGTERM handler closes connections cleanly in 55s
+- **Automatic rollback** — If production deploy fails, Jenkins reverts to previous image automatically
+- **Prometheus alerts** — Pages on-call if error rate, latency, or pod restarts spike
+
+---
+
+## Rollback
+
+**Automatic** (triggered on pipeline failure):
+```
+Jenkins detects deploy failure → kubectl set image → previous image → done
+```
+
+**Manual** (any time):
+```bash
+# Roll back to previous revision
+kubectl rollout undo deployment/my-app --namespace=production
+
+# Roll back to specific revision
+kubectl rollout undo deployment/my-app --to-revision=3 --namespace=production
+
+# Check rollout history
+kubectl rollout history deployment/my-app --namespace=production
+```
+
+---
+
+## Branch Strategy
+
+| Branch | Deploys to | Gate |
+|--------|-----------|------|
+| `feature/*` | (none) | Tests only |
+| `develop` | Staging | All tests + perf tests |
+| `main` | Production | Manual approval + all tests |

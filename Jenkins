@@ -1,0 +1,110 @@
+# Jenkins Configuration as Code
+# Automatically configures Jenkins on first boot — no manual setup needed.
+
+jenkins:
+  systemMessage: "Jenkins CI/CD — Configured via JCasC"
+  numExecutors: 4
+  mode: NORMAL
+  scmCheckoutRetryCount: 2
+
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+
+  authorizationStrategy:
+    roleBased:
+      roles:
+        global:
+          - name: "admin"
+            description: "Administrators"
+            permissions:
+              - "Overall/Administer"
+            entries:
+              - user: "admin"
+          - name: "developer"
+            description: "Developers — read + build"
+            permissions:
+              - "Overall/Read"
+              - "Job/Build"
+              - "Job/Read"
+
+  globalNodeProperties:
+    - envVars:
+        env:
+          - key: APP_NAME
+            value: "my-app"
+          - key: DOCKER_REGISTRY
+            value: "localhost:5000"
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              id: "docker-registry-credentials"
+              username: "${DOCKER_USER}"
+              password: "${DOCKER_PASSWORD}"
+              description: "Docker Registry"
+          - string:
+              id: "sonarqube-token"
+              secret: "${SONAR_TOKEN}"
+              description: "SonarQube Token"
+          - file:
+              id: "kubeconfig"
+              fileName: "kubeconfig"
+              description: "Kubernetes Config"
+          - string:
+              id: "slack-token"
+              secret: "${SLACK_TOKEN}"
+              description: "Slack Bot Token"
+
+tool:
+  git:
+    installations:
+      - name: Default
+        home: git
+  nodejs:
+    installations:
+      - name: NodeJS-20
+        version: "20.0.0"
+
+unclassified:
+  slackNotifier:
+    teamDomain: "${SLACK_WORKSPACE}"
+    tokenCredentialId: "slack-token"
+    room: "#deployments"
+
+  sonarGlobalConfiguration:
+    buildWrapperEnabled: true
+    installations:
+      - name: "SonarQube"
+        serverUrl: "http://sonarqube:9000"
+        credentialsId: "sonarqube-token"
+
+jobs:
+  - script: |
+      multibranchPipelineJob('my-app') {
+          branchSources {
+              github {
+                  id('my-app-github')
+                  repoOwner('YOUR_ORG')
+                  repository('my-app')
+                  credentialsId('github-credentials')
+                  traits {
+                      gitHubBranchDiscovery { strategyId(1) }
+                      gitHubPullRequestDiscovery { strategyId(1) }
+                  }
+              }
+          }
+          triggers {
+              periodic(5)
+          }
+          factory {
+              workflowBranchProjectFactory {
+                  scriptPath('Jenkinsfile')
+              }
+          }
+      }

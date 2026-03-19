@@ -1,0 +1,229 @@
+---
+# ─── Namespace ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    app: my-app
+    env: production
+
+---
+# ─── Deployment ───────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: production
+  labels:
+    app: my-app
+    version: "IMAGE_PLACEHOLDER"
+  annotations:
+    # Tells kubectl rollout to track this annotation for changes
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: 3                         # Always 3 pods across availability zones
+  revisionHistoryLimit: 5             # Keep last 5 ReplicaSets for rollback
+  selector:
+    matchLabels:
+      app: my-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1                     # Allow 1 extra pod during deploy
+      maxUnavailable: 0               # Never take a pod offline before new one is ready
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      # Spread pods across nodes/zones for HA
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: my-app
+
+      # Graceful shutdown
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: my-app
+          image: IMAGE_PLACEHOLDER       # Replaced by Jenkins sed command
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+              name: http
+
+          # ── Environment ────────────────────────────────────────────────────
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3000"
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: my-app-secrets
+                  key: db-host
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: my-app-secrets
+                  key: db-password
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: my-app-config
+                  key: redis-url
+
+          # ── Resource Limits ────────────────────────────────────────────────
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          # ── Probes ─────────────────────────────────────────────────────────
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 10
+
+          # ── Security Context ───────────────────────────────────────────────
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          # ── Volume Mounts ──────────────────────────────────────────────────
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+            - name: logs-dir
+              mountPath: /app/logs
+
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+        - name: logs-dir
+          emptyDir: {}
+
+      imagePullSecrets:
+        - name: docker-registry-secret
+
+---
+# ─── Horizontal Pod Autoscaler ────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: my-app-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# ─── Service ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+  namespace: production
+  labels:
+    app: my-app
+spec:
+  type: ClusterIP
+  selector:
+    app: my-app
+  ports:
+    - port: 80
+      targetPort: 3000
+      name: http
+
+---
+# ─── Ingress ──────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app
+  namespace: production
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.yourdomain.com
+      secretName: my-app-tls
+  rules:
+    - host: app.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-app
+                port:
+                  name: http
+
+---
+# ─── Pod Disruption Budget (ensures HA during node maintenance) ───────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-app-pdb
+  namespace: production
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: my-app

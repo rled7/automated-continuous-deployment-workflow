@@ -52,3 +52,12 @@ All notable file-level changes to this repo, tracked per build.
   - Renamed `DOCKER_REGISTRY_URL` → `DOCKER_REGISTRY`
   - Added `DOCKER_USER`, `DOCKER_PASSWORD`, `JENKINS_ADMIN_PASSWORD`, `SLACK_TOKEN`, `SLACK_WORKSPACE`, `DB_HOST`, `DB_PASSWORD`
   - Defaulted `SONAR_HOST_URL` to `http://localhost:9000` for local dev
+
+## Build 004 — Code-bug fixes
+**Date:** 2026-05-05
+**Scope:** Phase A, Batch 2b (original steps 7, 8, 9)
+
+### Modified
+- `app/src/server.js` — declare `server` before registering signal handlers; add `SHUTDOWN_TIMEOUT_MS` (55s) forced-exit guard so a stuck `server.close()` can't hang the pod past `terminationGracePeriodSeconds`; explicit `process.exit(0|1)` in the close callback; also handle SIGINT for parity with local dev.
+- `docker/Dockerfile` — fix `CMD` JSON-form: `CMD [\"node\", \"dist/server.js\"]` had literal backslashes that would break container startup → now `CMD ["node", "dist/server.js"]`.
+- `docker/Dockerfile` — `HEALTHCHECK` path mismatch: was hitting `/health` but the app exposes `/health/live` and `/health/ready` (matching the k8s probes) → now hits `/health/live`.

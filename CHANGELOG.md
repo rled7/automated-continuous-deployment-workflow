@@ -37,3 +37,18 @@ All notable file-level changes to this repo, tracked per build.
 ### Untracked (kept on disk, removed from git)
 - `app/node_modules/`
 - `app/dist/`
+
+## Build 003 — Close gaps opened by Build 001 merges
+**Date:** 2026-05-05
+**Scope:** Phase A, Batch 2a
+
+### Added
+- `docker/jenkins/plugins.txt` — referenced by `docker-compose.yml` volume mount but didn't exist; now contains the standard pipeline + JCasC + k8s + SonarQube + Slack plugin set.
+- `k8s/production/configmap.yaml` — `my-app-config` ConfigMap was referenced by `deployment.yaml` (`REDIS_URL` via `configMapKeyRef`) but never defined.
+- `k8s/staging/deployment.yaml` — Jenkinsfile applies `k8s/${namespace}/` on the develop branch; staging directory didn't exist. Includes Namespace, Deployment (1 replica), ConfigMap, Service, and Ingress (with `letsencrypt-staging` issuer).
+
+### Modified
+- `.env.example` — aligned env var names with what `scripts/setup.sh` actually reads:
+  - Renamed `DOCKER_REGISTRY_URL` → `DOCKER_REGISTRY`
+  - Added `DOCKER_USER`, `DOCKER_PASSWORD`, `JENKINS_ADMIN_PASSWORD`, `SLACK_TOKEN`, `SLACK_WORKSPACE`, `DB_HOST`, `DB_PASSWORD`
+  - Defaulted `SONAR_HOST_URL` to `http://localhost:9000` for local dev

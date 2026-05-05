@@ -53,6 +53,29 @@ All notable file-level changes to this repo, tracked per build.
   - Added `DOCKER_USER`, `DOCKER_PASSWORD`, `JENKINS_ADMIN_PASSWORD`, `SLACK_TOKEN`, `SLACK_WORKSPACE`, `DB_HOST`, `DB_PASSWORD`
   - Defaulted `SONAR_HOST_URL` to `http://localhost:9000` for local dev
 
+## Build 005 — App middleware + observability
+**Date:** 2026-05-05
+**Scope:** Phase B, observability + hardening (plan points 11, 12, 19, 20, 21)
+
+### Added
+- `app/src/lib/logger.js` — pino logger; pretty-prints in development, JSON in production; honours `LOG_LEVEL` env var (default `info`).
+- `app/src/lib/metrics.js` — prom-client `Registry` with default metrics enabled; exports `register` and `httpRequestDurationMicroseconds` histogram (labels: `method`, `route`, `status_code`).
+- `app/src/middleware/requestId.js` — reads `x-request-id` header or generates a UUID via `crypto.randomUUID()`; sets `req.id` and echoes header back to client.
+- `app/src/middleware/error.js` — centralised error handler; ZodError → 400 with issues list; `err.statusCode` preserved; fallback 500; logs via pino with `req.id`.
+- `app/src/middleware/metrics.js` — records HTTP request duration into the histogram on `res.finish`.
+- `app/package.json` dependencies: `prom-client ^15`, `pino ^9`, `pino-http ^10`, `helmet ^8`, `express-rate-limit ^7`, `zod ^3.23`.
+
+### Modified
+- `app/src/server.js` — full middleware stack: helmet, JSON parser, requestId, pino-http, metrics, rate-limiter (100 req/min, skips `/health/*` and `/metrics`); Zod-validated `POST /api/items`; `GET /metrics` endpoint serving prom-client output; real graceful shutdown: flip `setShuttingDown(true)` → wait 5s for readiness probes to observe 503 → `server.close()` → 55s forced-exit guard.
+- `app/src/routes/health.js` — exports `setShuttingDown` setter; `GET /health/ready` returns 503 during shutdown and checks stubbed `checkDatabase`/`checkRedis` helpers (structured for easy replacement with real async calls); `/health/live` unchanged.
+
+### Closes (from broader plan)
+- Point 11: structured logging (pino)
+- Point 12: Prometheus metrics endpoint
+- Point 19: security headers (helmet)
+- Point 20: rate limiting (express-rate-limit)
+- Point 21: request validation (zod)
+
 ## Build 004 — Code-bug fixes
 **Date:** 2026-05-05
 **Scope:** Phase A, Batch 2b (original steps 7, 8, 9)

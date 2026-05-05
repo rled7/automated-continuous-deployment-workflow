@@ -4,9 +4,9 @@
   "scripts": {
     "lint": "eslint src/**/*.js",
     "build": "cp -r src dist",
-    "test": "jest",
-    "test:unit": "jest --testPathPattern=unit",
-    "test:integration": "jest --testPathPattern=integration",
+    "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest",
+    "test:unit": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --testPathPattern=unit",
+    "test:integration": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --testPathPattern=integration",
     "test:smoke": "jest smoke/smoke.test.js",
     "start": "node dist/server.js",
     "dev": "nodemon src/server.js"
@@ -22,7 +22,11 @@
   },
   "devDependencies": {
     "jest": "^29.7.0",
-    "@jest/globals": "^29.7.0"
+    "@jest/globals": "^29.7.0",
+    "jest-junit": "^16.0.0",
+    "supertest": "^7.0.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-jest": "^27.9.0"
   },
   "type": "module"
 }

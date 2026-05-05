@@ -1,3 +1,5 @@
+import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 import express from 'express';
 import helmet from 'helmet';
 import pinoHttp from 'pino-http';
@@ -11,11 +13,9 @@ import metricsMiddleware from './middleware/metrics.js';
 import errorHandler from './middleware/error.js';
 import healthRouter, { setShuttingDown } from './routes/health.js';
 
-const app = express();
+export const app = express();
 const PORT = process.env.PORT || 3000;
 const SHUTDOWN_TIMEOUT_MS = 55_000;
-
-let isShuttingDown = false;
 
 // 1. Security headers + JSON body parser
 app.use(helmet());
@@ -80,40 +80,54 @@ app.use('/health', healthRouter);
 // 9. Error handler (must be last)
 app.use(errorHandler);
 
-// Start server
-const server = app.listen(PORT, () => {
-  logger.info({ port: PORT }, 'Server running');
-});
+/**
+ * Start the HTTP server and register graceful-shutdown handlers.
+ * Returns the http.Server instance so callers (e.g., tests) can close it.
+ */
+export function start(port = PORT) {
+  let isShuttingDown = false;
 
-// 10. Graceful shutdown
-const shutdown = (signal) => {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  logger.info({ signal }, 'Shutdown signal received, draining connections');
+  const server = app.listen(port, () => {
+    logger.info({ port }, 'Server running');
+  });
 
-  // Flip the readiness flag so k8s stops routing new traffic
-  setShuttingDown(true);
+  // Graceful shutdown
+  const shutdown = (signal) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    logger.info({ signal }, 'Shutdown signal received, draining connections');
 
-  // Give in-flight readiness probes ~5s to observe the 503
-  setTimeout(() => {
-    const forceExit = setTimeout(() => {
-      logger.error('Forced exit after shutdown timeout');
-      process.exit(1);
-    }, SHUTDOWN_TIMEOUT_MS);
-    forceExit.unref();
+    // Flip the readiness flag so k8s stops routing new traffic
+    setShuttingDown(true);
 
-    server.close((err) => {
-      if (err) {
-        logger.error({ err }, 'Error during server.close');
+    // Give in-flight readiness probes ~5s to observe the 503
+    setTimeout(() => {
+      const forceExit = setTimeout(() => {
+        logger.error('Forced exit after shutdown timeout');
         process.exit(1);
-      }
-      logger.info('Process terminated cleanly');
-      process.exit(0);
-    });
-  }, 5_000);
-};
+      }, SHUTDOWN_TIMEOUT_MS);
+      forceExit.unref();
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+      server.close((err) => {
+        if (err) {
+          logger.error({ err }, 'Error during server.close');
+          process.exit(1);
+        }
+        logger.info('Process terminated cleanly');
+        process.exit(0);
+      });
+    }, 5_000);
+  };
 
-export default server;
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  return server;
+}
+
+// Only bind the port when executed directly (not when imported by tests)
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  start();
+}
+
+export default app;

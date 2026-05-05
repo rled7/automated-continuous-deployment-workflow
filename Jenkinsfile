@@ -1,17 +1,24 @@
 pipeline {
     agent any
 
+    // Bug 4 fix: declare NodeJS-20 tool so npm/node are on PATH on the agent
+    tools {
+        nodejs 'NodeJS-20'
+    }
+
     environment {
         APP_NAME        = 'my-app'
         DOCKER_REGISTRY = credentials('docker-registry-url')
         DOCKER_CREDS    = credentials('docker-registry-credentials')
-        KUBECONFIG_CRED = credentials('kubeconfig')
+        // Bug 5 fix: KUBECONFIG_CRED removed — kubeconfig is fetched via
+        // withCredentials inside deployToKubernetes() (more idiomatic, scoped)
         SLACK_CHANNEL   = '#deployments'
         GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
         IMAGE_TAG       = "${APP_NAME}:${BUILD_NUMBER}-${GIT_COMMIT_SHORT}"
         FULL_IMAGE      = "${DOCKER_REGISTRY}/${IMAGE_TAG}"
         SONAR_TOKEN     = credentials('sonarqube-token')
-        ENV             = getEnvironment()
+        // Bug 1 fix: ENV is computed in a script{} block inside Checkout so
+        // the function call is not evaluated inside the environment{} block
     }
 
     options {
@@ -23,7 +30,10 @@ pipeline {
 
     triggers {
         githubPush()
-        pollSCM('H/5 * * * *') // fallback polling every 5 minutes
+        // Bug 8 note: pollSCM is a safety-net fallback for environments where
+        // GitHub webhooks cannot reach Jenkins (e.g. local/firewalled installs).
+        // In production with working webhooks this will rarely fire.
+        pollSCM('H/5 * * * *')
     }
 
     stages {
@@ -36,6 +46,9 @@ pipeline {
                     env.GIT_AUTHOR     = sh(script: "git log -1 --format='%an'", returnStdout: true).trim()
                     env.GIT_MESSAGE    = sh(script: "git log -1 --format='%s'",  returnStdout: true).trim()
                     env.GIT_BRANCH_NAME = sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
+                    // Bug 1 fix: compute ENV here instead of in environment{} block
+                    // to avoid mixing Groovy function calls with declarative env vars
+                    env.ENV = getEnvironment()
                 }
                 echo "📦 Branch: ${env.GIT_BRANCH_NAME} | Author: ${env.GIT_AUTHOR}"
                 notifySlack("🔄 *Build Started* — ${APP_NAME} #${BUILD_NUMBER}\n*Branch:* ${env.GIT_BRANCH_NAME}\n*Commit:* ${env.GIT_MESSAGE}")
@@ -66,6 +79,7 @@ pipeline {
                     steps {
                         sh '''
                             cd app
+                            mkdir -p reports/dependency-check
                             # OWASP Dependency Check
                             dependency-check.sh \
                               --project "${APP_NAME}" \
@@ -90,6 +104,7 @@ pipeline {
                     steps {
                         sh '''
                             cd app
+                            mkdir -p reports
                             npm run lint -- --format checkstyle --output-file reports/eslint.xml || true
                         '''
                         recordIssues(tools: [esLint(pattern: 'app/reports/eslint.xml')])
@@ -122,6 +137,7 @@ pipeline {
                     steps {
                         sh '''
                             cd app
+                            mkdir -p reports
                             npm run test:unit -- \
                               --coverage \
                               --coverageReporters=cobertura \
@@ -143,6 +159,7 @@ pipeline {
                     steps {
                         sh '''
                             cd app
+                            mkdir -p reports
                             npm run test:integration -- \
                               --reporters=jest-junit \
                               --outputFile=reports/junit-integration.xml
@@ -161,7 +178,11 @@ pipeline {
         stage('Docker Build & Push') {
             steps {
                 script {
-                    docker.withRegistry("https://${DOCKER_REGISTRY}", 'docker-registry-credentials') {
+                    // Bug 7 fix: strip any scheme from the credential value so we
+                    // don't end up with "https://https://..." if the credential
+                    // already contains the scheme.
+                    def registryUrl = "${DOCKER_REGISTRY}".replaceFirst(/^https?:\/\//, '')
+                    docker.withRegistry("https://${registryUrl}", 'docker-registry-credentials') {
                         def appImage = docker.build("${FULL_IMAGE}", "-f docker/Dockerfile .")
 
                         // Container image vulnerability scan (Trivy)
@@ -191,6 +212,7 @@ pipeline {
             when { branch 'develop' }
             steps {
                 sh '''
+                    mkdir -p reports
                     k6 run \
                       --out json=reports/k6-results.json \
                       --env BASE_URL=https://staging.${APP_NAME}.internal \
@@ -295,13 +317,19 @@ def rollback(String namespace, String previousImage) {
 }
 
 def runSmokeTests(String env) {
-    sh """
-        cd tests
-        BASE_URL=https://${env}.${APP_NAME}.internal \
-        npm run test:smoke -- \
-          --reporters=jest-junit \
-          --outputFile=reports/junit-smoke-${env}.xml
-    """
+    // Bug 9 fix: use dir() block instead of bare "cd tests" — the latter is
+    // fragile because the working directory is not guaranteed across sh steps.
+    // Bug 2 fix: run npm ci before the test command so smoke-test deps are
+    // installed (the tests/ directory has its own package.json).
+    dir('tests') {
+        sh """
+            npm ci --prefer-offline --no-audit --no-fund
+            BASE_URL=https://${env}.${APP_NAME}.internal \
+            npm run test:smoke -- \
+              --reporters=jest-junit \
+              --outputFile=reports/junit-smoke-${env}.xml
+        """
+    }
     junit "tests/reports/junit-smoke-${env}.xml"
 }
 

@@ -110,6 +110,22 @@ pipeline {
                         recordIssues(tools: [esLint(pattern: 'app/reports/eslint.xml')])
                     }
                 }
+                // Build 009 — point 13: secret scanning via gitleaks.
+                // || true makes this warn-only for now; tighten to fail on
+                // CRITICAL findings once a baseline suppression list is established.
+                stage('Gitleaks') {
+                    steps {
+                        sh '''
+                            mkdir -p reports
+                            gitleaks detect --source . --report-format sarif --report-path reports/gitleaks.sarif --redact || true
+                        '''
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'reports/gitleaks.sarif', allowEmptyArchive: true
+                        }
+                    }
+                }
             }
         }
 
@@ -130,7 +146,29 @@ pipeline {
             }
         }
 
-        // ─── STAGE 4: UNIT & INTEGRATION TESTS ───────────────────────────────
+        // ─── STAGE 4: VALIDATE MANIFESTS ─────────────────────────────────────
+        // Build 009 — point 15: kubeconform validates every kustomize overlay.
+        // -ignore-missing-schemas is required because Argo Rollouts CRDs do not
+        // have schemas in the default kubeconform schema set.
+        stage('Validate Manifests') {
+            steps {
+                sh '''
+                    mkdir -p reports
+                    # Validate every kustomize overlay
+                    for overlay in k8s/overlays/*/; do
+                        echo "Validating $overlay"
+                        kubectl kustomize "$overlay" | kubeconform -strict -summary -output text -ignore-missing-schemas - | tee -a reports/kubeconform.txt
+                    done
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/kubeconform.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ─── STAGE 5: UNIT & INTEGRATION TESTS ───────────────────────────────
         stage('Test') {
             parallel {
                 stage('Unit Tests') {
@@ -174,7 +212,31 @@ pipeline {
             }
         }
 
-        // ─── STAGE 5: DOCKER BUILD & PUSH ────────────────────────────────────
+        // ─── STAGE 6: DEPLOY → PR PREVIEW ────────────────────────────────────
+        // Build 009 — point 29: wire scripts/pr-preview-up.sh (added in Build 011).
+        // This stage runs only on pull-request builds (changeRequest() condition).
+        // PR teardown lives in a separate Jenkins job triggered by the GitHub
+        // "pull_request closed" webhook — see scripts/pr-preview-down.sh.
+        stage('Deploy → PR Preview') {
+            when {
+                changeRequest()
+            }
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+                    sh '''
+                        export KUBECONFIG=$KUBECONFIG_FILE
+                        ./scripts/pr-preview-up.sh ${CHANGE_ID}
+                    '''
+                }
+            }
+            post {
+                success {
+                    notifySlack("🌿 *PR Preview Ready* — PR #${CHANGE_ID}: https://preview-pr-${CHANGE_ID}.${APP_NAME}.internal")
+                }
+            }
+        }
+
+        // ─── STAGE 7: DOCKER BUILD & PUSH ────────────────────────────────────
         stage('Docker Build & Push') {
             steps {
                 script {
@@ -192,11 +254,27 @@ pipeline {
                         appImage.push('latest')
                         echo "🐳 Pushed ${FULL_IMAGE}"
                     }
+
+                    // Build 009 — point 13: generate SBOM and sign the image.
+                    sh """
+                        mkdir -p reports
+                        # Generate CycloneDX SBOM with syft
+                        syft "${FULL_IMAGE}" -o cyclonedx-json > reports/sbom.cdx.json
+                    """
+
+                    // Keyless cosign signing via OIDC (Sigstore / Fulcio + Rekor).
+                    // In production this requires the Jenkins agent to have a valid
+                    // OIDC token issued by a Fulcio-trusted OIDC provider.
+                    sh """
+                        COSIGN_EXPERIMENTAL=1 cosign sign --yes "${FULL_IMAGE}"
+                    """
+
+                    archiveArtifacts artifacts: 'reports/sbom.cdx.json', allowEmptyArchive: true
                 }
             }
         }
 
-        // ─── STAGE 6: DEPLOY TO STAGING ──────────────────────────────────────
+        // ─── STAGE 8: DEPLOY TO STAGING ──────────────────────────────────────
         stage('Deploy → Staging') {
             when { branch 'develop' }
             steps {
@@ -207,7 +285,7 @@ pipeline {
             }
         }
 
-        // ─── STAGE 7: PERFORMANCE TESTS (STAGING) ────────────────────────────
+        // ─── STAGE 9: PERFORMANCE TESTS (STAGING) ────────────────────────────
         stage('Performance Tests') {
             when { branch 'develop' }
             steps {
@@ -230,7 +308,7 @@ pipeline {
             }
         }
 
-        // ─── STAGE 8: DEPLOY TO PRODUCTION ───────────────────────────────────
+        // ─── STAGE 10: DEPLOY TO PRODUCTION ──────────────────────────────────
         stage('Deploy → Production') {
             when { branch 'main' }
             steps {
@@ -247,6 +325,35 @@ pipeline {
 
                     deployToKubernetes('production', FULL_IMAGE)
                     runSmokeTests('production')
+                }
+            }
+        }
+
+        // ─── STAGE 11: RELEASE ───────────────────────────────────────────────
+        // Build 009 — point 18: wire scripts/release.sh (added in Build 010).
+        // Triggered only when a vX.Y.Z annotated tag is pushed to origin.
+        // NOTE: the `gh` CLI must be available on the Jenkins agent (install via
+        // the agent Dockerfile or a tools{} block using a custom tool installer).
+        stage('Release') {
+            when {
+                buildingTag()
+                tag pattern: "v\\d+\\.\\d+\\.\\d+", comparator: "REGEXP"
+            }
+            steps {
+                // Re-tag the already-built image with the SemVer tag and push
+                sh '''
+                    docker tag ${FULL_IMAGE} ${DOCKER_REGISTRY}/${APP_NAME}:${TAG_NAME}
+                    docker push ${DOCKER_REGISTRY}/${APP_NAME}:${TAG_NAME}
+                '''
+                // Create a GitHub Release via gh CLI.
+                // gh requires a GitHub token; wrap in withCredentials so the
+                // token is available as GH_TOKEN without leaking into the log.
+                withCredentials([string(credentialsId: 'github-credentials', variable: 'GH_TOKEN')]) {
+                    sh '''
+                        gh release create ${TAG_NAME} \
+                          --title "Release ${TAG_NAME}" \
+                          --notes "Automated release for ${TAG_NAME}. See CHANGELOG.md for details."
+                    '''
                 }
             }
         }

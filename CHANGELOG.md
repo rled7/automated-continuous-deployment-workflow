@@ -2,6 +2,31 @@
 
 All notable file-level changes to this repo, tracked per build.
 
+## Build 009 — Supply-chain hardening + manifest validation + release/PR-preview wiring
+**Date:** 2026-05-06
+**Scope:** Phase C, plan points 13, 15; wiring of points 18 and 29
+
+### Added (Jenkinsfile stages)
+
+- **`Gitleaks`** (parallel branch inside `Code Quality & Security`) — runs `gitleaks detect` in SARIF mode; `|| true` makes it warn-only initially; comment notes this should be tightened to fail on CRITICAL findings once a baseline suppression list is established. Archives `reports/gitleaks.sarif`. Closes plan point 13 (secret scanning).
+- **`Validate Manifests`** (new top-level stage, after Build, before Test) — iterates every `k8s/overlays/*/` directory, renders each overlay with `kubectl kustomize`, and pipes through `kubeconform -strict -ignore-missing-schemas`. `-ignore-missing-schemas` is required because Argo Rollouts CRDs do not have schemas in the default kubeconform schema set. Archives `reports/kubeconform.txt`. Closes plan point 15 (manifest validation).
+- **`Deploy → PR Preview`** (new top-level stage, between Test and Docker Build & Push) — runs only on pull-request builds (`changeRequest()` condition); calls `scripts/pr-preview-up.sh ${CHANGE_ID}` (added in Build 011) via `withCredentials([file(...kubeconfig...)])`; posts Slack notification with the preview URL on success. Comment explains that PR teardown (`scripts/pr-preview-down.sh`) lives in a separate Jenkins job triggered by the GitHub "pull_request closed" webhook. Wires plan point 29.
+- **`Release`** (new top-level stage, at the end) — fires only when `buildingTag()` matches `v\d+\.\d+\.\d+`; re-tags the image with the SemVer tag and pushes it; creates a GitHub Release via `gh release create` wrapped in `withCredentials` for `github-credentials`; comment notes `gh` CLI must be available on the agent. Wires plan point 18 (completes the release-stage sketch from `docs/RELEASING.md` and `scripts/release.sh` added in Build 010).
+
+### Modified (Jenkinsfile stages)
+
+- **`Docker Build & Push`** — after `appImage.push()`: generates a CycloneDX SBOM with `syft "${FULL_IMAGE}" -o cyclonedx-json > reports/sbom.cdx.json`; signs the image keyless with `COSIGN_EXPERIMENTAL=1 cosign sign --yes "${FULL_IMAGE}"` (comment explains this requires a Fulcio + Rekor OIDC setup in production); archives `reports/sbom.cdx.json`. Closes plan point 13 (SBOM + image signing).
+
+### Closes (from broader plan)
+- Point 13: secret scanning (Gitleaks), SBOM generation (syft), image signing (cosign)
+- Point 15: Kubernetes manifest validation (kubeconform)
+
+### Wires (stages previously scripted in other builds, now live in Jenkinsfile)
+- Point 18: Release stage — completes the sketch from `docs/RELEASING.md` (Build 010); uses `scripts/release.sh` flow of tag → Docker re-tag → GitHub Release
+- Point 29: PR Preview stage — wires `scripts/pr-preview-up.sh` / `scripts/pr-preview-down.sh` added in Build 011; teardown job documented in comments
+
+---
+
 ## Build 012 — SLO + DORA + OpenTelemetry
 **Date:** 2026-05-06
 **Scope:** Phase C, plan points 22, 23, 24

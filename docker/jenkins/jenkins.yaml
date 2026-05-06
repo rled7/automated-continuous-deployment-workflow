@@ -154,3 +154,86 @@ jobs:
               }
           }
       }
+
+  # ── Build 015: PR preview teardown job ─────────────────────────────────────
+  # Triggered by a GitHub "pull_request closed" webhook via the
+  # Generic Webhook Trigger plugin (generic-webhook-trigger in plugins.txt).
+  # Webhook URL: http://JENKINS_URL/generic-webhook-trigger/invoke?token=pr-preview-teardown
+  # GitHub webhook payload filter: $.action == "closed" (configure in GitHub repo settings)
+  #
+  # The job reads CHANGE_ID from the webhook JSON body ($.number field).
+  # It then destroys the ephemeral PR preview namespace via pr-preview-down.sh.
+  - script: |
+      pipelineJob('pr-preview-teardown') {
+          description('Tears down the ephemeral PR preview environment when a GitHub PR is closed.')
+          parameters {
+              stringParam('CHANGE_ID', '', 'PR number from the GitHub pull_request closed webhook ($.number)')
+          }
+          // Generic Webhook Trigger receives the GitHub pull_request event and
+          // extracts $.number into CHANGE_ID automatically when configured with:
+          //   Variable: CHANGE_ID, Expression: $.number, Expression type: JSONPath
+          triggers {
+              genericTrigger {
+                  genericVariables {
+                      genericVariable {
+                          key('CHANGE_ID')
+                          value('$.number')
+                          expressionType('JSONPath')
+                      }
+                  }
+                  token('pr-preview-teardown')
+                  // Only fire when the pull_request action is "closed"
+                  genericHeaderVariables {
+                      genericHeaderVariable {
+                          key('x-github-event')
+                          regexpFilter('pull_request')
+                      }
+                  }
+                  regexpFilterText('$action')
+                  regexpFilterExpression('closed')
+              }
+          }
+          definition {
+              cps {
+                  script('''
+                      pipeline {
+                          agent {
+                              kubernetes {
+                                  label 'cicd-agent'
+                                  defaultContainer 'cicd'
+                              }
+                          }
+                          stages {
+                              stage('Teardown PR Preview') {
+                                  steps {
+                                      withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+                                          sh """
+                                              export KUBECONFIG=\\$KUBECONFIG_FILE
+                                              ./scripts/pr-preview-down.sh ${CHANGE_ID}
+                                          """
+                                      }
+                                  }
+                                  post {
+                                      success {
+                                          slackSend(
+                                              channel: '#deployments',
+                                              color: 'good',
+                                              message: "PR Preview #${CHANGE_ID} torn down — namespace pr-preview-${CHANGE_ID} deleted."
+                                          )
+                                      }
+                                      failure {
+                                          slackSend(
+                                              channel: '#deployments',
+                                              color: 'danger',
+                                              message: "WARNING: PR Preview #${CHANGE_ID} teardown FAILED — manual cleanup may be needed."
+                                          )
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  ''')
+                  sandbox(true)
+              }
+          }
+      }

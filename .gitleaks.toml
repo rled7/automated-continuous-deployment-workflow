@@ -1,0 +1,37 @@
+title = "my-app gitleaks config"
+
+# Extend the built-in default ruleset rather than replacing it.
+# The default rules cover common secret patterns (AWS keys, GitHub tokens,
+# Slack webhooks, generic high-entropy strings, etc.).
+[extend]
+useDefault = true
+
+# ── Allowlist ──────────────────────────────────────────────────────────────────
+# Add entries here to suppress known false positives instead of using `|| true`
+# in the Jenkinsfile.  Prefer path-based suppression over regex-based — it is
+# more surgical and easier to review.
+#
+# Format for regexes:
+#   regexes = [
+#     "EXAMPLE_PLACEHOLDER_[A-Z0-9]{20}",   # reason: test fixture, not a real key
+#   ]
+#
+# Format for paths (Go regex):
+#   paths = [
+#     "path/to/file\\.ext",
+#   ]
+[allowlist]
+  description = "Repo-level false-positive suppressions for my-app"
+
+  # Regex allowlist — currently empty; add patterns here when gitleaks flags
+  # test fixtures, example config values, or documentation snippets.
+  regexes = []
+
+  # Path allowlist — files that are known to contain high-entropy strings that
+  # are NOT secrets (e.g. lockfiles with integrity hashes, test files with
+  # base64 payloads, and this config file itself).
+  paths = [
+    "app/package-lock\\.json",
+    "tests/.*\\.test\\.js",
+    "\\.gitleaks\\.toml$",
+  ]

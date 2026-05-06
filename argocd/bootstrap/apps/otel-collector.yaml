@@ -46,34 +46,31 @@ spec:
               limit_mib: 100
 
           exporters:
-            # TODO: replace with otlp exporter pointing at Grafana Tempo once
-            # Tempo is added to the bootstrap stack (planned for a future build).
-            # Example config when Tempo is installed in the monitoring namespace:
-            #   otlp:
-            #     endpoint: "tempo.monitoring.svc.cluster.local:4317"
-            #     tls:
-            #       insecure: true
-            #
-            # For now, export to the logging exporter so traces are visible in
-            # collector logs — useful for verifying the pipeline end-to-end on kind.
-            logging:
-              verbosity: detailed
+            # Build 015: replaced the logging stub with a real OTLP/gRPC exporter
+            # pointing at Grafana Tempo (tempo.yaml added in the same build).
+            # tls.insecure is acceptable for intra-cluster traffic; terminate TLS
+            # at the ingress layer if Tempo is exposed externally.
+            # The collector retries automatically if Tempo is not yet ready on
+            # first sync — no explicit Argo CD dependsOn is required.
+            otlp:
+              endpoint: "tempo.monitoring.svc.cluster.local:4317"
+              tls:
+                insecure: true
 
           service:
             pipelines:
               traces:
                 receivers: [otlp]
                 processors: [memory_limiter, batch]
-                # Stub exporter: logging only until Tempo is available.
-                exporters: [logging]
+                exporters: [otlp]
               metrics:
                 receivers: [otlp]
                 processors: [memory_limiter, batch]
-                exporters: [logging]
+                exporters: [otlp]
               logs:
                 receivers: [otlp]
                 processors: [memory_limiter, batch]
-                exporters: [logging]
+                exporters: [otlp]
 
         # Expose OTLP ports as a ClusterIP service so in-cluster apps can reach the collector.
         service:

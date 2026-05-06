@@ -84,12 +84,14 @@ pipeline {
                             cd app
                             mkdir -p reports/dependency-check
                             # OWASP Dependency Check
+                            # Build 015: --failOnCVSS tightened from 8 to 7 to match
+                            # the Trivy HIGH threshold (CVSS 7.0 == HIGH boundary).
                             dependency-check.sh \
                               --project "${APP_NAME}" \
                               --scan . \
                               --format "HTML" \
                               --out reports/dependency-check \
-                              --failOnCVSS 8
+                              --failOnCVSS 7
                         '''
                     }
                     post {
@@ -113,14 +115,15 @@ pipeline {
                         recordIssues(tools: [esLint(pattern: 'app/reports/eslint.xml')])
                     }
                 }
-                // Build 009 — point 13: secret scanning via gitleaks.
-                // || true makes this warn-only for now; tighten to fail on
-                // CRITICAL findings once a baseline suppression list is established.
+                // Build 015: Gitleaks now fails the stage on any finding.
+                // Manage false positives via .gitleaks.toml (allowlist.regexes /
+                // allowlist.paths). The repo root .gitleaks.toml extends the
+                // default ruleset — add entries there, not via || true.
                 stage('Gitleaks') {
                     steps {
                         sh '''
                             mkdir -p reports
-                            gitleaks detect --source . --report-format sarif --report-path reports/gitleaks.sarif --redact || true
+                            gitleaks detect --source . --report-format sarif --report-path reports/gitleaks.sarif --redact
                         '''
                     }
                     post {
@@ -250,8 +253,11 @@ pipeline {
                     docker.withRegistry("https://${registryUrl}", 'docker-registry-credentials') {
                         def appImage = docker.build("${FULL_IMAGE}", "-f docker/Dockerfile .")
 
-                        // Container image vulnerability scan (Trivy)
-                        sh "trivy image --exit-code 1 --severity HIGH,CRITICAL ${FULL_IMAGE} || true"
+                        // Build 015: Trivy now fails the stage on HIGH/CRITICAL CVEs.
+                        // Escape hatch: add CVE IDs to .trivyignore with a justification
+                        // and expiry date (format: # CVE-2024-XXXX  # reason, expiry: YYYY-MM-DD).
+                        // .trivyignore is automatically picked up by trivy via --ignorefile.
+                        sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --ignorefile .trivyignore ${FULL_IMAGE}"
 
                         appImage.push()
                         appImage.push('latest')
@@ -326,8 +332,73 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
+                    // Build 015 — DORA: capture build start epoch and git author date
+                    // for lead-time computation in post.success below.
+                    // Approximation: lead time = build start − git committer date of HEAD.
+                    // A more precise measure would use the first commit on the branch
+                    // (git log --reverse origin/main..HEAD), but that requires the full
+                    // history fetch depth. Using committer date of HEAD is a pragmatic
+                    // lower-bound estimate that is always available in a shallow clone.
+                    env.DEPLOY_BUILD_START = sh(
+                        script: "date +%s",
+                        returnStdout: true
+                    ).trim()
+                    env.GIT_COMMIT_EPOCH = sh(
+                        script: 'git log -1 --format=%ct',
+                        returnStdout: true
+                    ).trim()
+
                     deployToKubernetes('production', FULL_IMAGE)
                     runSmokeTests('production')
+                }
+            }
+            post {
+                success {
+                    script {
+                        // ── DORA: Deployment Frequency ─────────────────────
+                        // +1 counter for every successful production deploy.
+                        pushDoraMetric('deployment_frequency_total', '1')
+
+                        // ── DORA: Lead Time for Changes ────────────────────
+                        // Approximation: time from the HEAD commit's author date
+                        // to this deploy. See comment in steps block above.
+                        def leadTime = sh(
+                            script: "echo \$((${env.DEPLOY_BUILD_START} - ${env.GIT_COMMIT_EPOCH}))",
+                            returnStdout: true
+                        ).trim()
+                        pushDoraMetric('lead_time_seconds', leadTime)
+
+                        // ── DORA: MTTR ─────────────────────────────────────
+                        // Walk back through previousBuild history to find the
+                        // most recent failed production build and compute the
+                        // elapsed seconds from that failure to this success.
+                        // If no previous failure is found, push 0 (no outage).
+                        def prevBuild = currentBuild.previousBuild
+                        def failedBuildTs = null
+                        while (prevBuild != null) {
+                            if (prevBuild.result == 'FAILURE') {
+                                // getTimeInMillis() returns epoch-ms; convert to seconds
+                                failedBuildTs = (prevBuild.getTimeInMillis() / 1000).toLong()
+                                break
+                            }
+                            prevBuild = prevBuild.previousBuild
+                        }
+                        if (failedBuildTs != null) {
+                            def mttrSeconds = (System.currentTimeMillis() / 1000).toLong() - failedBuildTs
+                            pushDoraMetric('mttr_seconds', mttrSeconds.toString())
+                        } else {
+                            // No previous failure found in build history — MTTR not applicable.
+                            pushDoraMetric('mttr_seconds', '0')
+                        }
+                    }
+                }
+                failure {
+                    script {
+                        // ── DORA: Change Failure Rate ──────────────────────
+                        // +1 whenever a production deploy fails (auto-rollback
+                        // will fire in the top-level post.failure block).
+                        pushDoraMetric('change_failure_total', '1')
+                    }
                 }
             }
         }
@@ -455,4 +526,19 @@ def getEnvironment() {
     if (branch == 'main') return 'production'
     if (branch == 'develop') return 'staging'
     return 'development'
+}
+
+// ── DORA: push a single metric to the Prometheus Pushgateway ─────────────────
+// The Pushgateway is unauthenticated by default (no withCredentials needed).
+// If you add basic-auth via --web.config.file, wrap the curl with
+//   withCredentials([usernamePassword(credentialsId:'pushgateway-auth', ...)]).
+// URL format: /metrics/job/<job>/instance/<instance>
+//   job      = "jenkins"   (groups all Jenkins pushes together in Prometheus)
+//   instance = JOB_NAME-BUILD_NUMBER (unique per build for cardinality control)
+def pushDoraMetric(String metric, String value) {
+    sh """
+        curl -sf --data-binary '${metric}{job="jenkins",instance="${env.JOB_NAME}-${env.BUILD_NUMBER}"} ${value}\\n' \
+            http://prometheus-pushgateway.monitoring.svc.cluster.local:9091/metrics/job/jenkins/instance/${env.JOB_NAME}-${env.BUILD_NUMBER} \
+            || echo "WARN: pushgateway push failed for ${metric} — continuing"
+    """
 }

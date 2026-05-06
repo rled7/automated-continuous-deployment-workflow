@@ -1,0 +1,84 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: promtail
+  namespace: argocd
+  annotations:
+    # Wave 0: install alongside Loki (loki-stack.yaml is also wave 0).
+    # Promtail will retry the Loki push endpoint until Loki is ready.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: promtail
+    targetRevision: "6.16.6"
+    helm:
+      valuesObject:
+        # ── Loki push endpoint ────────────────────────────────────────────────
+        config:
+          clients:
+            - url: http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+
+          # ── Pipeline stages ─────────────────────────────────────────────────
+          # Parse pino (structured JSON) logs so that `level`, `msg`, and
+          # `req.id` are promoted to Loki labels / structured metadata.
+          # This enables label-based filtering in Grafana Explore / LogQL:
+          #   {namespace="production", level="error"}
+          #
+          # PRODUCTION NOTE: high-cardinality labels (e.g. req.id) should NOT
+          # be added as Loki labels — they balloon index size.  Use
+          # `structured_metadata` (Loki 3.x) or a `logfmt` / `template` stage
+          # to embed them as log-line fields instead.  For very high throughput,
+          # consider replacing Promtail with Vector (VRL remap + Loki sink) —
+          # see docs/log-aggregation.md for a comparison.
+          snippets:
+            pipelineStages:
+              - docker: {}
+              - json:
+                  expressions:
+                    level: level
+                    msg: msg
+                    req_id: '"req.id"'
+              - labels:
+                  level:
+                  msg:
+              # req.id is high-cardinality — store as a log-line field, not a label
+              - output:
+                  source: msg
+
+        # ── DaemonSet: collect logs from every node ───────────────────────────
+        # Default mode is DaemonSet. Each node's /var/log/pods is mounted and
+        # all pod logs are discovered automatically via the default scrape config.
+        daemonset:
+          enabled: true
+
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+
+        # ── Tolerations ───────────────────────────────────────────────────────
+        # Tolerate control-plane taints so logs from system pods are collected.
+        tolerations:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+            effect: NoSchedule
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

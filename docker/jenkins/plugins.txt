@@ -47,3 +47,9 @@ timestamper:latest
 ansicolor:latest
 ws-cleanup:latest
 build-timeout:latest
+
+# ── Webhook triggers (Build 015) ──────────────────────────────────────────────
+# Required by the pr-preview-teardown job (JCasC jobs block in jenkins.yaml).
+# Exposes /generic-webhook-trigger/invoke which receives GitHub pull_request
+# closed events and fires the teardown pipeline with CHANGE_ID extracted via JSONPath.
+generic-webhook-trigger:latest

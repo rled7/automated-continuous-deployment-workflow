@@ -1,0 +1,17 @@
+# .trivyignore — Trivy CVE suppression list for my-app
+#
+# Add CVE IDs here (one per line) to suppress specific findings that have been
+# reviewed and accepted as non-exploitable in this context.
+#
+# Format:
+#   CVE-YYYY-NNNNN  # short justification; expiry: YYYY-MM-DD
+#
+# Example:
+#   CVE-2024-12345  # only affects the foo feature which we do not use; expiry: 2025-06-01
+#
+# IMPORTANT:
+#   - Always include a justification comment and a review-by date.
+#   - Re-evaluate suppressed CVEs on their expiry date — remove stale entries.
+#   - Never suppress CRITICAL CVEs without security team sign-off.
+#   - Trivy picks up this file automatically when --ignorefile .trivyignore is passed
+#     (see the Docker Build & Push stage in Jenkinsfile).

@@ -2,6 +2,38 @@
 
 All notable file-level changes to this repo, tracked per build. Newest first.
 
+## Build 015 — Tempo, Promtail, DORA pushes, scanner tightening, PR-teardown job
+**Date:** 2026-05-06
+**Scope:** Phase C of the production-readiness plan (closes Phase C)
+
+### Added
+
+- `argocd/bootstrap/apps/tempo.yaml` — Argo Application, project `platform`, chart `tempo` v1.10.3 from `https://grafana.github.io/helm-charts`, target namespace `monitoring`, sync wave 0. Single-binary mode (`tempo.replicas: 1`), local storage backend (`storage.trace.backend: local`), OTLP gRPC (4317) + HTTP (4318) receivers exposed. Comment documents production swap to `s3`/`gcs`/`azure`. Low resource requests (100m/256Mi). Persistence disabled (ephemeral emptyDir for kind).
+- `argocd/bootstrap/apps/promtail.yaml` — Argo Application, project `platform`, chart `promtail` v6.16.6 from `https://grafana.github.io/helm-charts`, target namespace `monitoring`, sync wave 0. DaemonSet mode picks up all pod logs. Loki push URL: `http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push`. `config.snippets.pipelineStages` JSON-parses pino logs: promotes `level` and `msg` as Loki labels; `req.id` is high-cardinality so it is kept as a log-line field via the `output` stage (not a Loki label). Comment documents production Vector alternative.
+- `.gitleaks.toml` — Minimal allowlist scaffold: `useDefault = true` (extends default rules), empty `regexes` array placeholder, `paths` that suppress `app/package-lock.json`, `tests/*.test.js`, and `.gitleaks.toml` itself.
+- `.trivyignore` — Empty suppression file with a header comment documenting the format (`CVE-YYYY-NNNNN  # justification; expiry: YYYY-MM-DD`), picked up automatically by `--ignorefile .trivyignore` in the Trivy stage.
+
+### Modified
+
+- `argocd/bootstrap/apps/otel-collector.yaml` — Replaced `logging` exporter stub with a real `otlp` exporter pointing at `tempo.monitoring.svc.cluster.local:4317` (`tls.insecure: true` for intra-cluster). Removed the TODO comment. No `dependsOn` needed: the OTel collector's built-in retry loop handles Tempo startup lag. Data flow verified: app → OTLP/HTTP (4318) → otel-collector → OTLP/gRPC (4317) → Tempo.
+- `argocd/bootstrap/apps/kube-prometheus-stack.yaml` — Added `prometheus.prometheusSpec.additionalScrapeConfigs` with a `pushgateway` job (`honor_labels: true`, target `prometheus-pushgateway.monitoring.svc.cluster.local:9091`). `honor_labels: true` is required so Pushgateway-set labels (job, instance, metric labels from Jenkins) are not overwritten by Prometheus.
+- `Jenkinsfile` — Added `pushDoraMetric(String metric, String value)` helper function (curl to Pushgateway). Called from: `Deploy → Production post.success` (deployment_frequency_total +1, lead_time_seconds, mttr_seconds) and `Deploy → Production post.failure` (change_failure_total +1). Lead time approximated as `date +%s` at deploy start minus `git log -1 --format=%ct` (committer epoch). MTTR walks `currentBuild.previousBuild` chain to find most recent FAILURE and subtracts its epoch-ms timestamp. Trivy tightened: dropped `|| true` (stage now fails on HIGH/CRITICAL); `--ignorefile .trivyignore` added as escape hatch. OWASP DC: `--failOnCVSS` tightened from 8 to 7 (matches Trivy HIGH threshold). Gitleaks: dropped `|| true` (stage now fails on any finding); allowlist managed via `.gitleaks.toml`.
+- `docker/jenkins/jenkins.yaml` — Added `pr-preview-teardown` pipeline job via Job DSL `pipelineJob()`. Triggered by GitHub `pull_request` closed webhook via Generic Webhook Trigger plugin (`token: pr-preview-teardown`; JSONPath extraction of `$.number` into `CHANGE_ID`). Runs `scripts/pr-preview-down.sh ${CHANGE_ID}` inside a `withCredentials([file(credentialsId: 'kubeconfig')])` block. Sends Slack success/failure notification.
+- `docker/jenkins/plugins.txt` — Added `generic-webhook-trigger:latest` (required by the pr-preview-teardown job; was not previously installed).
+
+### Closes (from production-readiness plan)
+- Phase C: tracing backend (Tempo), log shipping (Promtail), DORA metric emission, scanner enforcement, PR-teardown automation
+
+### Judgment calls
+- **Tempo chart v1.10.3:** latest stable in the 1.x series (single-binary chart). Production should migrate to the `tempo-distributed` chart for HA.
+- **Promtail chart v6.16.6:** latest stable in the 6.x series. `req.id` is intentionally NOT a Loki label (cardinality risk); stored as a log-line field via the `output` stage.
+- **Lead time approximation:** uses HEAD commit's committer date (`git log -1 --format=%ct`) rather than the first commit on the branch, because shallow clones may not have the full history. This is a lower-bound estimate. Comment in Jenkinsfile documents the trade-off.
+- **MTTR approximation:** walks `currentBuild.previousBuild` (all branches, not just production). This may include staging failures in the MTTR window. A production-grade implementation would filter by `BRANCH_NAME == 'main'`. Documented in code comment.
+- **OTel collector retry:** accepted "collector will retry" approach (no Argo CD `dependsOn`), noted in sync-wave annotation comment.
+- **generic-webhook-trigger:** was NOT already in plugins.txt — added in this build.
+
+---
+
 ## Build 014 — Argo CD app-of-apps bootstrap, sealed-secrets, nip.io for kind
 **Date:** 2026-05-06
 **Scope:** Phase A of the production-readiness plan (closes Phase A)

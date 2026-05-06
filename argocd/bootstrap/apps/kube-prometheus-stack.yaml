@@ -40,6 +40,16 @@ spec:
             # Retain 24 h of data in kind (default 10d consumes too much disk).
             retention: 24h
 
+            # ── Pushgateway scrape config (Build 015) ─────────────────────────
+            # honor_labels: true preserves the job/instance labels pushed by
+            # Jenkins so Prometheus does not overwrite them with its own values.
+            # This is required for DORA metrics pushed from the Jenkinsfile.
+            additionalScrapeConfigs:
+              - job_name: pushgateway
+                honor_labels: true
+                static_configs:
+                  - targets: ['prometheus-pushgateway.monitoring.svc.cluster.local:9091']
+
         # ── Alertmanager ─────────────────────────────────────────────────────
         alertmanager:
           alertmanagerSpec:

@@ -6,6 +6,10 @@ namespace: production
 resources:
   - ../../base
   - namespace.yaml
+  # Argo Rollout replaces the base Deployment in production.
+  # deployment-removal.yaml (below) deletes the base Deployment via $patch: delete.
+  - rollout-patch.yaml
+  - analysis-template.yaml
 
 images:
   - name: my-app
@@ -13,7 +17,8 @@ images:
     newTag: latest
 
 patches:
-  - path: deployment-patch.yaml
+  # Delete the base Deployment — production uses the Rollout above instead.
+  - path: deployment-removal.yaml
     target:
       kind: Deployment
       name: my-app

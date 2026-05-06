@@ -2,6 +2,39 @@
 
 All notable file-level changes to this repo, tracked per build.
 
+## Build 011 — GitOps, progressive delivery, PR previews, local dev
+**Date:** 2026-05-06
+**Scope:** Phase C, plan points 17, 26, 27, 29
+
+### Added
+
+- `argocd/AppProject.yaml` — Argo CD `AppProject` named `my-app`; allows source repo `rled7/automated-continuous-deployment-workflow`; permits destinations for `production`, `staging`, and `preview-*` namespaces; grants `ci-deployer` role sync+get access.
+- `argocd/Application-production.yaml` — Argo CD `Application` tracking `k8s/overlays/production`; automated sync with `prune: true` + `selfHeal: true`; `ignoreDifferences` for `Rollout.spec.replicas` to avoid HPA conflicts.
+- `argocd/Application-staging.yaml` — same shape as production but tracks `k8s/overlays/staging` and deploys to the `staging` namespace.
+- `argocd/README.md` — bootstrap guide: install Argo CD via kubectl, apply the manifests, access the UI, and overview of the application/namespace layout.
+- `k8s/overlays/production/rollout-patch.yaml` — Argo `Rollout` resource replacing the base Deployment in production; canary strategy with steps: setWeight 25% → pause 2m → analysis → setWeight 50% → pause 2m → analysis → setWeight 100%.
+- `k8s/overlays/production/analysis-template.yaml` — `AnalysisTemplate` named `success-rate`; queries Prometheus for HTTP 5xx error rate every 30 s; requires ≥ 0.99 success rate; fails after 3 consecutive failures.
+- `k8s/overlays/production/deployment-removal.yaml` — strategic-merge patch with `$patch: delete` that removes the base `Deployment/my-app` from the production overlay so the Rollout can take over as workload controller.
+- `scripts/pr-preview-up.sh` — creates namespace `preview-pr-<PR_NUMBER>`, labels it, builds the staging kustomize overlay, rewrites namespace via `sed`, and applies into the preview namespace; `set -euo pipefail`.
+- `scripts/pr-preview-down.sh` — deletes namespace `preview-pr-<PR_NUMBER>` and all resources within it; idempotent (no-op if namespace doesn't exist).
+- `docs/pr-preview.md` — explains the PR preview flow, namespace lifecycle table, Argo CD scoping, manual usage, Jenkinsfile stage sketch (Build 009 will wire in), and limitations/future improvements.
+- `skaffold.yaml` — Skaffold v4beta11 config: builds `my-app` image from `app/` with `docker/Dockerfile`, deploys staging overlay via kustomize, hot-syncs `app/src/**/*.js` changes into running container, port-forwards service port 3000 → localhost:3000.
+- `docs/local-dev.md` — local dev guide: prerequisites table, quick-start commands, Skaffold command reference, file-sync hot-reload explanation, Skaffold vs Argo CD inner-loop/outer-loop comparison.
+
+### Modified
+
+- `k8s/overlays/production/kustomization.yaml` — added `rollout-patch.yaml` and `analysis-template.yaml` as resources; added `deployment-removal.yaml` as a `$patch: delete` strategic-merge patch targeting `Deployment/my-app`.
+
+### Kustomize technique for Rollout vs Deployment swap
+
+A `deployment-removal.yaml` strategic-merge patch with `$patch: delete` is applied via the `patches` stanza targeting `kind: Deployment, name: my-app`. This removes the base Deployment from the production manifest stream. `rollout-patch.yaml` is then added as a standalone resource. This avoids requiring `kustomize` to understand Argo Rollout CRDs and keeps both files clearly separated.
+
+### Closes (from broader plan)
+- Point 17: local dev loop (Skaffold)
+- Point 26: Argo CD GitOps setup
+- Point 27: Argo Rollouts canary progressive delivery
+- Point 29: PR preview environments
+
 ## Build 010 — repo governance + automation
 **Date:** 2026-05-06
 **Scope:** Phase C, plan points 14, 16, 18, 25

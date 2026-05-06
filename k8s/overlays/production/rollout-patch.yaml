@@ -1,0 +1,82 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: my-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      terminationGracePeriodSeconds: 60
+      imagePullSecrets:
+        - name: registry-credentials
+      containers:
+        - name: my-app
+          image: my-app:latest
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          envFrom:
+            - configMapRef:
+                name: my-app-config
+            - secretRef:
+                name: my-app-secrets
+          env:
+            - name: NODE_ENV
+              value: production
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+  strategy:
+    canary:
+      # Step 1: send 25% of traffic to the new version
+      steps:
+        - setWeight: 25
+        - pause:
+            duration: 2m
+        - analysis:
+            templates:
+              - templateName: success-rate
+        # Step 2: ramp to 50%
+        - setWeight: 50
+        - pause:
+            duration: 2m
+        - analysis:
+            templates:
+              - templateName: success-rate
+        # Step 3: promote to 100%
+        - setWeight: 100

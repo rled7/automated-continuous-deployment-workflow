@@ -285,11 +285,10 @@ def deployToKubernetes(String namespace, String image) {
         sh """
             export KUBECONFIG=\${KUBECONFIG}
 
-            # Substitute image tag in manifests
-            sed -i 's|IMAGE_PLACEHOLDER|${image}|g' k8s/${namespace}/*.yaml
-
-            # Apply manifests (rolling update)
-            kubectl apply -f k8s/${namespace}/ --namespace=${namespace}
+            # Set the image in the Kustomize overlay and apply
+            cd k8s/overlays/${namespace}
+            kustomize edit set image my-app=${image}
+            kubectl apply -k . --namespace=${namespace}
 
             # Wait for rollout to complete (timeout 5 min)
             kubectl rollout status deployment/${APP_NAME} \

@@ -21,3 +21,6 @@ reports/
 # IDE folders
 .vscode/
 .idea/
+
+# Claude Code worktrees / agent state
+.claude/

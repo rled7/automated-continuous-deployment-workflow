@@ -1,9 +1,12 @@
 pipeline {
-    agent any
-
-    // Bug 4 fix: declare NodeJS-20 tool so npm/node are on PATH on the agent
-    tools {
-        nodejs 'NodeJS-20'
+    // Build 013: agents come from the custom Jenkins agent image (docs/agent-image.md).
+    // The image bundles node, kubectl, kustomize, kubeconform, gitleaks, syft, cosign,
+    // trivy, dependency-check.sh, k6, and gh — so no `tools {}` block is needed.
+    agent {
+        kubernetes {
+            label 'cicd-agent'
+            defaultContainer 'cicd'
+        }
     }
 
     environment {

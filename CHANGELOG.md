@@ -2,6 +2,29 @@
 
 All notable file-level changes to this repo, tracked per build. Newest first.
 
+## Build 013 — Custom Jenkins agent image
+**Date:** 2026-05-06
+**Scope:** Phase B of the production-readiness plan
+
+### Added
+
+- `docker/jenkins-agent/Dockerfile` — custom agent image based on `jenkins/inbound-agent:latest-jdk17`. Bundles every CLI the Jenkinsfile invokes (node 20, kubectl, kustomize, kubeconform, gitleaks, syft, cosign, trivy, OWASP dependency-check, k6, gh) at pinned versions exposed as `ENV` vars. Final `RUN` is a sanity check that fails the build if any tool isn't on PATH.
+- `docker/jenkins-agent/.dockerignore` — explicit `*` + `!Dockerfile` so the build context is just the Dockerfile.
+- `docs/agent-image.md` — build / push / use guide; covers tagging, multi-arch caveats, docker-socket vs kaniko trade-off, image-size note, local sanity-check command.
+
+### Modified
+
+- `docker/jenkins/jenkins.yaml` — added a `jenkins.clouds.kubernetes` block with a `cicd-agent` pod template that references the custom image (placeholder `ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest` — bump to a pinned tag in production). Pod template requests 500m/1Gi, limits 2/4Gi, mounts `/var/run/docker.sock` for the existing `docker.build` calls.
+- `Jenkinsfile` — replaced top-level `agent any` with `agent { kubernetes { label 'cicd-agent', defaultContainer 'cicd' } }`. Removed the `tools { nodejs 'NodeJS-20' }` block — the custom agent has node baked in.
+
+### Closes (from production-readiness plan)
+- Phase B: tooling assumed on the Jenkins agent (every CLI now bundled in the image)
+
+### Caveats
+- Image is amd64-only; switch to `docker buildx build --platform linux/amd64,linux/arm64` if Jenkins runs on arm64.
+- Docker socket is mounted; production should switch to kaniko or buildah and remove the mount.
+- Image is large (~1.5 GB) — acceptable for CI agents, not for production workloads.
+
 ## Build 009 — Supply-chain hardening + manifest validation + release/PR-preview wiring
 **Date:** 2026-05-06
 **Scope:** Phase C, plan points 13, 15; wiring of points 18 and 29

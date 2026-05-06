@@ -1,0 +1,3 @@
+# Build context for the agent image is just this directory, but be explicit.
+*
+!Dockerfile

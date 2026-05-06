@@ -39,6 +39,52 @@ jenkins:
           - key: DOCKER_REGISTRY
             value: "localhost:5000"
 
+  # ── Kubernetes cloud: spawns pods from the custom agent image (Build 013) ──
+  # The image bundles every CLI the Jenkinsfile invokes. See docs/agent-image.md.
+  clouds:
+    - kubernetes:
+        name: "kubernetes"
+        serverUrl: "https://kubernetes.default.svc"
+        namespace: "jenkins"
+        jenkinsUrl: "http://jenkins.jenkins.svc.cluster.local:8080"
+        jenkinsTunnel: "jenkins-agent.jenkins.svc.cluster.local:50000"
+        connectTimeout: 30
+        readTimeout: 30
+        containerCapStr: "10"
+        templates:
+          - name: "cicd-agent"
+            label: "cicd-agent"
+            namespace: "jenkins"
+            serviceAccount: "jenkins-agent"
+            yaml: |
+              apiVersion: v1
+              kind: Pod
+              spec:
+                containers:
+                  - name: cicd
+                    image: "ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest"
+                    imagePullPolicy: Always
+                    command:
+                      - sleep
+                    args:
+                      - infinity
+                    tty: true
+                    resources:
+                      requests:
+                        cpu: "500m"
+                        memory: "1Gi"
+                      limits:
+                        cpu: "2"
+                        memory: "4Gi"
+                    volumeMounts:
+                      - name: docker-sock
+                        mountPath: /var/run/docker.sock
+                volumes:
+                  - name: docker-sock
+                    hostPath:
+                      path: /var/run/docker.sock
+                      type: Socket
+
 credentials:
   system:
     domainCredentials:

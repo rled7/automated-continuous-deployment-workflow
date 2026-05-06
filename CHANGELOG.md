@@ -2,6 +2,29 @@
 
 All notable file-level changes to this repo, tracked per build.
 
+## Build 010 — repo governance + automation
+**Date:** 2026-05-06
+**Scope:** Phase C, plan points 14, 16, 18, 25
+
+### Added
+
+- `.github/CODEOWNERS` — default reviewer `@rled7`; explicit ownership for `Jenkinsfile`, `docker/`, `k8s/`, `monitoring/`, `scripts/` (platform team placeholder) and `app/`, `tests/` (app team placeholder).
+- `.github/PULL_REQUEST_TEMPLATE.md` — standardised PR template: Summary, Changes, Test plan checklist, Risk + rollback plan, Linked issues, Screenshots section.
+- `.github/ISSUE_TEMPLATE/bug.md` — bug-report template with frontmatter (`name`, `about`, `labels: bug`) and sections for description, reproduction steps, expected/actual behaviour, environment, and additional context.
+- `.github/ISSUE_TEMPLATE/feature.md` — feature-request template with frontmatter (`name`, `about`, `labels: enhancement`) and sections for problem, proposed solution, alternatives, and acceptance criteria.
+- `SECURITY.md` — vulnerability disclosure policy: supported versions table, private reporting via GHSA or email, response timeline (acknowledge 48h, fix critical in 7 days), and coordinated disclosure commitment.
+- `CONTRIBUTING.md` — concise contributor guide: setup (references `scripts/setup.sh`), branch model (`feature/* → develop → main`), Conventional Commits style, PR process, test commands with coverage thresholds, and code-review norms.
+- `docs/runbook.md` — operational runbook: quick links (Jenkins, Grafana, Slack, on-call), alert playbooks for all four Prometheus alerts (`HighErrorRate`, `HighResponseTime`, `AppDown`, `PodRestartingFrequently`), automatic and manual rollback procedures, hotfix procedure, escalation matrix, and production-access policy.
+- `docs/RELEASING.md` — release flow guide: SemVer overview, `scripts/release.sh` usage, manual release steps, Jenkinsfile release stage sketch (not yet live), changelog and hotfix release notes.
+- `.github/dependabot.yml` — weekly Dependabot updates for `npm` (`/app`, `/tests`), `docker` (`/docker`), and `github-actions` (`/`); minor+patch updates grouped per ecosystem.
+- `scripts/release.sh` — release helper: validates `MAJOR.MINOR.PATCH` version argument, bumps `app/package.json` via `node -e`, commits `chore(release): vX.Y.Z`, creates annotated tag; prints `git push --follow-tags` for manual review before push.
+
+### Closes (from broader plan)
+- Point 14: CODEOWNERS + PR / issue templates
+- Point 16: SECURITY.md + CONTRIBUTING.md
+- Point 18: operational runbook
+- Point 25: Dependabot + release script
+
 ## Build 001 — File layout cleanup
 **Date:** 2026-05-05
 **Scope:** Phase A, Task 1

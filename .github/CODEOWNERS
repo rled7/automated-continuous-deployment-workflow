@@ -1,0 +1,17 @@
+# CODEOWNERS
+# Each line is a file pattern followed by one or more owners.
+# Order matters: the last matching pattern takes precedence.
+
+# Default — any file not matched below
+*                           @rled7
+
+# Platform / infrastructure
+Jenkinsfile                 @rled7
+docker/                     @rled7
+k8s/                        @rled7
+monitoring/                 @rled7
+scripts/                    @rled7
+
+# Application + tests
+app/                        @rled7
+tests/                      @rled7

@@ -1,0 +1,85 @@
+---
+# ─── Prometheus Pushgateway ────────────────────────────────────────────────────
+# The Pushgateway receives short-lived metrics pushed from CI/CD jobs (Jenkinsfile
+# stages) that cannot be scraped directly.  DORA metrics are the primary use-case:
+#   - deployment_timestamp_seconds{env, version}  → deployment frequency / MTTR
+#   - deployment_result{env, version, result}     → change failure rate
+#   - lead_time_seconds{env, version}             → lead time for changes
+#
+# Prometheus scrapes the Pushgateway at /metrics like any other target.
+# Add the following job to prometheus.yml scrape_configs to collect these metrics:
+#
+#   - job_name: 'pushgateway'
+#     honor_labels: true
+#     static_configs:
+#       - targets: ['pushgateway:9091']
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pushgateway
+  namespace: monitoring
+  labels:
+    app: pushgateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pushgateway
+  template:
+    metadata:
+      labels:
+        app: pushgateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+    spec:
+      containers:
+        - name: pushgateway
+          image: prom/pushgateway:v1.9.0
+          args:
+            - --web.listen-address=:9091
+            - --web.telemetry-path=/metrics
+            # Persist groups across pod restarts (ephemeral by default)
+            # Uncomment and mount a PVC to enable persistence:
+            # - --persistence.file=/data/pushgateway.dump
+            # - --persistence.interval=5m
+          ports:
+            - containerPort: 9091
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9091
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9091
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pushgateway
+  namespace: monitoring
+  labels:
+    app: pushgateway
+spec:
+  selector:
+    app: pushgateway
+  ports:
+    - name: http
+      port: 9091
+      targetPort: 9091
+  type: ClusterIP

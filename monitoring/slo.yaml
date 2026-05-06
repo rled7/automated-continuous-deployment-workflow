@@ -1,0 +1,133 @@
+# SLO definitions — OpenSLO v1 format
+# Ref: https://openslo.com/
+# Evaluated by sloth / Pyrra / or read manually; kept here as the single source
+# of truth for SLO targets so Prometheus recording rules and burn-rate alerts
+# stay in sync with documented commitments.
+
+---
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: http-availability
+  displayName: HTTP Availability
+  labels:
+    team: platform
+    service: my-app
+spec:
+  description: >-
+    99.9 % of all HTTP responses must be non-5xx, evaluated over a rolling
+    30-day window. Measured via the http_request_duration_ms_count metric
+    exported by prom-client.
+  service: my-app
+  indicator:
+    metadata:
+      name: availability-ratio
+      displayName: HTTP Availability Ratio
+    spec:
+      ratioMetric:
+        counter: true
+        good:
+          metricSource:
+            type: Prometheus
+            spec:
+              query: >-
+                sum(rate(http_request_duration_ms_count{status_code!~"5.."}[5m]))
+        total:
+          metricSource:
+            type: Prometheus
+            spec:
+              query: >-
+                sum(rate(http_request_duration_ms_count[5m]))
+  timeWindow:
+    - duration: 30d
+      isRolling: true
+  budgetingMethod: Occurrences
+  objectives:
+    - displayName: "99.9% availability"
+      target: 0.999
+
+---
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: http-latency-p95
+  displayName: HTTP P95 Latency
+  labels:
+    team: platform
+    service: my-app
+spec:
+  description: >-
+    95th percentile of HTTP request latency must be < 500 ms, evaluated over
+    a rolling 30-day window. Measured via the http_request_duration_ms
+    histogram exported by prom-client.
+  service: my-app
+  indicator:
+    metadata:
+      name: latency-p95
+      displayName: P95 Request Latency
+    spec:
+      thresholdMetric:
+        metricSource:
+          type: Prometheus
+          spec:
+            query: >-
+              histogram_quantile(
+                0.95,
+                sum(rate(http_request_duration_ms_bucket[5m])) by (le)
+              )
+            thresholdOperator: "<"
+            threshold: 500
+  timeWindow:
+    - duration: 30d
+      isRolling: true
+  budgetingMethod: Occurrences
+  objectives:
+    - displayName: "P95 latency < 500 ms"
+      target: 0.95
+
+---
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: pod-startup-success
+  displayName: Pod Startup Success Rate
+  labels:
+    team: platform
+    service: my-app
+spec:
+  description: >-
+    99% of pod startups (as tracked by kube_pod_container_status_ready)
+    must succeed within 60 s, evaluated over a rolling 30-day window.
+    Measured via kube-state-metrics in the monitoring namespace.
+  service: my-app
+  indicator:
+    metadata:
+      name: pod-startup-success-ratio
+      displayName: Pod Startup Success Ratio
+    spec:
+      ratioMetric:
+        counter: true
+        good:
+          metricSource:
+            type: Prometheus
+            spec:
+              query: >-
+                sum(
+                  kube_pod_container_status_ready{namespace="production",container="my-app"}
+                )
+        total:
+          metricSource:
+            type: Prometheus
+            spec:
+              query: >-
+                sum(
+                  kube_pod_container_status_waiting{namespace="production",container="my-app"}
+                  or kube_pod_container_status_ready{namespace="production",container="my-app"}
+                )
+  timeWindow:
+    - duration: 30d
+      isRolling: true
+  budgetingMethod: Occurrences
+  objectives:
+    - displayName: "99% of pod startups succeed within 60s"
+      target: 0.99

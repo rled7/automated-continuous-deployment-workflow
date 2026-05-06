@@ -1,3 +1,4 @@
+import './lib/otel.js';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import express from 'express';

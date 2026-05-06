@@ -79,3 +79,71 @@ data:
               severity: warning
             annotations:
               summary: "Pod restarting frequently"
+
+  slo-alerts.yaml: |
+    # Multi-window multi-burn-rate SLO alerts (99.9% availability SLO)
+    # burn_rate = (1 - SLI) / (1 - 0.999) = error_rate / 0.001
+    groups:
+      - name: slo-burn-rate
+        rules:
+          # Fast burn: >14.4× error budget consumption over 1 h — page immediately
+          - alert: AvailabilitySLOFastBurn
+            expr: |
+              (
+                1 - http_requests:availability:ratio_rate5m
+              ) / (1 - 0.999) > 14.4
+            for: 1m
+            labels:
+              severity: page
+              slo: availability
+            annotations:
+              summary: "SLO fast burn: availability error budget burning >14.4×"
+              description: >-
+                Availability burn rate is {{ $value | humanize }}× the budget
+                consumption rate. At this rate the 30-day error budget will be
+                exhausted in < 2 hours. Immediate action required.
+
+          # Slow burn: >6× error budget consumption over 6 h — warning
+          - alert: AvailabilitySLOSlowBurn
+            expr: |
+              (
+                1 - http_requests:availability:ratio_rate5m
+              ) / (1 - 0.999) > 6
+            for: 6h
+            labels:
+              severity: warning
+              slo: availability
+            annotations:
+              summary: "SLO slow burn: availability error budget burning >6×"
+              description: >-
+                Availability burn rate is {{ $value | humanize }}× the budget
+                consumption rate for the past 6 h. At this rate the 30-day
+                error budget will be exhausted in < 5 days. Investigate soon.
+
+---
+# ─── Recording Rules ──────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-recording-rules
+  namespace: monitoring
+data:
+  recording-rules.yaml: |
+    groups:
+      - name: sli-recording-rules
+        interval: 60s
+        rules:
+          # SLI: 5-minute rolling availability ratio (non-5xx / total)
+          - record: http_requests:availability:ratio_rate5m
+            expr: |
+              sum(rate(http_request_duration_ms_count{status_code!~"5.."}[5m]))
+              /
+              sum(rate(http_request_duration_ms_count[5m]))
+
+          # SLI: 5-minute rolling P95 latency (milliseconds)
+          - record: http_requests:latency:p95_5m
+            expr: |
+              histogram_quantile(
+                0.95,
+                sum(rate(http_request_duration_ms_bucket[5m])) by (le)
+              )

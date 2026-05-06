@@ -2,6 +2,29 @@
 
 All notable file-level changes to this repo, tracked per build.
 
+## Build 012 — SLO + DORA + OpenTelemetry
+**Date:** 2026-05-06
+**Scope:** Phase C, plan points 22, 23, 24
+
+### Added
+
+- `monitoring/prometheus.yaml` — third ConfigMap `prometheus-recording-rules` with two SLI recording rules: `http_requests:availability:ratio_rate5m` (non-5xx ratio) and `http_requests:latency:p95_5m` (P95 histogram); plus `slo-alerts.yaml` block inside `prometheus-rules` with multi-window multi-burn-rate alerts (`AvailabilitySLOFastBurn` at 14.4× / severity: page and `AvailabilitySLOSlowBurn` at 6× / severity: warning) against a 99.9% availability SLO.
+- `monitoring/slo.yaml` — OpenSLO v1 `SLO` definitions for three objectives: 99.9% HTTP availability (30d), P95 latency < 500 ms (30d), 99% pod startups succeed within 60 s (30d).
+- `monitoring/pushgateway.yaml` — Prometheus Pushgateway `Deployment` + `ClusterIP` `Service` in the `monitoring` namespace; scrapes DORA metrics pushed from Jenkinsfile stages.
+- `docs/dora-metrics.md` — explains the four DORA metrics, Jenkinsfile push sketches for each, Prometheus scrape config addition, and PromQL / Grafana query examples.
+- `docs/log-aggregation.md` — guide to shipping pino JSON logs to Loki via Promtail (DaemonSet, pipeline_stages, LogQL examples) and Vector (VRL remap transform, Loki sink config); includes comparison table.
+- `app/src/lib/otel.js` — OpenTelemetry SDK initialisation module; no-op when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset; configures `NodeSDK` with OTLP/HTTP exporter, auto-instrumentations (fs disabled), `Resource` from `OTEL_SERVICE_NAME` + `npm_package_version`; registers graceful `sdk.shutdown()` on SIGTERM/SIGINT without calling `process.exit`.
+
+### Modified
+
+- `app/package.json` — added six OTel dependencies: `@opentelemetry/api ^1.9.0`, `@opentelemetry/sdk-node ^0.57.0`, `@opentelemetry/auto-instrumentations-node ^0.56.0`, `@opentelemetry/exporter-trace-otlp-http ^0.57.0`, `@opentelemetry/resources ^1.30.0`, `@opentelemetry/semantic-conventions ^1.28.0`.
+- `app/src/server.js` — added `import './lib/otel.js';` as the very first import (line 1), before all other imports, so auto-instrumentation patches libraries at load time.
+
+### Closes (from broader plan)
+- Point 22: SLO definitions + burn-rate alerting
+- Point 23: DORA metrics infrastructure (Pushgateway + docs)
+- Point 24: OpenTelemetry distributed tracing
+
 ## Build 011 — GitOps, progressive delivery, PR previews, local dev
 **Date:** 2026-05-06
 **Scope:** Phase C, plan points 17, 26, 27, 29

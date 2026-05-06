@@ -2,6 +2,47 @@
 
 All notable file-level changes to this repo, tracked per build. Newest first.
 
+## Build 017 — Postgres + Redis integration, knex migrations, real health checks
+**Date:** 2026-05-06
+**Scope:** Phase E of the production-readiness plan (closes Phase E)
+
+### Added
+
+- `app/knexfile.js` — Knex configuration keyed by environment (`development`, `test`, `production`). Reads `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` env vars with sensible local defaults. Uses `pg` client. Migrations directory: `app/migrations`. Pool: min 2, max 10. Test env uses a separate database (`appdb_test`) and a smaller pool.
+- `app/migrations/20260506000000_create_items.js` — Knex migration that creates the `items` table (`id` SERIAL PK, `name` TEXT NOT NULL, `created_at`/`updated_at` TIMESTAMPTZ DEFAULT now()) plus an index on `created_at DESC` for the default list-latest query. Includes `down` (drops table).
+- `app/src/lib/db.js` — Postgres pool wrapper using the `pg` driver. Reads env vars; creates a `pg.Pool` with min 2/max 10, idleTimeout 30s, connectionTimeout 5s. Exports `query()`, `healthCheck()`, `pool`, `shutdown()`. Graceful "not configured" behavior if env vars absent. Includes `DB_FAKE=1` escape hatch for tests (see below).
+- `app/src/lib/redis.js` — Redis client wrapper using `ioredis`. Reads `REDIS_URL`; creates `new Redis(REDIS_URL, { maxRetriesPerRequest: 1, lazyConnect: true })`. Exports `client`, `healthCheck()`, `shutdown()`. Graceful "not configured" behavior if `REDIS_URL` absent.
+- `docs/database.md` — New doc: local dev setup, migration workflow, expand-contract pattern, rollback procedure, env var table, schema docs.
+
+### Modified
+
+- `app/package.json` — Added `pg` (^8.x), `ioredis` (^5.x), `knex` (^3.x) to `dependencies`; `pg-mem` (^3.x) to `devDependencies`. Added `migrate`, `migrate:rollback`, `migrate:make` scripts.
+- `app/src/lib/db.js` — Replaced stub with real `pg.Pool` implementation. Added `DB_FAKE=1` escape hatch: when set, uses a minimal in-memory store (array + counter) instead of pg.Pool. This avoids ESM Jest + pg-mem `unstable_mockModule` incompatibility (pg-mem's CommonJS adapter conflicts with top-level ESM imports; the module graph is evaluated before mocks can be injected). The fake honors the same `query()` interface so tests remain valid contract tests.
+- `app/src/lib/redis.js` — Replaced stub with real `ioredis` implementation. `lazyConnect: true` so the import doesn't attempt to connect immediately. Added `REDIS_FAKE=1` escape hatch mirroring `DB_FAKE` for tests.
+- `app/src/routes/health.js` — Replaced stubbed `checkDatabase` / `checkRedis` with real calls to `lib/db.js` and `lib/redis.js` `healthCheck()`. Both run in parallel via `Promise.allSettled`. `/ready` returns 503 if either fails or `setShuttingDown(true)` was called. `/live` unchanged.
+- `app/src/server.js` — Replaced in-memory `/api/items` handlers with real DB queries: `GET` runs `SELECT id, name, created_at FROM items ORDER BY created_at DESC LIMIT 100`; `POST` runs `INSERT INTO items (name) VALUES ($1) RETURNING id, name, created_at`. Shutdown sequence: `setShuttingDown(true)` → 5s drain → `db.shutdown()` → `redis.shutdown()` → `server.close()` → `process.exit(0)`.
+- `app/src/__tests__/integration/api.test.js` — Wired `DB_FAKE=1` and `REDIS_FAKE=1` via `setupFiles` (not at top of test file — ESM imports are hoisted so env vars set in test file body are too late). All six tests pass: GET /api/items (200), POST /api/items (201 + body), validation errors (2×400), /metrics (200), /health/live (200).
+- `app/src/__tests__/integration/setup.js` — New Jest `setupFiles` entry for integration tests. Sets `DB_FAKE=1` and `REDIS_FAKE=1` before any module is evaluated.
+- `app/src/__tests__/unit/setup.js` — New Jest `setupFiles` entry for unit tests. Sets same flags so health.test.js `/health/ready` probe returns 200 without infrastructure.
+- `app/jest.config.js` — Split into two Jest projects (`unit`, `integration`) so each project can have its own `setupFiles`. Previously a single flat config.
+- `Jenkinsfile` — Added `runMigrations(String namespace, String image)` helper function that runs `knex migrate:latest` as a one-shot `kubectl run --rm --attach` pod before each deploy. Called before `deployToKubernetes('staging', ...)` in the Deploy → Staging stage and before `deployToKubernetes('production', ...)` in Deploy → Production. Comment documents expand-contract assumption and failure behavior.
+- `k8s/base/deployment.yaml` — Added explicit `env` entries for `DB_PORT`, `DB_USER`, `DB_NAME` with `configMapKeyRef` references (`optional: true` so base overlay without values doesn't break). `DB_HOST` and `DB_PASSWORD` continue to come from the SealedSecret via `secretRef`.
+- `k8s/overlays/production/configmap-patch.yaml` — Added `DB_PORT: "5432"`, `DB_USER: "appuser"`, `DB_NAME: "appdb"` alongside existing `REDIS_URL`.
+- `k8s/overlays/staging/configmap-patch.yaml` — Same DB_PORT/DB_USER/DB_NAME additions as production overlay.
+- `k8s/secrets/my-app-secrets.template.yaml` — Expanded header comment to document which keys are in the secret (`db-host`, `db-password`) and which are in the ConfigMap (non-sensitive: `DB_PORT`, `DB_USER`, `DB_NAME`).
+- `docker/docker-compose.yml` — Added `healthcheck` to `app-db` (pg_isready) and `redis` (redis-cli ping) services. Added `app` service: builds from `docker/Dockerfile`, depends on `app-db` (service_healthy) and `redis` (service_healthy), exposes 3000:3000, sets all DB + Redis env vars, runs `npm run migrate && npm start`.
+
+### Closes (from production-readiness plan)
+- Phase E: real database + Redis integration (Postgres pool, knex migrations, ioredis client, real health checks, migration CI stage)
+
+### Judgment calls
+- **DB_FAKE / REDIS_FAKE escape hatch (not pg-mem):** `jest.unstable_mockModule` with pg-mem in ESM Jest is incompatible with top-level `import pg from 'pg'` in `lib/db.js`. The ESM module graph evaluates eagerly; the mock injection happens after the real `pg.Pool` constructor is already called. Setting `process.env.DB_FAKE = '1'` at the top of a test file is also too late — ESM `import` statements are hoisted and modules are cached before user-level code runs. The correct hook is Jest's `setupFiles` (runs in the worker before the module registry is populated). Both `lib/db.js` and `lib/redis.js` honor `DB_FAKE=1`/`REDIS_FAKE=1` flags to use in-memory stubs. Jest projects (`unit`, `integration`) each have their own `setupFiles`. Tests remain API contract tests (not unit tests of SQL). All 18 tests pass.
+- **pg-mem still installed:** `pg-mem` is kept in `devDependencies` in case a future test needs it for more complex SQL validation (e.g., constraint checks). It is not used in the current test suite.
+- **`optional: true` on configMapKeyRef:** The base deployment.yaml has no ConfigMap with these keys (overlays supply them). Without `optional: true`, pod scheduling would fail in environments without the overlay applied (e.g., bare `kubectl apply -f k8s/base/deployment.yaml`). The app defaults to `5432`/`appuser`/`appdb` via env var defaults in `lib/db.js` when the vars are absent.
+- **Migrations in CI as `kubectl run --rm`:** chosen over a dedicated Job manifest for simplicity. The pod name uses `BUILD_NUMBER` to prevent name collisions. The `--attach` flag ensures the pod's stdout is streamed to Jenkins logs. A failure here aborts the pipeline before rollout begins.
+
+---
+
 ## Build 016 — Cluster security: Kyverno + policies, NetworkPolicies, quotas, PSS, RBAC
 **Date:** 2026-05-06
 **Scope:** Phase D of the production-readiness plan (closes Phase D)

@@ -284,10 +284,14 @@ pipeline {
         }
 
         // ─── STAGE 8: DEPLOY TO STAGING ──────────────────────────────────────
+        // Build 017: runMigrations runs before deployToKubernetes.
+        // Migrations use expand-contract (additive, backward-compatible) so
+        // old pods continue to run against the new schema during the rollout.
         stage('Deploy → Staging') {
             when { branch 'develop' }
             steps {
                 script {
+                    runMigrations('staging', FULL_IMAGE)
                     deployToKubernetes('staging', FULL_IMAGE)
                     runSmokeTests('staging')
                 }
@@ -348,6 +352,8 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
+                    // Build 017: run migrations before deploy (expand-contract pattern)
+                    runMigrations('production', FULL_IMAGE)
                     deployToKubernetes('production', FULL_IMAGE)
                     runSmokeTests('production')
                 }
@@ -526,6 +532,34 @@ def getEnvironment() {
     if (branch == 'main') return 'production'
     if (branch == 'develop') return 'staging'
     return 'development'
+}
+
+// ── Build 017: run knex migrations as a one-shot Kubernetes Job ───────────────
+//
+// Design notes:
+//   - Uses `kubectl run --rm --attach` (not a Job manifest) for simplicity;
+//     the pod is deleted automatically after completion.
+//   - The app image already contains knex + knexfile.js (copied by Dockerfile).
+//   - serviceaccount=my-app must have `get/list/watch pods` if you use --attach;
+//     in practice `kubectl run --rm` needs the same RBAC as kubectl run.
+//   - Expand-contract pattern assumed: migrations are additive (new columns
+//     nullable or with defaults, no DROP/RENAME) so old pods keep running
+//     during the deployment rollout window.  Destructive cleanup migrations
+//     (contract phase) are safe to run only after all old pods are terminated.
+//   - Failure here aborts the pipeline before deployToKubernetes is called,
+//     preventing a mismatch between code and schema.
+def runMigrations(String namespace, String image) {
+    withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+        sh """
+            export KUBECONFIG=\${KUBECONFIG}
+            kubectl run my-app-migrate-${BUILD_NUMBER} \
+              --namespace=${namespace} \
+              --image=${image} \
+              --rm --restart=Never --attach=true \
+              --serviceaccount=my-app \
+              -- node node_modules/.bin/knex migrate:latest --knexfile=knexfile.js
+        """
+    }
 }
 
 // ── DORA: push a single metric to the Prometheus Pushgateway ─────────────────

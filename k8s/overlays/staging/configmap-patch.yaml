@@ -6,3 +6,7 @@ data:
   NODE_ENV: "staging"
   LOG_LEVEL: "debug"
   REDIS_URL: "redis://redis-staging:6379"
+  # Build 017: Postgres connection config (host + password come from SealedSecret)
+  DB_PORT: "5432"
+  DB_USER: "appuser"
+  DB_NAME: "appdb"

@@ -9,6 +9,8 @@ import { z } from 'zod';
 
 import logger from './lib/logger.js';
 import { register } from './lib/metrics.js';
+import * as db from './lib/db.js';
+import * as redis from './lib/redis.js';
 import requestIdMiddleware from './middleware/requestId.js';
 import metricsMiddleware from './middleware/metrics.js';
 import errorHandler from './middleware/error.js';
@@ -47,22 +49,35 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// 6. POST /api/items — validated with Zod
+// 6. /api/items — persisted via Postgres
 const createItemSchema = z.object({
   name: z.string().min(1).max(100),
 });
 
-app.post('/api/items', (req, res, next) => {
+// GET /api/items — returns the 100 most-recently created items
+app.get('/api/items', async (req, res, next) => {
   try {
-    const { name } = createItemSchema.parse(req.body);
-    res.status(201).json({ id: Date.now(), name });
+    const result = await db.query(
+      'SELECT id, name, created_at FROM items ORDER BY created_at DESC LIMIT 100',
+    );
+    res.json(result.rows);
   } catch (err) {
     next(err);
   }
 });
 
-app.get('/api/items', (req, res) => {
-  res.json([{ id: 1, name: 'demo-item' }]);
+// POST /api/items — creates a new item and returns the persisted row
+app.post('/api/items', async (req, res, next) => {
+  try {
+    const { name } = createItemSchema.parse(req.body);
+    const result = await db.query(
+      'INSERT INTO items (name) VALUES ($1) RETURNING id, name, created_at',
+      [name],
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
 });
 
 // 7. Prometheus metrics endpoint
@@ -102,12 +117,26 @@ export function start(port = PORT) {
     setShuttingDown(true);
 
     // Give in-flight readiness probes ~5s to observe the 503
-    setTimeout(() => {
+    setTimeout(async () => {
       const forceExit = setTimeout(() => {
         logger.error('Forced exit after shutdown timeout');
         process.exit(1);
       }, SHUTDOWN_TIMEOUT_MS);
       forceExit.unref();
+
+      // Drain persistent connections — DB first (primary state), then Redis (cache)
+      try {
+        await db.shutdown();
+        logger.info('DB pool drained');
+      } catch (err) {
+        logger.error({ err }, 'Error draining DB pool');
+      }
+      try {
+        await redis.shutdown();
+        logger.info('Redis connection closed');
+      } catch (err) {
+        logger.error({ err }, 'Error closing Redis connection');
+      }
 
       server.close((err) => {
         if (err) {

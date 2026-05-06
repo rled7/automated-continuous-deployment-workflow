@@ -82,6 +82,11 @@ services:
       - app_db_data:/var/lib/postgresql/data
     networks:
       - cicd
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   # ── Redis ─────────────────────────────────────────────────────────────────────
   redis:
@@ -90,6 +95,42 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
+    networks:
+      - cicd
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Application (Build 017) ───────────────────────────────────────────────────
+  # Runs migrations then starts the server.
+  # Depends on app-db (with healthcheck) and redis so the service only starts
+  # once both dependencies are ready.
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: my-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      app-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DB_HOST: app-db
+      DB_PORT: "5432"
+      DB_USER: appuser
+      DB_PASSWORD: apppassword
+      DB_NAME: appdb
+      REDIS_URL: "redis://redis:6379"
+    # Run migrations before starting the server.
+    # knex migrate:latest is idempotent — safe to run on every container start.
+    command: sh -c "npm run migrate && npm start"
     networks:
       - cicd
 

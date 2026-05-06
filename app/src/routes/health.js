@@ -1,4 +1,6 @@
 import express from 'express';
+import { healthCheck as dbHealthCheck } from '../lib/db.js';
+import { healthCheck as redisHealthCheck } from '../lib/redis.js';
 
 const router = express.Router();
 
@@ -13,11 +15,27 @@ export const setShuttingDown = (value) => {
 };
 
 /**
- * Stubbed dependency checks.
- * Replace the bodies with real async calls (pool.query, redis.ping, etc.).
+ * Real dependency probes.
+ * Both run in parallel via Promise.allSettled so a slow probe does not
+ * extend the response time for the other.
  */
-const checkDatabase = async () => ({ ok: true, latencyMs: 0 });
-const checkRedis = async () => ({ ok: true, latencyMs: 0 });
+const checkDatabase = async () => {
+  try {
+    await dbHealthCheck(1500);
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+};
+
+const checkRedis = async () => {
+  try {
+    await redisHealthCheck(1000);
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+};
 
 // GET /health/live — pod is alive as long as the process runs
 router.get('/live', (req, res) => {
@@ -30,7 +48,14 @@ router.get('/ready', async (req, res) => {
     return res.status(503).json({ status: 'shutting_down' });
   }
 
-  const [db, redis] = await Promise.all([checkDatabase(), checkRedis()]);
+  // Run both probes in parallel; allSettled ensures neither blocks the other
+  const [dbResult, redisResult] = await Promise.allSettled([
+    checkDatabase(),
+    checkRedis(),
+  ]);
+
+  const db    = dbResult.status    === 'fulfilled' ? dbResult.value    : { ok: false };
+  const redis = redisResult.status === 'fulfilled' ? redisResult.value : { ok: false };
   const allOk = db.ok && redis.ok;
 
   const body = {

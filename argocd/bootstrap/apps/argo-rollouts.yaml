@@ -1,0 +1,47 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-rollouts
+  namespace: argocd
+  annotations:
+    # Wave -10: install CRD controllers before application workloads
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-rollouts
+    targetRevision: "2.38.2"
+    helm:
+      valuesObject:
+        # Install the Rollout/AnalysisTemplate/etc. CRDs as part of this release.
+        installCRDs: true
+        # Lightweight resource requests for kind/dev cluster.
+        controller:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        # Enable the Argo Rollouts dashboard (accessible via kubectl port-forward)
+        dashboard:
+          enabled: true
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      - ServerSideApply=true

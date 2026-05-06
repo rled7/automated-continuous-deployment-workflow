@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # setup.sh — Bootstrap the entire CI/CD infrastructure
-# Usage: ./scripts/setup.sh [--local | --k8s]
+# Usage: ./scripts/setup.sh [--local | --k8s | --bootstrap-argo]
+#
+#   --local            Start the local Docker Compose stack (Jenkins, SonarQube, Registry)
+#   --k8s              Create namespaces, secrets, and apply monitoring manifests
+#   --bootstrap-argo   Install Argo CD on the current kubectl context and apply
+#                      the platform AppProject + root Application (app-of-apps)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -52,6 +57,66 @@ start_local() {
     info "Jenkins ready at http://localhost:8080 ✅"
     info "SonarQube ready at http://localhost:9000 ✅"
     info "Docker Registry at http://localhost:5000 ✅"
+}
+
+# ── Argo CD bootstrap mode ────────────────────────────────────────────────────
+bootstrap_argo() {
+    info "Bootstrapping Argo CD (app-of-apps)..."
+
+    # Validate required tools
+    local missing=()
+    for cmd in kubectl; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    [[ ${#missing[@]} -eq 0 ]] || error "Missing tools for --bootstrap-argo: ${missing[*]}"
+
+    # 1. Install Argo CD
+    info "Creating argocd namespace (idempotent)..."
+    kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+    info "Installing Argo CD..."
+    kubectl apply -n argocd \
+        -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+    # 2. Wait for argocd-server
+    info "Waiting for argocd-server rollout (up to 3 minutes)..."
+    kubectl rollout status -n argocd deployment/argocd-server --timeout=180s
+
+    # 3. Apply platform AppProject and root Application
+    info "Applying platform AppProject..."
+    kubectl apply -f "$ROOT_DIR/argocd/bootstrap/projects/platform.yaml"
+
+    info "Applying root bootstrap Application..."
+    kubectl apply -f "$ROOT_DIR/argocd/bootstrap/root.yaml"
+
+    # 4. Print follow-up steps
+    echo ""
+    info "Argo CD bootstrap complete ✅"
+    echo ""
+    echo "  Next steps:"
+    echo ""
+    echo "  1. Watch platform components sync:"
+    echo "       kubectl get applications -n argocd --watch"
+    echo ""
+    echo "  2. Once all platform apps are Healthy/Synced, apply my-app:"
+    echo "       kubectl apply -f $ROOT_DIR/argocd/AppProject.yaml"
+    echo "       kubectl apply -f $ROOT_DIR/argocd/Application-staging.yaml"
+    echo "       kubectl apply -f $ROOT_DIR/argocd/Application-production.yaml"
+    echo ""
+    echo "  3. Seal cluster secrets before the app can start:"
+    echo "       $SCRIPT_DIR/seal-secret.sh production my-app-secrets \\"
+    echo "           db-host=<value> db-password=<value> \\"
+    echo "         > $ROOT_DIR/k8s/secrets/my-app-secrets.yaml"
+    echo "       (See docs/secrets.md for full details.)"
+    echo ""
+    echo "  4. Install kubeseal CLI if not present:"
+    echo "       brew install kubeseal  # or download from GitHub releases"
+    echo ""
+    echo "  5. Access Argo CD UI:"
+    echo "       kubectl port-forward svc/argocd-server -n argocd 8081:443"
+    echo "       # https://localhost:8081"
+    echo "       # Password: kubectl -n argocd get secret argocd-initial-admin-secret \\"
+    echo "       #   -o jsonpath='{.data.password}' | base64 -d"
 }
 
 # ── Kubernetes mode ───────────────────────────────────────────────────────────
@@ -106,9 +171,10 @@ main() {
     install_deps
 
     case "$MODE" in
-        --local) start_local ;;
-        --k8s)   setup_k8s  ;;
-        *)       error "Unknown mode: $MODE. Use --local or --k8s" ;;
+        --local)           start_local     ;;
+        --k8s)             setup_k8s       ;;
+        --bootstrap-argo)  bootstrap_argo  ;;
+        *)       error "Unknown mode: $MODE. Use --local, --k8s, or --bootstrap-argo" ;;
     esac
 
     echo ""

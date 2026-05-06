@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager-issuers
+  namespace: argocd
+  annotations:
+    # Wave 0: apply after cert-manager controller (wave -10) is ready so CRDs exist
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/rled7/automated-continuous-deployment-workflow
+    targetRevision: HEAD
+    # Raw YAML directory — Argo CD applies every manifest it finds here.
+    # Contains selfsigned-issuer (used by kind/nip.io), letsencrypt-staging,
+    # and letsencrypt-prod (used for real cloud deployments).
+    path: argocd/bootstrap/issuers
+
+  destination:
+    server: https://kubernetes.default.svc
+    # ClusterIssuers are cluster-scoped; namespace is informational only.
+    namespace: cert-manager
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

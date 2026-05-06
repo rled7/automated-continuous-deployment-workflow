@@ -1,0 +1,85 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  annotations:
+    # Wave 0: install after CRD controllers (wave -10)
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: "67.9.0"
+    helm:
+      valuesObject:
+        # ── Grafana ───────────────────────────────────────────────────────────
+        grafana:
+          # IMPORTANT: change this before exposing Grafana externally.
+          adminPassword: changeme-bootstrap-only
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+
+        # ── Prometheus ───────────────────────────────────────────────────────
+        prometheus:
+          prometheusSpec:
+            # Reduced resource requests for kind/single-node clusters.
+            # Increase for production: recommend 500m/2Gi minimum.
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+            # Single replica is sufficient for kind dev clusters.
+            replicas: 1
+            # Retain 24 h of data in kind (default 10d consumes too much disk).
+            retention: 24h
+
+        # ── Alertmanager ─────────────────────────────────────────────────────
+        alertmanager:
+          alertmanagerSpec:
+            resources:
+              requests:
+                cpu: 20m
+                memory: 64Mi
+
+        # ── Node Exporter ────────────────────────────────────────────────────
+        # hostRootFsMount can fail on some kind/containerd configurations
+        # because /proc is not visible at the expected host path.
+        # Disable here; re-enable for bare-metal or cloud nodes.
+        nodeExporter:
+          hostRootFsMount:
+            enabled: false
+
+        # ── kube-state-metrics ───────────────────────────────────────────────
+        kube-state-metrics:
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+
+        # ── Prometheus Operator ──────────────────────────────────────────────
+        prometheusOperator:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      # CRDs in this chart are large; server-side apply avoids annotation-size errors.
+      - ServerSideApply=true

@@ -2,6 +2,50 @@
 
 All notable file-level changes to this repo, tracked per build. Newest first.
 
+## Build 014 — Argo CD app-of-apps bootstrap, sealed-secrets, nip.io for kind
+**Date:** 2026-05-06
+**Scope:** Phase A of the production-readiness plan (closes Phase A)
+
+### Added
+
+- `argocd/bootstrap/projects/platform.yaml` — `AppProject` named `platform`. Allows source repo + eight Helm chart repos (bitnami, jetstack, prometheus-community, argo-helm, grafana, opentelemetry, ingress-nginx, sealed-secrets). Destinations `*` (all namespaces in-cluster). `clusterResourceWhitelist: */*` so CRDs and ClusterIssuers can be managed.
+- `argocd/bootstrap/root.yaml` — Root `Application` named `bootstrap`, project `platform`, source path `argocd/bootstrap/apps`, automated sync (prune + selfHeal), syncOptions `CreateNamespace=true` + `ApplyOutOfSyncOnly=true`.
+- `argocd/bootstrap/apps/sealed-secrets.yaml` — Argo Application, chart `sealed-secrets` v2.16.2 from `https://bitnami-labs.github.io/sealed-secrets`, deployed to `kube-system`, sync wave -10. `fullnameOverride: sealed-secrets-controller`.
+- `argocd/bootstrap/apps/ingress-nginx.yaml` — Argo Application, chart `ingress-nginx` v4.11.3 from `https://kubernetes.github.io/ingress-nginx`, deployed to `ingress-nginx`, sync wave -10. `controller.service.type=NodePort` with NodePorts 30080/30443 for kind; comment explains cloud LB swap.
+- `argocd/bootstrap/apps/cert-manager.yaml` — Argo Application, chart `cert-manager` v1.16.3 from `https://charts.jetstack.io`, deployed to `cert-manager`, sync wave -10. `installCRDs: true`, `ServerSideApply=true`.
+- `argocd/bootstrap/apps/cert-manager-issuers.yaml` — Argo Application, `directory` source pointing at `argocd/bootstrap/issuers/`, deployed to `cert-manager`, sync wave 0. Applies raw `ClusterIssuer` manifests after cert-manager CRDs are ready.
+- `argocd/bootstrap/apps/argo-rollouts.yaml` — Argo Application, chart `argo-rollouts` v2.38.2 from `https://argoproj.github.io/argo-helm`, deployed to `argo-rollouts`, sync wave -10. `installCRDs: true`, dashboard enabled.
+- `argocd/bootstrap/apps/kube-prometheus-stack.yaml` — Argo Application, chart `kube-prometheus-stack` v67.9.0 from `https://prometheus-community.github.io/helm-charts`, deployed to `monitoring`, sync wave 0. kind-tuned: `prometheus.prometheusSpec.resources.requests={cpu:100m,memory:256Mi}`, `grafana.adminPassword=changeme-bootstrap-only`, `nodeExporter.hostRootFsMount.enabled=false`, reduced retention (24h), `ServerSideApply=true`.
+- `argocd/bootstrap/apps/loki-stack.yaml` — Argo Application, chart `loki` v6.24.0 from `https://grafana.github.io/helm-charts`, deployed to `monitoring`, sync wave 0. Single-binary mode, `replication_factor=1`, `storage.type=filesystem`, replicas=1.
+- `argocd/bootstrap/apps/otel-collector.yaml` — Argo Application, chart `opentelemetry-collector` v0.111.0 from `https://open-telemetry.github.io/opentelemetry-helm-charts`, deployed to `monitoring`, sync wave 0. Mode `deployment`, OTLP/HTTP receiver on 4318. Exporter stubbed as `logging` (detailed verbosity) with a TODO comment to swap for an `otlp` exporter pointing at Grafana Tempo once Tempo is added to the stack.
+- `argocd/bootstrap/issuers/selfsigned-issuer.yaml` — `ClusterIssuer` named `selfsigned-issuer` with `selfSigned: {}`. Used by kind/nip.io overlays. Comment explains when to use.
+- `argocd/bootstrap/issuers/letsencrypt-staging.yaml` — `ClusterIssuer` for Let's Encrypt staging CA. For cloud deployments. Comment explains prerequisites and swap procedure.
+- `argocd/bootstrap/issuers/letsencrypt-prod.yaml` — `ClusterIssuer` for Let's Encrypt production CA. Comment warns about rate limits and prerequisites.
+- `argocd/bootstrap/README.md` — Full bootstrap guide: pre-reqs, kind cluster setup pointer, install Argo CD, apply AppProject + root, watch sync, apply my-app apps, seal secrets, access UIs, sync-wave table, notes on cloud swap.
+- `k8s/secrets/my-app-secrets.template.yaml` — Template `SealedSecret` for keys `db-host` and `db-password`. Contains placeholder ciphertext with a prominent "DO NOT APPLY" header comment; instructs use of `seal-secret.sh`.
+- `k8s/secrets/docker-registry-secret.template.yaml` — Template `SealedSecret` of type `kubernetes.io/dockerconfigjson`. Placeholder ciphertext; header explains the `kubectl create secret docker-registry | kubeseal` workflow.
+- `k8s/secrets/README.md` — Sealed secrets directory guide: file table, seal workflow, 4 important notes (per-cluster keys, never commit plaintext, back up controller key, rotation).
+- `scripts/seal-secret.sh` — Bash helper (`set -euo pipefail`). Args: `<namespace> <secret-name> <key=value>...`. Validates `kubectl` and `kubeseal` on PATH with clear errors. Builds a dry-run `Secret` YAML and pipes through `kubeseal --format=yaml --controller-namespace=kube-system`. Prints SealedSecret YAML to stdout.
+- `docs/secrets.md` — Sealed Secrets guide: why sealed-secrets vs plain Secrets vs ESO (comparison table), how it works, sealing a new secret, rotation workflow, controller key backup, disaster recovery (restore key on new cluster).
+- `docs/cluster-setup.md` — Local kind cluster setup guide: prerequisites table, inline `kind-config.yaml` with `extraPortMappings` (host 80→30080, host 443→30443), bootstrap order (kind up → Argo CD → root → my-app apps → seal secrets), how to access Argo CD/Grafana/app via nip.io, tear-down.
+
+### Modified
+
+- `k8s/overlays/staging/ingress-patch.yaml` — Host changed from `staging.app.yourdomain.com` to `staging.app.127.0.0.1.nip.io`; cluster-issuer changed from `letsencrypt-staging` to `selfsigned-issuer`. Comment block added explaining how to swap back for cloud deployments.
+- `k8s/overlays/production/ingress-patch.yaml` — Host changed from `app.yourdomain.com` to `app.127.0.0.1.nip.io`; cluster-issuer changed from `letsencrypt-prod` to `selfsigned-issuer`. Comment block added explaining how to swap back for cloud deployments.
+- `scripts/setup.sh` — Added `--bootstrap-argo` mode: installs Argo CD, waits for `argocd-server` rollout, applies `argocd/bootstrap/projects/platform.yaml` + `argocd/bootstrap/root.yaml`, prints follow-up steps (watch apps, apply my-app, seal secrets, port-forward UI). Updated usage comment at top.
+
+### Closes (from production-readiness plan)
+- Phase A: GitOps bootstrap layer (app-of-apps), sealed-secrets workflow, local kind cluster support with nip.io + self-signed TLS
+
+### Judgment calls
+- **OTel exporter:** stubbed as `logging` (detailed verbosity) instead of OTLP because Grafana Tempo is not yet installed. A TODO comment documents the exact config change needed when Tempo is added.
+- **kube-prometheus-stack on kind:** `prometheus.prometheusSpec.resources.requests={cpu:100m,memory:256Mi}`, retention 24h, `nodeExporter.hostRootFsMount.enabled=false` (fails on some kind/containerd configs), `grafana.adminPassword=changeme-bootstrap-only`.
+- **Loki:** single-binary mode with `storage.type=filesystem` (no object store) and `replication_factor=1`; bundled Grafana disabled (using kube-prometheus-stack's Grafana instead).
+- **Chart versions pinned** (latest stable as of late 2025): sealed-secrets 2.16.2, ingress-nginx 4.11.3, cert-manager v1.16.3, argo-rollouts 2.38.2, kube-prometheus-stack 67.9.0, loki 6.24.0, opentelemetry-collector 0.111.0.
+
+---
+
 ## Build 013 — Custom Jenkins agent image
 **Date:** 2026-05-06
 **Scope:** Phase B of the production-readiness plan

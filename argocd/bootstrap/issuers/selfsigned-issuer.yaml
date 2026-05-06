@@ -1,0 +1,18 @@
+# selfsigned-issuer.yaml
+#
+# When to use: local kind clusters, CI smoke tests, any environment where you
+# don't have a public DNS name or ACME HTTP-01 challenge is not reachable.
+# The self-signed certificate will show a browser warning — that's expected.
+#
+# The staging and production Ingress overlays reference this issuer by name
+# (cert-manager.io/cluster-issuer: selfsigned-issuer) so TLS works out of the
+# box on a kind/nip.io setup without registering any domain.
+#
+# For cloud deployments: swap the annotation to letsencrypt-staging or
+# letsencrypt-prod (see the other YAML files in this directory).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}

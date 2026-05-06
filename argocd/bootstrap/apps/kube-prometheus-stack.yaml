@@ -50,6 +50,15 @@ spec:
                 static_configs:
                   - targets: ['prometheus-pushgateway.monitoring.svc.cluster.local:9091']
 
+              # ── Jenkins Prometheus plugin (Build 018) ─────────────────────
+              # Requires the Jenkins Prometheus plugin (prometheus:latest) which
+              # exposes /prometheus on the Jenkins HTTP port.
+              # Adjust target if your Jenkins Service name/namespace differs.
+              - job_name: jenkins
+                metrics_path: /prometheus
+                static_configs:
+                  - targets: ['jenkins.jenkins.svc.cluster.local:8080']
+
         # ── Alertmanager ─────────────────────────────────────────────────────
         alertmanager:
           alertmanagerSpec:
@@ -57,6 +66,110 @@ spec:
               requests:
                 cpu: 20m
                 memory: 64Mi
+          # ── Alertmanager routing + receivers ─────────────────────────────
+          # IMPORTANT: Replace dummy placeholder values below with real credentials
+          # before deploying to production. Use SealedSecret + envFrom or Helm
+          # --set flags to inject the real values. The "REPLACE_ME" strings are
+          # intentional stand-ins so `helm template` renders without errors, but
+          # they WILL NOT deliver alerts until substituted.
+          config:
+            global:
+              resolve_timeout: 12h
+
+            # ── Route tree ────────────────────────────────────────────────
+            # Top-level receiver is slack-warnings (catch-all for warnings).
+            # Severity-specific child routes override receiver and timing.
+            route:
+              receiver: slack-warnings
+              group_by: ['alertname', 'namespace', 'severity']
+              group_wait: 30s
+              group_interval: 5m
+              repeat_interval: 12h
+              routes:
+                # Sev page → PagerDuty, fast grouping
+                - matchers:
+                    - name: severity
+                      value: page
+                  receiver: pagerduty
+                  group_wait: 10s
+                  repeat_interval: 4h
+
+                # Sev warning → Slack #alerts-warning
+                - matchers:
+                    - name: severity
+                      value: warning
+                  receiver: slack-warnings
+                  group_wait: 30s
+                  repeat_interval: 12h
+
+                # Sev critical → PagerDuty, no wait
+                - matchers:
+                    - name: severity
+                      value: critical
+                  receiver: pagerduty
+                  group_wait: 0s
+
+            # ── Receivers ─────────────────────────────────────────────────
+            receivers:
+              - name: pagerduty
+                pagerduty_configs:
+                  - routing_key: "REPLACE_ME"
+                    # Replace with: ${PAGERDUTY_INTEGRATION_KEY} via SealedSecret/envFrom
+                    description: '{{ template "pagerduty.default.description" . }}'
+                    send_resolved: true
+
+              - name: slack-warnings
+                slack_configs:
+                  - api_url: "https://hooks.slack.com/REPLACE_ME"
+                    # Replace with: ${SLACK_WEBHOOK_URL} via SealedSecret/envFrom
+                    channel: "#alerts-warning"
+                    send_resolved: true
+                    title: '{{ template "slack.default.title" . }}'
+                    text: '{{ template "slack.default.text" . }}'
+
+              - name: slack-critical
+                slack_configs:
+                  - api_url: "https://hooks.slack.com/REPLACE_ME"
+                    # Replace with: ${SLACK_WEBHOOK_URL_CRITICAL} via SealedSecret/envFrom
+                    channel: "#alerts-critical"
+                    send_resolved: true
+                    title: '{{ template "slack.default.title" . }}'
+                    text: '{{ template "slack.default.text" . }}'
+
+              # email-fallback: SMTP receiver used when both PagerDuty and Slack
+              # are unreachable (e.g., during a major cloud-provider outage).
+              # Configure via SealedSecret injecting SMTP credentials.
+              - name: email-fallback
+                email_configs:
+                  - smarthost: "smtp.example.com:587"
+                    # Replace with real SMTP host via SealedSecret/envFrom
+                    from: "alertmanager@example.com"
+                    to: "oncall@example.com"
+                    auth_username: "REPLACE_ME"
+                    auth_password: "REPLACE_ME"
+                    send_resolved: true
+
+            # ── Inhibition rules ──────────────────────────────────────────
+            # Suppress warning-level alerts when a matching critical alert is
+            # already firing on the same alertname + namespace.
+            # Prevents double-paging for the same underlying failure.
+            inhibit_rules:
+              - source_matchers:
+                  - name: severity
+                    value: critical
+                target_matchers:
+                  - name: severity
+                    value: warning
+                equal: ['alertname', 'namespace']
+
+            # ── Custom templates ──────────────────────────────────────────
+            # To customise Slack/PagerDuty message formatting, add Alertmanager
+            # template files (.tmpl) to:
+            #   alertmanager.templateFiles.<name>.tmpl
+            # or mount them as a ConfigMap under:
+            #   /etc/alertmanager/templates/
+            # Reference: https://prometheus.io/docs/alerting/latest/notifications/
+            templates: []
 
         # ── Node Exporter ────────────────────────────────────────────────────
         # hostRootFsMount can fail on some kind/containerd configurations

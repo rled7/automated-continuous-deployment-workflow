@@ -1,0 +1,162 @@
+# DORA metrics dashboard.
+# Deployment frequency, lead time for changes, change failure rate, MTTR.
+# Metrics are pushed to Prometheus via the Pushgateway from the Jenkinsfile
+# (see monitoring/pushgateway.yaml and docs/dora-metrics.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-dora
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  dora.json: |
+    {
+      "title": "DORA Metrics",
+      "uid": "my-app-dora",
+      "schemaVersion": 38,
+      "version": 1,
+      "time": { "from": "now-30d", "to": "now" },
+      "refresh": "5m",
+      "timezone": "browser",
+      "tags": ["my-app", "dora"],
+      "panels": [
+        {
+          "id": 1,
+          "title": "Deployment Frequency",
+          "type": "stat",
+          "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "increase(deployment_frequency_total[24h])",
+              "legendFormat": "last 24h",
+              "refId": "A",
+              "instant": true
+            },
+            {
+              "expr": "increase(deployment_frequency_total[7d])",
+              "legendFormat": "last 7d",
+              "refId": "B",
+              "instant": true
+            },
+            {
+              "expr": "increase(deployment_frequency_total[30d])",
+              "legendFormat": "last 30d",
+              "refId": "C",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 2,
+          "title": "Lead Time for Changes (p50/p95)",
+          "type": "stat",
+          "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(lead_time_seconds_bucket[7d])) by (le))",
+              "legendFormat": "p50",
+              "refId": "A",
+              "instant": true
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(lead_time_seconds_bucket[7d])) by (le))",
+              "legendFormat": "p95",
+              "refId": "B",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "color": { "mode": "palette-classic" }
+            }
+          }
+        },
+        {
+          "id": 3,
+          "title": "Change Failure Rate",
+          "type": "stat",
+          "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "100 * increase(change_failure_total[30d]) / clamp_min(increase(deployment_frequency_total[30d]), 1)",
+              "legendFormat": "change failure %",
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 5 },
+                  { "color": "red", "value": 15 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 4,
+          "title": "Mean Time to Restore (MTTR)",
+          "type": "stat",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "avg_over_time(mttr_seconds[30d])",
+              "legendFormat": "MTTR (30d avg)",
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 3600 },
+                  { "color": "red", "value": 86400 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 5,
+          "title": "Deployment Frequency Over Time",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 8, "w": 12, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "increase(deployment_frequency_total[1d])",
+              "legendFormat": "deploys/day",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "palette-classic" }
+            }
+          }
+        }
+      ]
+    }

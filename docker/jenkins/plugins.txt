@@ -53,3 +53,9 @@ build-timeout:latest
 # Exposes /generic-webhook-trigger/invoke which receives GitHub pull_request
 # closed events and fires the teardown pipeline with CHANGE_ID extracted via JSONPath.
 generic-webhook-trigger:latest
+
+# ── Metrics (Build 018) ────────────────────────────────────────────────────────
+# Exposes /prometheus endpoint so Prometheus can scrape Jenkins build metrics:
+# build duration, success/failure counts, queue length, executor utilisation.
+# Pairs with the jenkins scrape job in kube-prometheus-stack additionalScrapeConfigs.
+prometheus:latest

@@ -2,6 +2,49 @@
 
 All notable file-level changes to this repo, tracked per build. Newest first.
 
+> **All 6 production-readiness phases (A–F) complete as of Build 018.**
+> - Phase A: bootstrap (Build 014)
+> - Phase B: agent image (Build 013)
+> - Phase C: pipeline holes (Build 015)
+> - Phase D: cluster security (Build 016)
+> - Phase E: app data layer (Build 017)
+> - Phase F: operations (Build 018)
+
+---
+
+## Build 018 — Alertmanager receivers, Grafana dashboards, postmortem + on-call docs
+**Date:** 2026-05-06
+**Scope:** Phase F of the production-readiness plan (closes Phase F — operational maturity)
+
+### Added
+
+- `argocd/bootstrap/apps/grafana-dashboards.yaml` — New Argo Application (sync wave 10) using a `directory` source pointing at `monitoring/grafana/dashboards/`. The kube-prometheus-stack Grafana sidecar auto-imports any ConfigMap labelled `grafana_dashboard: "1"` from the `monitoring` namespace; this app delivers all four dashboard ConfigMaps via GitOps without touching the Grafana Helm chart values.
+- `monitoring/grafana/dashboards/app-overview.yaml` — Grafana 10+ dashboard ConfigMap (schemaVersion 38, `grafana_dashboard: "1"`). Four panels covering RED metrics: Request Rate timeseries (`sum(rate(http_request_duration_ms_count[5m]))`), Error Rate % stat (`5xx / total`), P95 Latency timeseries (`histogram_quantile`), 5xx Errors by Route table. Default time range `now-1h → now`.
+- `monitoring/grafana/dashboards/slo.yaml` — SLO burn-down dashboard ConfigMap. Five panels: Availability SLI vs 99.9% target timeseries (with dashed threshold line), Error Budget Remaining stat, 1h Burn Rate stat (alert threshold 14.4×), 6h Burn Rate stat (alert threshold 6×), SLO Alert State table (queries `ALERTS{slo="availability"}`). Uses recording rules from `monitoring/prometheus.yaml`.
+- `monitoring/grafana/dashboards/dora.yaml` — DORA metrics dashboard ConfigMap. Five panels: Deployment Frequency stat (24h/7d/30d via Pushgateway), Lead Time p50/p95 stat (histogram quantile over `lead_time_seconds_bucket`), Change Failure Rate stat (`change_failure_total / deployment_frequency_total`), MTTR gauge (30-day avg of `mttr_seconds`), Deployment Frequency Over Time timeseries.
+- `monitoring/grafana/dashboards/pipeline.yaml` — Jenkins pipeline metrics dashboard ConfigMap. Four panels: Build Duration P95 timeseries (`jenkins_builds_duration_milliseconds_summary_bucket`), Build Success Rate sparkline stat, Stage-by-Stage Duration horizontal bar chart, Builds Over Time timeseries (success vs failure, colour-coded green/red). Requires Jenkins Prometheus plugin (added in this build).
+- `monitoring/grafana/dashboards/kustomization.yaml` — Kustomize file listing all four dashboard ConfigMaps as resources, namespace `monitoring`. Applied by the `grafana-dashboards` Argo Application.
+- `docs/postmortem-template.md` — Blameless postmortem template with two-paragraph "How to Use" intro. Sections: Incident Header table (ID, date, severity, duration, commander, scribe, summary), Timeline table (time UTC, event, source), Impact (customer-facing + scope), Root Cause, Detection (how/how long/was it acceptable), Mitigation (ordered steps + time-to-mitigate), Resolution (what/when/rollback used), Contributing Factors (system/process/knowledge gaps — no blame framing), Action Items table (item, owner, P1/P2/P3, due date, ticket), Lessons Learned (what worked / what didn't), Footer (review date, attendees, linked ticket). Cross-links to `docs/oncall.md` and `docs/dora-metrics.md`.
+- `docs/oncall.md` — On-call rotation doc covering: rotation cadence (weekly, handoff Monday 10:00 local), Primary/Secondary roles + responsibilities, escalation contract table (ack 15 min, response 30 min, escalate after 1h, VP escalation at 2h for Sev 1), What Is Expected, What Is NOT Expected (feature work, code reviews), Tooling table (PagerDuty, Grafana, Alertmanager, Slack channels, Jenkins, Loki/Tempo), Cloud Cost Monitoring section (OpenCost, with install command, skip for kind), Compensation Policy placeholder, Handoff Checklist (open incidents, silences, experiments, known issues, action items), Escalation Matrix table (Sev 1–4).
+
+### Modified
+
+- `argocd/bootstrap/apps/kube-prometheus-stack.yaml` — Added full `alertmanager.config` under the `alertmanager:` key: global `resolve_timeout: 12h`; route tree with default receiver `slack-warnings`, child routes for `severity: page` (receiver `pagerduty`, group_wait 10s, repeat 4h) and `severity: critical` (receiver `pagerduty`, group_wait 0s) and `severity: warning` (receiver `slack-warnings`, group_wait 30s, repeat 12h); four receivers (`pagerduty` with `routing_key: REPLACE_ME`, `slack-warnings` on `#alerts-warning`, `slack-critical` on `#alerts-critical`, `email-fallback` SMTP with dummy smarthost/auth — comment documents it as the fallback if both PD and Slack are down); inhibition rule suppressing `severity: warning` when a matching `severity: critical` is already firing (prevents double-paging). Also added Jenkins Prometheus plugin scrape job to `additionalScrapeConfigs`. Comment block at the top of the config warns to replace `REPLACE_ME` placeholders via SealedSecret + envFrom or Helm `--set` before deploying.
+- `docker/jenkins/plugins.txt` — Added `prometheus:latest` under a new `# Metrics (Build 018)` section. The plugin exposes `/prometheus` on port 8080 for Prometheus scraping of build durations, success/failure counts, queue length, and executor utilisation. Pairs with the `jenkins` scrape job in kube-prometheus-stack.
+- `docs/runbook.md` — Added cross-links to `docs/postmortem-template.md` (use after every Sev 1/2) and `docs/oncall.md` (rotation + escalation) in the Quick Links table. Added cross-link to `docs/dora-metrics.md` for measuring incident impact. Added "After an incident" section directing engineers to copy and fill the postmortem template, schedule a review, publish in `#incidents`, track action items, and review DORA metrics post-incident.
+
+### Closes (from production-readiness plan)
+- Phase F: operational maturity — Alertmanager alert routing (PagerDuty + Slack + email fallback + inhibition rules), Grafana app-specific dashboards (RED/SLO/DORA/pipeline), Jenkins Prometheus metrics plugin, blameless postmortem template, on-call rotation doc, runbook cross-links.
+
+### Judgment calls
+- **Alertmanager `REPLACE_ME` literals:** using literal `REPLACE_ME` strings (not `${...}` shell-style placeholders) so Helm `template` rendering succeeds without secrets present. Production operators replace these via SealedSecret + envFrom or `helm upgrade --set`. This is documented in a comment block inside `alertmanager.config:`.
+- **`severity: page` route:** added as a sibling to `critical` so SLO fast-burn alerts (labelled `severity: page`) route to PagerDuty at the same urgency as `critical`. The `critical` route's `group_wait: 0s` allows immediate grouping for critical alerts.
+- **Dashboard panel choices:** dashboards are compact (50–150 lines each) and demonstrate intent rather than production polish. The SLO dashboard uses the `http_requests:availability:ratio_rate5m` recording rule already defined in `monitoring/prometheus.yaml` so all panels resolve without additional rules. DORA panels query Pushgateway-pushed metrics (`deployment_frequency_total`, `lead_time_seconds_bucket`, `change_failure_total`, `mttr_seconds`) that are pushed from the Jenkinsfile.
+- **Grafana sidecar vs. Helm values:** dashboards are delivered as separate ConfigMap objects via a dedicated Argo Application rather than embedded in the kube-prometheus-stack Helm values. This keeps the chart values clean and allows individual dashboards to be added/removed via GitOps without re-deploying Prometheus/Alertmanager.
+- **`oncall.md` OpenCost note:** OpenCost section explicitly notes it is skipped on kind (local dev) clusters and provides the production install command as required.
+
+---
+
 ## Build 017 — Postgres + Redis integration, knex migrations, real health checks
 **Date:** 2026-05-06
 **Scope:** Phase E of the production-readiness plan (closes Phase E)

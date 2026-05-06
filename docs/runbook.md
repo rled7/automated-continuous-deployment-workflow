@@ -7,8 +7,10 @@
 | Jenkins CI | `http://jenkins.example.com` |
 | Grafana dashboards | `http://grafana.example.com` |
 | Slack ops channel | `#ops-alerts` |
-| On-call rotation | *Link to PagerDuty / OpsGenie rotation here* |
+| On-call rotation | See `docs/oncall.md` and [PagerDuty (placeholder)](https://your-org.pagerduty.com/schedules#REPLACE_ME) |
 | Kubernetes cluster | `kubectl config use-context production` |
+| Postmortem template | `docs/postmortem-template.md` — use after every Sev 1/2 |
+| DORA metrics | `docs/dora-metrics.md` — measure incident impact on deployment frequency + MTTR |
 
 ---
 
@@ -116,6 +118,21 @@ Use this when a critical bug is found in production and cannot wait for the norm
 | Critical (AppDown, data loss) | On-call engineer | Engineering lead | 15 minutes |
 | High (HighErrorRate, HighResponseTime > 1s) | On-call engineer | Team channel | 30 minutes |
 | Medium / Low | Next business day | — | — |
+
+---
+
+## After an incident
+
+Every Sev 1 or Sev 2 incident requires a blameless postmortem within 48 hours of resolution.
+
+1. Copy `docs/postmortem-template.md` and rename it `docs/postmortems/INC-YYYY-NNN.md`.
+2. Fill in all sections while the incident is fresh. A rough draft in the first hour beats a polished document a week later.
+3. Schedule a 30-minute review meeting within one week. Invite everyone who was involved.
+4. Publish the completed postmortem in the `#incidents` Slack channel.
+5. Track all action items as tickets (P1 items must be resolved before the next production deploy).
+6. Review DORA metrics after the incident — see `docs/dora-metrics.md` for how incidents affect Deployment Frequency, Change Failure Rate, and MTTR.
+
+For the on-call rotation, escalation contacts, and response SLAs see `docs/oncall.md`.
 
 ---
 

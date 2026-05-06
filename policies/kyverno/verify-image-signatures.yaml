@@ -1,0 +1,66 @@
+# =============================================================================
+# Image Signature Verification Policy
+# =============================================================================
+# IMPORTANT: This policy will NOT pass admission for real workloads until you
+# have:
+#   1. Signed your images with cosign using keyless signing:
+#        cosign sign --yes ghcr.io/YOUR_ORG/my-app:SHA
+#   2. Configured the cluster to trust the OIDC issuer used during signing
+#      (GitHub Actions uses https://token.actions.githubusercontent.com).
+#   3. Updated the imageReferences pattern below to match your actual registry.
+#
+# The Rekor transparency log (rekor.sigstore.dev) is used for audit; the Fulcio
+# CA (fulcio.sigstore.dev) issues the short-lived signing certificates.
+#
+# Staying as Audit is the safe default: violations are recorded in
+# PolicyReports but pods are not blocked. Switch to Enforce only after
+# verifying that all production images are signed in CI.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify Image Signatures
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Verifies that container images are signed using cosign keyless signing
+      (Sigstore Fulcio + Rekor). Only images from the configured registry
+      pattern are subject to verification. Audit mode is the safe default
+      until all images are signed in CI and the OIDC issuer is trusted.
+spec:
+  # Audit mode: SAFE DEFAULT. Do not switch to Enforce until:
+  #   - All production images are signed with cosign in CI (GitHub Actions)
+  #   - You have validated that the OIDC issuer matches the issuer below
+  #   - PolicyReports show zero violations for a full release cycle
+  validationFailureAction: Audit
+
+  background: false  # verifyImages rules must run at admission time only
+
+  rules:
+    - name: verify-image-signatures
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+      verifyImages:
+        - imageReferences:
+            # Replace with your actual registry, e.g.:
+            #   ghcr.io/YOUR_ORG/my-app:*
+            #   docker.io/YOUR_ORG/my-app:*
+            - "ghcr.io/YOUR_ORG/my-app:*"
+          attestors:
+            - entries:
+                - keyless:
+                    # Fulcio CA — issues short-lived certs bound to OIDC identity
+                    issuer: "https://token.actions.githubusercontent.com"
+                    # Replace with your GitHub org/repo OIDC subject:
+                    subject: "https://github.com/YOUR_ORG/YOUR_REPO/.github/workflows/ci.yml@refs/heads/main"
+                    rekor:
+                      # Rekor public transparency log
+                      url: https://rekor.sigstore.dev

@@ -1,0 +1,49 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow Latest Tag
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Forbids images tagged :latest (or with no tag) in the production namespace.
+      Using :latest makes deployments non-reproducible and prevents rollbacks.
+      Staging is intentionally exempt to allow rapid iteration with untagged images.
+      This policy is safe to Enforce immediately since production CI should always
+      tag images with the git SHA or semver.
+spec:
+  # Enforce mode: this one is safe to enforce immediately.
+  # Production deployments should always use a pinned tag (git SHA or semver).
+  # Staging is excluded below so developers can push images without tagging.
+  validationFailureAction: Enforce
+
+  background: true
+
+  rules:
+    - name: disallow-latest-tag-production
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+      validate:
+        message: >-
+          Images in the production namespace must use a pinned tag, not :latest
+          or an untagged image. Use a git SHA or semver tag instead.
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                any:
+                  # Deny if tag is "latest"
+                  - key: "{{ element.image }}"
+                    operator: Equals
+                    value: "*:latest"
+                  # Deny if image has no tag (no colon separator)
+                  - key: "{{ element.image }}"
+                    operator: NotIn
+                    value:
+                      - "*:*"

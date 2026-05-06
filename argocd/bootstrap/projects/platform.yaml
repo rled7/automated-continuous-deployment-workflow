@@ -16,6 +16,7 @@ spec:
     - https://open-telemetry.github.io/opentelemetry-helm-charts
     - https://kubernetes.github.io/ingress-nginx
     - https://bitnami-labs.github.io/sealed-secrets
+    - https://kyverno.github.io/kyverno
 
   destinations:
     - namespace: "*"

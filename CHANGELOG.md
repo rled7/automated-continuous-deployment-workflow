@@ -2,6 +2,49 @@
 
 All notable file-level changes to this repo, tracked per build. Newest first.
 
+## Build 016 — Cluster security: Kyverno + policies, NetworkPolicies, quotas, PSS, RBAC
+**Date:** 2026-05-06
+**Scope:** Phase D of the production-readiness plan (closes Phase D)
+
+### Added
+
+- `argocd/bootstrap/apps/kyverno.yaml` — Argo Application, project `platform`, chart `kyverno` v3.3.3 from `https://kyverno.github.io/kyverno`, target namespace `kyverno`, sync wave -10 (installs before any workloads). `installCRDs: true`. Resource requests: admission controller 100m/128Mi, background controller 100m/128Mi, cleanup controller 100m/64Mi, reports controller 100m/64Mi. Limits sized for kind (500m/384Mi for admission).
+- `argocd/bootstrap/apps/kyverno-policies.yaml` — Argo Application, project `platform`, `directory` source pointing at `policies/kyverno/`, sync wave 10 (after Kyverno CRDs at wave -10). ClusterPolicies are cluster-scoped; namespace set to `kyverno` for Argo CD tracking only. Automated sync with prune + selfHeal.
+- `policies/kyverno/require-resource-limits.yaml` — `ClusterPolicy` `require-resource-limits`, `validationFailureAction: Audit`. Requires CPU + memory requests and limits on every container. Excludes `kube-system` and `kyverno` namespaces. Comment instructs switching to Enforce after a soak period.
+- `policies/kyverno/require-labels.yaml` — `ClusterPolicy` `require-labels`, `validationFailureAction: Audit`. Requires `app`, `env`, `version` labels on Deployments and Argo Rollouts in `production` and `staging` namespaces.
+- `policies/kyverno/disallow-latest-tag.yaml` — `ClusterPolicy` `disallow-latest-tag`, `validationFailureAction: Enforce`. Forbids `:latest` or untagged images in the `production` namespace only. Staging is exempt for rapid iteration. Safe to enforce immediately — CI must tag production images with git SHA or semver.
+- `policies/kyverno/require-readonly-rootfs.yaml` — `ClusterPolicy` `require-readonly-rootfs`, `validationFailureAction: Audit`. Requires `securityContext.readOnlyRootFilesystem: true` on containers in `production` and `staging`. Comment instructs switching to Enforce after soak.
+- `policies/kyverno/verify-image-signatures.yaml` — `ClusterPolicy` `verify-image-signatures`, `validationFailureAction: Audit`. Uses `verifyImages` rule with cosign keyless verification (Fulcio CA + Rekor transparency log). Matches `ghcr.io/YOUR_ORG/my-app:*` — update registry placeholder before production use. Header comment block explains prerequisites: sign images in CI, configure OIDC issuer, validate PolicyReports before switching to Enforce.
+- `policies/kyverno/README.md` — Policy table (name, enforcement mode, scope, summary), Audit→Enforce promotion path, notes on `disallow-latest-tag` enforce-from-day-one rationale and `verify-image-signatures` prerequisites.
+- `k8s/base/network-policy.yaml` — Multi-document YAML with 6 NetworkPolicy resources: (1) `default-deny-all` — denies all ingress+egress for every pod; (2) `allow-dns` — egress UDP/TCP 53 for all pods; (3) `allow-app-ingress-from-nginx` — ingress on 3000 from `ingress-nginx` namespace; (4) `allow-app-egress-otel` — egress on 4318 to OTel collector in `monitoring` namespace; (5) `allow-prometheus-scrape` — ingress on 3000 from Prometheus in `monitoring` namespace; (6) `allow-app-egress-db-redis` — forward-looking egress to `app-db` on 5432 and `redis` on 6379 (comment notes these land in Build 017).
+- `k8s/base/resource-quota.yaml` — `ResourceQuota` `my-app-quota` with base values: `requests.cpu: 2`, `requests.memory: 2Gi`, `limits.cpu: 4`, `limits.memory: 4Gi`, `pods: 20`, `count/services: 10`, `persistentvolumeclaims: 5`.
+- `k8s/base/limit-range.yaml` — `LimitRange` `my-app-limits` with: default limits (500m/512Mi), defaultRequest (100m/128Mi), max (2/2Gi), min (50m/64Mi).
+- `k8s/base/service-account.yaml` — `ServiceAccount` `my-app` with `automountServiceAccountToken: false`. No roles bound. Comment documents how to add least-privilege RBAC in overlays if the app later needs API access.
+- `k8s/overlays/production/quota-patch.yaml` — Patches `ResourceQuota` `my-app-quota` to production values: `requests.cpu: 8`, `requests.memory: 8Gi`, `limits.cpu: 16`, `limits.memory: 16Gi`, `pods: 50`.
+
+### Modified
+
+- `argocd/bootstrap/projects/platform.yaml` — Added `https://kyverno.github.io/kyverno` to `sourceRepos` whitelist so the Kyverno Argo Application can pull the Helm chart.
+- `k8s/base/kustomization.yaml` — Added `service-account.yaml`, `network-policy.yaml`, `resource-quota.yaml`, `limit-range.yaml` to the resources list.
+- `k8s/base/deployment.yaml` — Added `spec.template.spec.serviceAccountName: my-app` so the deployment uses the dedicated ServiceAccount instead of `default`. Also added `spec.template.spec.securityContext.seccompProfile.type: RuntimeDefault` at the pod level — this was missing and is required by PSS `restricted` (k8s >= 1.25). Without it the namespace PSS labels would warn/block pods. `RuntimeDefault` uses the container runtime's default seccomp filter and is safe for well-behaved applications.
+- `k8s/overlays/production/namespace.yaml` — Added Pod Security Standards labels: `enforce: restricted`, `audit: restricted`, `warn: restricted`. PSS `restricted` requires runAsNonRoot, readOnlyRootFilesystem, allowPrivilegeEscalation: false, drop ALL capabilities — all of which the base deployment.yaml already satisfies (see PSS compatibility note below).
+- `k8s/overlays/staging/namespace.yaml` — Same PSS labels as production. Staging mirrors production posture so developers catch violations before they reach production.
+- `k8s/overlays/production/kustomization.yaml` — Added `quota-patch.yaml` to the patches list, targeting `ResourceQuota/my-app-quota`.
+- `argocd/AppProject.yaml` — Tightened security posture: `sourceRepos` narrowed from `'*'` to `https://github.com/rled7/automated-continuous-deployment-workflow`; `destinations.namespaces` narrowed from `'*'` to `production`, `staging`, `preview-*`; `clusterResourceWhitelist` replaced `'*/*'` with only `Namespace`; `ci-deployer` role limited to `applications, get` and `applications, sync` only.
+
+### Closes (from production-readiness plan)
+- Phase D: cluster-side security hardening (Kyverno admission controller, admission policies, NetworkPolicies, ResourceQuota + LimitRange, Pod Security Standards, tightened AppProject RBAC, dedicated ServiceAccount)
+
+### Judgment calls
+- **Kyverno chart v3.3.3:** latest stable in the 3.x series as of the build date. Pinned for reproducibility.
+- **Staging quota:** staging keeps base ResourceQuota values (2 cpu req, 2Gi mem req, 20 pods). No separate staging quota-patch needed; base values are appropriate for a lower-traffic environment. This is noted rather than adding a no-op patch.
+- **PSS compatibility:** the base `deployment.yaml` securityContext satisfied most PSS `restricted` requirements (`runAsNonRoot: true`, `runAsUser: 1000`, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`), but was missing `seccompProfile` which is **required** by PSS `restricted` in k8s >= 1.25. `spec.template.spec.securityContext.seccompProfile.type: RuntimeDefault` was added at the pod level. All five PSS restricted requirements are now met; the namespace labels will not block or warn the app pods.
+- **`disallow-latest-tag` Enforce from day one:** the only policy on Enforce immediately. Production CI (Jenkinsfile) tags images with a git SHA; `:latest` in the base deployment.yaml is overridden by the overlay `images:` block before reaching the cluster.
+- **AppProject ClusterIssuer removal:** `ClusterIssuer` was removed from `clusterResourceWhitelist` in `AppProject.yaml`. The my-app workloads reference ClusterIssuers by name in Ingress annotations (consumed by cert-manager), but they do not create or own ClusterIssuer objects — those are managed by the `platform` project. Removing it from my-app's whitelist is correct; no functional change to cert-manager behavior.
+- **`allow-app-egress-db-redis` NetworkPolicy:** forward-looking policy for Build 017. Applied now so network access is pre-authorized when the DB/cache lands.
+
+---
+
 ## Build 015 — Tempo, Promtail, DORA pushes, scanner tightening, PR-teardown job
 **Date:** 2026-05-06
 **Scope:** Phase C of the production-readiness plan (closes Phase C)

@@ -2,3 +2,15 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: production
+  labels:
+    # Pod Security Standards — restrict all pods to the "restricted" profile.
+    # The restricted profile requires: runAsNonRoot, readOnlyRootFilesystem,
+    # allowPrivilegeEscalation: false, drop ALL capabilities, seccompProfile
+    # (RuntimeDefault or Localhost), and no privileged containers.
+    # The base deployment.yaml satisfies all of these as of Build 016
+    # (seccompProfile was added in this build alongside these labels).
+    # If a future workload cannot meet restricted, use a Kyverno PolicyException
+    # rather than relaxing this namespace label.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

@@ -1,0 +1,137 @@
+# NetworkPolicies for my-app namespace
+# These policies implement a default-deny posture with explicit allow rules.
+# Applied via kustomization.yaml and inherited by production + staging overlays.
+
+---
+# 1. Default deny all ingress and egress for every pod in the namespace.
+# Everything must be explicitly allowed by the rules below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}     # matches all pods in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# 2. Allow DNS egress (UDP + TCP port 53) to kube-dns so pods can resolve
+# service names. Without this, all DNS lookups fail under default-deny.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}     # all pods in the namespace
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# 3. Allow ingress to app pods on port 3000 from the ingress-nginx namespace.
+# Only the NGINX ingress controller can route external traffic to the app.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-ingress-from-nginx
+spec:
+  podSelector:
+    matchLabels:
+      app: my-app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3000
+
+---
+# 4. Allow egress from app pods to the OpenTelemetry collector in the monitoring
+# namespace on TCP 4318 (OTLP/HTTP). App ships traces and metrics via OTel.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-egress-otel
+spec:
+  podSelector:
+    matchLabels:
+      app: my-app
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opentelemetry-collector
+      ports:
+        - protocol: TCP
+          port: 4318
+
+---
+# 5. Allow ingress to app pods on port 3000 from the monitoring namespace
+# (Prometheus scrapes the /metrics endpoint). Selector targets Prometheus pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+spec:
+  podSelector:
+    matchLabels:
+      app: my-app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 3000
+
+---
+# 6. Allow egress from app pods to the database (PostgreSQL on 5432) and cache
+# (Redis on 6379). These services will exist once Build 017 lands.
+# FORWARD-LOOKING: these pods/labels do not yet exist in the cluster.
+# The policy is applied now so it is in effect as soon as the DB/cache lands.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-egress-db-redis
+spec:
+  podSelector:
+    matchLabels:
+      app: my-app
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: app-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379

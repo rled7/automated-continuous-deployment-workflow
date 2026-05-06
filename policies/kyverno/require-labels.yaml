@@ -1,0 +1,60 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-labels
+  annotations:
+    policies.kyverno.io/title: Require Standard Labels
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: low
+    policies.kyverno.io/description: >-
+      Requires Deployments and Rollouts in production and staging to carry
+      the standard labels: app, env, and version. These labels are used for
+      monitoring, routing, and incident triage.
+      NOTE: Switch to Enforce once all workloads have been updated.
+spec:
+  # Audit mode: violations are recorded but deployments are not blocked.
+  # Switch to Enforce after a soak period to ensure all manifests carry the labels.
+  validationFailureAction: Audit
+
+  background: true
+
+  rules:
+    - name: require-deployment-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+              namespaces:
+                - production
+                - staging
+      validate:
+        message: >-
+          Deployments in production and staging must define labels: app, env,
+          and version. Add these to spec.template.metadata.labels.
+        pattern:
+          metadata:
+            labels:
+              app: "?*"
+              env: "?*"
+              version: "?*"
+
+    - name: require-rollout-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Rollout
+              namespaces:
+                - production
+                - staging
+      validate:
+        message: >-
+          Argo Rollouts in production and staging must define labels: app, env,
+          and version. Add these to spec.template.metadata.labels.
+        pattern:
+          metadata:
+            labels:
+              app: "?*"
+              env: "?*"
+              version: "?*"

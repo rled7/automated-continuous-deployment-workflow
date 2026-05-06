@@ -34,3 +34,7 @@ patches:
     target:
       kind: HorizontalPodAutoscaler
       name: my-app
+  - path: quota-patch.yaml
+    target:
+      kind: ResourceQuota
+      name: my-app-quota

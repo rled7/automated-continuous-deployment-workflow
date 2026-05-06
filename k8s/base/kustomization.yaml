@@ -8,3 +8,7 @@ resources:
   - configmap.yaml
   - hpa.yaml
   - pdb.yaml
+  - service-account.yaml
+  - network-policy.yaml
+  - resource-quota.yaml
+  - limit-range.yaml

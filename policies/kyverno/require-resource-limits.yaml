@@ -1,0 +1,48 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+  annotations:
+    policies.kyverno.io/title: Require Resource Limits
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Requires all containers to have CPU and memory requests and limits set.
+      Running without limits risks resource starvation and node instability.
+      NOTE: Set validationFailureAction to Enforce after a soak period once all
+      workloads have been verified to define resource limits.
+spec:
+  # Audit mode: records violations without blocking deployments.
+  # Switch to Enforce once all existing workloads define resource limits.
+  validationFailureAction: Audit
+
+  background: true
+
+  rules:
+    - name: require-resource-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+      validate:
+        message: >-
+          All containers must define resources.requests and resources.limits for
+          both cpu and memory. Add these to your container spec to resolve the
+          violation.
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    cpu: "?*"
+                    memory: "?*"

@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: my-app-limits
+spec:
+  limits:
+    - type: Container
+      # Default limits applied when a container does not specify limits.
+      # These also satisfy the Kyverno require-resource-limits policy.
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      # Default requests applied when a container does not specify requests.
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      # Maximum per-container values — prevents a single container from
+      # consuming disproportionate cluster resources.
+      max:
+        cpu: "2"
+        memory: "2Gi"
+      # Minimum per-container values — ensures accurate scheduling.
+      min:
+        cpu: "50m"
+        memory: "64Mi"

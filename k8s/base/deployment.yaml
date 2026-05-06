@@ -17,6 +17,14 @@ spec:
         app: my-app
     spec:
       terminationGracePeriodSeconds: 60
+      serviceAccountName: my-app
+      # seccompProfile required by PSS restricted (k8s >= 1.25).
+      # RuntimeDefault uses the container runtime's default seccomp profile,
+      # which blocks a wide set of dangerous syscalls while being broadly
+      # compatible with well-behaved applications.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       imagePullSecrets:
         - name: registry-credentials
       containers:

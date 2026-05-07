@@ -1,0 +1,93 @@
+# =============================================================================
+# disallow-privileged-containers — ClusterPolicy (Enforce, Build 021)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Forbids containers in production and staging from running in privileged mode
+# (securityContext.privileged: true). A privileged container gets almost all
+# Linux capabilities, can access all devices on the host, and can read/write
+# the host filesystem. This effectively gives the container root on the node,
+# making it a full container-escape vector if compromised.
+#
+# EXCLUSIONS
+# ----------
+# kube-system, kyverno, cert-manager, and ingress-nginx are excluded. System
+# DaemonSets (e.g., log shippers, CNI agents, device plugins) may legitimately
+# need privileged mode to manage kernel interfaces. Application workloads in
+# production and staging should never require it.
+#
+# chaos-mesh is also excluded (added Build 022). The chaos-daemon DaemonSet
+# runs with elevated privileges because it must inject faults at the kernel and
+# network layer — manipulating iptables rules, accessing containerd sockets,
+# and inspecting /proc for process-level fault injection. This is the designed
+# behaviour of a chaos engineering tool. Chaos Mesh should NEVER be installed
+# in production; it belongs in staging and kind clusters only.
+#
+# IF THIS BLOCKS A LEGITIMATE WORKLOAD
+# -------------------------------------
+# Privileged containers are almost always replaceable with specific capability
+# grants (e.g., NET_BIND_SERVICE instead of full privileged). If a workload
+# genuinely cannot be refactored, create a time-bound PolicyException:
+#
+#   kubectl apply -f policies/kyverno/policy-exceptions/disallow-privileged-containers-<reason>.yaml
+#
+# See policies/kyverno/policy-exceptions/README.md for the full exception workflow.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged-containers
+  annotations:
+    policies.kyverno.io/title: Disallow Privileged Containers
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      Forbids containers in production and staging from running with
+      securityContext.privileged: true. Privileged containers have near-root
+      access to the host node and represent a critical container-escape risk.
+      System namespaces (kube-system, kyverno, cert-manager, ingress-nginx)
+      are excluded as system DaemonSets may require privileged mode.
+      chaos-mesh is excluded because the chaos-daemon DaemonSet legitimately
+      needs elevated privileges to inject kernel/network-layer faults.
+spec:
+  # Enforce mode: pods with privileged containers in production/staging are rejected.
+  validationFailureAction: Enforce
+
+  background: true
+
+  rules:
+    - name: disallow-privileged-containers
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      # Exclude system namespaces and chaos-mesh (chaos-daemon requires elevated
+      # privileges to inject faults at the kernel and network layer).
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
+      validate:
+        message: >-
+          containers[*].securityContext.privileged: true is not allowed in
+          production or staging. Remove the privileged flag or set it to false.
+          If you need a specific capability, add it to
+          securityContext.capabilities.add instead of using privileged mode.
+          If this is a legitimate infrastructure requirement, create a
+          PolicyException in policies/kyverno/policy-exceptions/.
+        pattern:
+          spec:
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"

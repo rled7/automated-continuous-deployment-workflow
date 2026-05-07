@@ -1,0 +1,38 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: my-app
+
+build:
+  artifacts:
+    - image: my-app
+      context: app
+      docker:
+        dockerfile: ../docker/Dockerfile
+  # Use local Docker daemon by default; override with --default-repo for a registry push
+  local:
+    push: false
+
+deploy:
+  kubeContext: ""   # leave blank to use current context; override with --kube-context
+  kustomize:
+    paths:
+      - k8s/overlays/staging
+
+# Namespace override for local dev — keeps dev work out of the staging namespace
+manifests:
+  kustomize:
+    paths:
+      - k8s/overlays/staging
+
+# Hot-reload: sync JS source files into running container without a full rebuild
+sync:
+  infer:
+    - "app/src/**/*.js"
+
+portForward:
+  - resourceType: service
+    resourceName: my-app
+    namespace: dev
+    port: 3000
+    localPort: 3000

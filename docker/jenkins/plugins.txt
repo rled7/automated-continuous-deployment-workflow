@@ -1,0 +1,61 @@
+# Jenkins plugins installed at startup. One per line, format: <plugin-id>:<version|latest>
+
+# ── Pipeline core ────────────────────────────────────────────────────────────
+workflow-aggregator:latest
+pipeline-stage-view:latest
+pipeline-utility-steps:latest
+
+# ── SCM ──────────────────────────────────────────────────────────────────────
+git:latest
+github:latest
+github-branch-source:latest
+
+# ── Configuration as Code ────────────────────────────────────────────────────
+configuration-as-code:latest
+job-dsl:latest
+
+# ── Credentials & auth ───────────────────────────────────────────────────────
+credentials:latest
+credentials-binding:latest
+plain-credentials:latest
+role-strategy:latest
+
+# ── Build tools ──────────────────────────────────────────────────────────────
+nodejs:latest
+docker-workflow:latest
+docker-plugin:latest
+
+# ── Kubernetes ───────────────────────────────────────────────────────────────
+kubernetes:latest
+kubernetes-cli:latest
+
+# ── Quality & security ───────────────────────────────────────────────────────
+sonar:latest
+warnings-ng:latest
+dependency-check-jenkins-plugin:latest
+
+# ── Test reporting ───────────────────────────────────────────────────────────
+junit:latest
+cobertura:latest
+htmlpublisher:latest
+
+# ── Notifications ────────────────────────────────────────────────────────────
+slack:latest
+
+# ── UX / housekeeping ────────────────────────────────────────────────────────
+timestamper:latest
+ansicolor:latest
+ws-cleanup:latest
+build-timeout:latest
+
+# ── Webhook triggers (Build 015) ──────────────────────────────────────────────
+# Required by the pr-preview-teardown job (JCasC jobs block in jenkins.yaml).
+# Exposes /generic-webhook-trigger/invoke which receives GitHub pull_request
+# closed events and fires the teardown pipeline with CHANGE_ID extracted via JSONPath.
+generic-webhook-trigger:latest
+
+# ── Metrics (Build 018) ────────────────────────────────────────────────────────
+# Exposes /prometheus endpoint so Prometheus can scrape Jenkins build metrics:
+# build duration, success/failure counts, queue length, executor utilisation.
+# Pairs with the jenkins scrape job in kube-prometheus-stack additionalScrapeConfigs.
+prometheus:latest

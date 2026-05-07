@@ -1,0 +1,9 @@
+# This strategic-merge patch deletes the base Deployment so that the Argo Rollout
+# resource (rollout-patch.yaml) takes over as the workload controller for production.
+# Argo Rollouts manages its own ReplicaSets and does not coexist with a Deployment
+# of the same name.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  $patch: delete

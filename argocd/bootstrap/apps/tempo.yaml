@@ -1,0 +1,90 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tempo
+  namespace: argocd
+  annotations:
+    # Wave 0: install alongside other monitoring stack components (after wave -10 CRD controllers).
+    # The OTel collector will retry connecting to Tempo until it is ready — no explicit
+    # dependsOn is needed; the collector's retry logic handles transient unavailability.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: tempo
+    targetRevision: "1.10.3"
+    helm:
+      valuesObject:
+        # ── Single-binary mode ────────────────────────────────────────────────
+        # Runs all Tempo components (distributor, ingester, querier, compactor,
+        # query-frontend) in a single process. Suitable for kind/dev clusters.
+        # Switch to the `tempo-distributed` chart for production HA deployments.
+        tempo:
+          # Single-binary: one pod handles all roles.
+          # Replicas > 1 requires an object-store backend; keep at 1 for local.
+          replicas: 1
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # ── Storage ────────────────────────────────────────────────────────
+          # PRODUCTION NOTE: swap `local` for `s3`, `gcs`, or `azure` and
+          # configure the corresponding backend block (bucket name, credentials
+          # via a SealedSecret, region, etc.).  Local storage is ephemeral —
+          # traces are lost when the pod is replaced.
+          storage:
+            trace:
+              backend: local
+              local:
+                path: /var/tempo/traces
+              wal:
+                path: /var/tempo/wal
+
+          # ── Receivers ──────────────────────────────────────────────────────
+          # Expose OTLP gRPC (4317) and HTTP (4318) so both the OTel collector
+          # and any app that wants to send traces directly can reach Tempo.
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: "0.0.0.0:4317"
+                http:
+                  endpoint: "0.0.0.0:4318"
+
+        # ── Service ───────────────────────────────────────────────────────────
+        # Expose OTLP ports as a ClusterIP service inside the cluster.
+        # In-cluster address: tempo.monitoring.svc.cluster.local:4317 (gRPC)
+        #                     tempo.monitoring.svc.cluster.local:4318 (HTTP)
+        service:
+          type: ClusterIP
+
+        # ── Persistence ───────────────────────────────────────────────────────
+        # EmptyDir for kind (ephemeral). Mount a PVC for longer-lived dev clusters.
+        persistence:
+          enabled: false
+
+        # ── Grafana datasource via kube-prometheus-stack Grafana ───────────────
+        # If using the Grafana bundled with kube-prometheus-stack, add a datasource
+        # via grafana.additionalDataSources pointing at http://tempo.monitoring.svc:3100
+        # (Tempo query-frontend HTTP port) with type=tempo.
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

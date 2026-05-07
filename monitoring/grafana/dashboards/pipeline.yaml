@@ -1,0 +1,146 @@
+# Jenkins pipeline metrics dashboard.
+# REQUIRES: Jenkins Prometheus plugin (prometheus:latest) — added to
+# docker/jenkins/plugins.txt in Build 018. The plugin exposes /prometheus
+# on the Jenkins HTTP port (8080) and is scraped via the 'jenkins' job
+# in kube-prometheus-stack additionalScrapeConfigs.
+#
+# Key metrics exposed by the Jenkins Prometheus plugin:
+#   jenkins_builds_duration_milliseconds_summary — build durations
+#   jenkins_builds_success_build_count_total     — successful builds
+#   jenkins_builds_failed_build_count_total      — failed builds
+#   jenkins_job_count_value                      — total job count
+#   default_jenkins_builds_duration_milliseconds — per-stage durations
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-pipeline
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  pipeline.json: |
+    {
+      "title": "Jenkins Pipeline Metrics",
+      "uid": "jenkins-pipeline",
+      "schemaVersion": 38,
+      "version": 1,
+      "time": { "from": "now-24h", "to": "now" },
+      "refresh": "1m",
+      "timezone": "browser",
+      "tags": ["jenkins", "pipeline"],
+      "panels": [
+        {
+          "id": 1,
+          "title": "Build Duration P95 (ms)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 0, "w": 16, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(jenkins_builds_duration_milliseconds_summary_bucket[10m])) by (le, job_name))",
+              "legendFormat": "p95 {{job_name}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "color": { "mode": "palette-classic" }
+            }
+          }
+        },
+        {
+          "id": 2,
+          "title": "Build Success Rate",
+          "type": "stat",
+          "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "100 * sum(increase(jenkins_builds_success_build_count_total[24h])) / (sum(increase(jenkins_builds_success_build_count_total[24h])) + sum(increase(jenkins_builds_failed_build_count_total[24h])))",
+              "legendFormat": "success rate %",
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 80 },
+                  { "color": "green", "value": 95 }
+                ]
+              }
+            }
+          },
+          "options": {
+            "graphMode": "area",
+            "reduceOptions": { "calcs": ["lastNotNull"] }
+          }
+        },
+        {
+          "id": 3,
+          "title": "Stage-by-Stage Duration (bar chart)",
+          "type": "barchart",
+          "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "avg by (stage) (jenkins_builds_duration_milliseconds_summary{quantile=\"0.5\"})",
+              "legendFormat": "{{stage}}",
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "orientation": "horizontal",
+            "xTickLabelRotation": 0,
+            "barWidth": 0.7
+          }
+        },
+        {
+          "id": 4,
+          "title": "Builds Over Time (success vs failure)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 16, "w": 24, "h": 7 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(increase(jenkins_builds_success_build_count_total[10m]))",
+              "legendFormat": "success",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(increase(jenkins_builds_failed_build_count_total[10m]))",
+              "legendFormat": "failed",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "palette-classic" }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "failed" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "success" },
+                "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+              }
+            ]
+          }
+        }
+      ]
+    }

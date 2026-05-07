@@ -1,0 +1,79 @@
+# =============================================================================
+# IOChaos — io-delay experiment (Build 022)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Injects a 50ms delay on all filesystem read and write operations on the
+# app container's log volume mount (/app/logs) for 60 seconds. Tests whether
+# slow I/O on the logging path degrades application throughput or causes log
+# buffer exhaustion.
+#
+# SAFETY
+# ------
+# - This experiment ONLY targets the staging namespace.
+# - The delay is applied only to the /app/logs path — not to the application's
+#   working directory. If the app writes logs synchronously, the request
+#   path will slow down; if asynchronously, impact should be minimal.
+# - Duration is capped at 60 seconds.
+#
+# NOTE ON CONTAINER PATH
+# ----------------------
+# The volumeMount path /app/logs is the value set in the application Deployment.
+# If the Deployment mounts the log volume at a different path, update
+# spec.volumePath below to match.
+#
+# HOW TO RUN
+#   kubectl apply -f chaos/io-delay.yaml
+#
+# HOW TO OBSERVE
+#   kubectl describe iochaos io-delay-staging -n staging
+#   kubectl logs -n staging -l app=my-app --tail=50
+#   # Watch for log lag or timeout errors; compare p95 latency in Grafana
+#
+# HOW TO STOP (early termination)
+#   kubectl delete -f chaos/io-delay.yaml
+#
+# HYPOTHESIS
+#   If the application writes logs synchronously, p95 API response times
+#   should increase by ~50ms during the experiment. If the logging library
+#   buffers writes, the impact should be near-zero — confirming that the
+#   asynchronous logging path is working correctly.
+# =============================================================================
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: IOChaos
+metadata:
+  name: io-delay-staging
+  namespace: staging
+spec:
+  action: latency
+
+  # Target: one random app pod in staging
+  selector:
+    namespaces:
+      - staging
+    labelSelectors:
+      app: my-app
+
+  # Mode: apply to one pod at random
+  mode: one
+
+  # Delay: 50ms on all I/O operations on the log volume
+  delay: 50ms
+
+  # Scope: apply to all I/O operations (reads and writes)
+  methods:
+    - read
+    - write
+
+  # Container: inject only into the app container, not any sidecar
+  containerNames:
+    - app
+
+  # Volume path: the log volume mount inside the container.
+  # Must match the volumeMount.mountPath in the Deployment spec.
+  volumePath: /app/logs
+
+  # Duration: 60 seconds
+  duration: "60s"

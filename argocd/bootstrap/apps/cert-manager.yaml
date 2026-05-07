@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  annotations:
+    # Wave -10: cert-manager CRDs must exist before ClusterIssuers (wave 0) are applied
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://charts.jetstack.io
+    chart: cert-manager
+    targetRevision: "v1.16.3"
+    helm:
+      valuesObject:
+        # Install CRDs as part of the Helm release so Argo CD tracks them.
+        installCRDs: true
+        # Lightweight resource requests suitable for a kind/dev cluster.
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      # Required when managing CRDs via Helm
+      - ServerSideApply=true

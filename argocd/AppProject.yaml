@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: my-app
+  namespace: argocd
+spec:
+  description: "Project for my-app deployments (production, staging, PR previews)"
+
+  sourceRepos:
+    - https://github.com/rled7/automated-continuous-deployment-workflow
+
+  destinations:
+    - namespace: production
+      server: https://kubernetes.default.svc
+    - namespace: staging
+      server: https://kubernetes.default.svc
+    - namespace: preview-*
+      server: https://kubernetes.default.svc
+
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+
+  roles:
+    - name: ci-deployer
+      description: "Role for CI/CD pipeline to sync applications"
+      policies:
+        - p, proj:my-app:ci-deployer, applications, sync, my-app/*, allow
+        - p, proj:my-app:ci-deployer, applications, get, my-app/*, allow

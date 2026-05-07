@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: my-app-quota
+spec:
+  hard:
+    # Production runs more replicas and heavier workloads than the base defaults.
+    # These values reflect a small-to-medium production deployment; scale up as
+    # the team grows. Staging intentionally uses the conservative base values.
+    requests.cpu: "8"
+    requests.memory: "8Gi"
+    limits.cpu: "16"
+    limits.memory: "16Gi"
+
+    # More pods for multi-replica deployments + canary pods during Rollout.
+    pods: "50"
+
+    # Object counts stay at base defaults for production.
+    count/services: "10"
+    persistentvolumeclaims: "5"

@@ -1,0 +1,69 @@
+# =============================================================================
+# NetworkChaos — network-partition experiment (Build 022)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Creates a full network partition between app=my-app pods and app=app-db pods
+# for 30 seconds. Tests the application's database-down behaviour: the
+# /health/ready endpoint should return 503 (not hang, not panic, not 500),
+# and the app should resume normal operation within a few seconds after the
+# partition clears.
+#
+# SAFETY
+# ------
+# - This experiment ONLY targets the staging namespace.
+# - The partition is bidirectional — both sides lose connectivity.
+# - Duration is capped at 30 seconds. Short blast radius intentionally;
+#   extend only after confirming 503 behaviour is correct.
+#
+# HOW TO RUN
+#   kubectl apply -f chaos/network-partition.yaml
+#
+# HOW TO OBSERVE
+#   kubectl describe networkchaos network-partition-staging -n staging
+#   curl -s https://staging.app.example.com/health/ready
+#   # Expect: HTTP 503 Service Unavailable during the partition
+#   # Expect: HTTP 200 within ~5s after the partition ends
+#
+# HOW TO STOP (early termination)
+#   kubectl delete -f chaos/network-partition.yaml
+#
+# HYPOTHESIS
+#   During the 30s partition, /health/ready returns 503 (DB health check
+#   fails, readiness probe triggers, pod removed from Endpoints). After
+#   the partition clears, the app reconnects automatically (connection pool
+#   retry) and readiness is restored within the probe period.
+#   No data corruption should result from the partition.
+# =============================================================================
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-partition-staging
+  namespace: staging
+spec:
+  action: partition
+
+  # Source: app pods
+  selector:
+    namespaces:
+      - staging
+    labelSelectors:
+      app: my-app
+
+  # Direction: both directions (full partition, not one-way)
+  direction: both
+
+  # Target: database pods
+  target:
+    selector:
+      namespaces:
+        - staging
+      labelSelectors:
+        app: app-db
+    mode: all
+
+  # Duration: 30 seconds — long enough to observe 503s, short enough to
+  # limit data loss risk in staging.
+  duration: "30s"

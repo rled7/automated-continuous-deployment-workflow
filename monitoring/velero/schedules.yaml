@@ -1,0 +1,144 @@
+# =============================================================================
+# Velero Backup Schedules (Build 022)
+# =============================================================================
+#
+# Three schedules:
+#   1. daily-production  — full backup of the production namespace, 02:00 UTC,
+#                          retained for 30 days.
+#   2. daily-staging     — full backup of the staging namespace, 02:30 UTC,
+#                          retained for 7 days (shorter; staging is disposable).
+#   3. weekly-cluster    — full cluster-wide backup every Sunday at 03:00 UTC,
+#                          retained for 90 days. Includes all namespaces so
+#                          cluster-scoped resources (CRDs, ClusterRoles, etc.)
+#                          are captured.
+#
+# PRE-BACKUP HOOKS (sketch — not implemented here)
+# ------------------------------------------------
+# For applications backed by a real PostgreSQL instance, add a pre-backup hook
+# to flush in-flight transactions before Velero snapshots the PVC:
+#
+#   spec.template.metadata.annotations:
+#     pre.hook.backup.velero.io/container: postgres-sidecar
+#     pre.hook.backup.velero.io/command: >-
+#       ["pg_dumpall", "-U", "postgres", "-f", "/backup/pre-backup.sql"]
+#     pre.hook.backup.velero.io/timeout: 60s
+#
+# This repo uses a managed DB in real production, so no hook is wired here.
+# In a self-hosted Postgres setup, wire the pg_dumpall hook above before
+# relying on Velero PVC snapshots for data recovery.
+#
+# APPLIED BY
+# ----------
+# argocd/bootstrap/apps/velero-schedules.yaml — Argo Application using
+# directory source pointing at this file. Sync wave 10 (after Velero, wave 0).
+# =============================================================================
+
+---
+# Schedule 1: Daily full backup of the production namespace
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-production
+  namespace: velero
+  labels:
+    backup-tier: production
+spec:
+  # 02:00 UTC daily
+  schedule: "0 2 * * *"
+
+  template:
+    # Include only the production namespace
+    includedNamespaces:
+      - production
+
+    # Include all resource types
+    includedResources:
+      - "*"
+
+    # Include cluster-scoped resources referenced by namespaced resources
+    includeClusterResources: true
+
+    # Storage location: the MinIO-backed BSL defined in velero.yaml
+    storageLocation: default
+
+    # Volume snapshots via the default VSL
+    volumeSnapshotLocations:
+      - default
+
+    # Retention: 30 days (720 hours)
+    ttl: 720h0m0s
+
+    # Labels for easy filtering
+    labels:
+      schedule: daily-production
+      environment: production
+
+---
+# Schedule 2: Daily full backup of the staging namespace
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-staging
+  namespace: velero
+  labels:
+    backup-tier: staging
+spec:
+  # 02:30 UTC daily (staggered 30 min after production to reduce MinIO load)
+  schedule: "30 2 * * *"
+
+  template:
+    includedNamespaces:
+      - staging
+
+    includedResources:
+      - "*"
+
+    includeClusterResources: true
+
+    storageLocation: default
+
+    volumeSnapshotLocations:
+      - default
+
+    # Retention: 7 days — staging is ephemeral; short TTL keeps storage lean
+    ttl: 168h0m0s
+
+    labels:
+      schedule: daily-staging
+      environment: staging
+
+---
+# Schedule 3: Weekly cluster-wide backup (every Sunday at 03:00 UTC)
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: weekly-cluster
+  namespace: velero
+  labels:
+    backup-tier: cluster
+spec:
+  # 03:00 UTC every Sunday
+  schedule: "0 3 * * 0"
+
+  template:
+    # All namespaces — a true cluster-wide backup
+    includedNamespaces:
+      - "*"
+
+    includedResources:
+      - "*"
+
+    # Capture CRDs, ClusterRoles, ClusterRoleBindings, etc.
+    includeClusterResources: true
+
+    storageLocation: default
+
+    volumeSnapshotLocations:
+      - default
+
+    # Retention: 90 days — weekly backups kept longer for quarterly DR drills
+    ttl: 2160h0m0s
+
+    labels:
+      schedule: weekly-cluster
+      tier: full-cluster

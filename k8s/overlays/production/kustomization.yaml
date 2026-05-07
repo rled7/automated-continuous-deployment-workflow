@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: production
+
+resources:
+  - ../../base
+  - namespace.yaml
+  # Argo Rollout replaces the base Deployment in production.
+  # deployment-removal.yaml (below) deletes the base Deployment via $patch: delete.
+  - rollout-patch.yaml
+  - analysis-template.yaml
+
+images:
+  - name: my-app
+    newName: my-app
+    newTag: latest
+
+patches:
+  # Delete the base Deployment — production uses the Rollout above instead.
+  - path: deployment-removal.yaml
+    target:
+      kind: Deployment
+      name: my-app
+  - path: ingress-patch.yaml
+    target:
+      kind: Ingress
+      name: my-app
+  - path: configmap-patch.yaml
+    target:
+      kind: ConfigMap
+      name: my-app-config
+  - path: hpa-patch.yaml
+    target:
+      kind: HorizontalPodAutoscaler
+      name: my-app
+  - path: quota-patch.yaml
+    target:
+      kind: ResourceQuota
+      name: my-app-quota

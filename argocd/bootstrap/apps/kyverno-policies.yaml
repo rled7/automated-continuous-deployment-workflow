@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno-policies
+  namespace: argocd
+  annotations:
+    # Wave 10: runs after Kyverno admission controller (wave -10) has installed its CRDs.
+    # Policies are invalid if applied before CRDs exist.
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/rled7/automated-continuous-deployment-workflow
+    targetRevision: HEAD
+    path: policies/kyverno
+
+  destination:
+    server: https://kubernetes.default.svc
+    # ClusterPolicies are cluster-scoped; namespace here is just for Argo CD tracking.
+    namespace: kyverno
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ApplyOutOfSyncOnly=true

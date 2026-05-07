@@ -1,0 +1,69 @@
+# =============================================================================
+# require-readonly-rootfs — Promoted to Enforce (Build 021)
+# =============================================================================
+#
+# WHY THIS IS SAFE TO ENFORCE
+# ----------------------------
+# The production app Deployment sets securityContext.readOnlyRootFilesystem: true
+# on all containers (k8s/base/deployment.yaml) and mounts emptyDir volumes for
+# the two writable paths the app needs: /tmp and /app/logs. Zero violations were
+# reported in Audit mode during soak. No other workloads in production/staging
+# require a writable root filesystem.
+#
+# IF THIS BREAKS A FUTURE WORKLOAD
+# ----------------------------------
+# Set securityContext.readOnlyRootFilesystem: true and add emptyDir volumeMounts
+# for any paths your container writes to at runtime. If a workload genuinely
+# cannot be made read-only (e.g., a legacy database container that writes directly
+# to its image layer), create a time-bound PolicyException:
+#
+#   kubectl apply -f policies/kyverno/policy-exceptions/<policy-name>-<reason>.yaml
+#
+# Example one-liner:
+#   kubectl annotate policyexception my-exception expiry="2026-09-01" -n production
+#
+# See policies/kyverno/policy-exceptions/README.md for the full exception workflow.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-readonly-rootfs
+  annotations:
+    policies.kyverno.io/title: Require Read-Only Root Filesystem
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Requires securityContext.readOnlyRootFilesystem: true on all containers in
+      production and staging. A read-only root filesystem prevents an attacker from
+      writing malicious code or scripts to the container's filesystem at runtime.
+      Promoted to Enforce in Build 021 after soak confirmed all containers set
+      readOnlyRootFilesystem: true with emptyDir mounts for /tmp and /app/logs.
+spec:
+  # Enforce mode: pods without readOnlyRootFilesystem: true will be rejected.
+  # Promoted from Audit in Build 021 — zero violations observed during soak.
+  # Workloads needing writable paths must use emptyDir or projected volumes.
+  validationFailureAction: Enforce
+
+  background: true
+
+  rules:
+    - name: require-readonly-rootfs
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      validate:
+        message: >-
+          All containers in production and staging must set
+          securityContext.readOnlyRootFilesystem: true.
+          Mount writable directories via emptyDir volumes instead.
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  readOnlyRootFilesystem: true

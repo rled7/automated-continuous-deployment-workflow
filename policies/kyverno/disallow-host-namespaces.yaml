@@ -1,0 +1,155 @@
+# =============================================================================
+# disallow-host-namespaces — ClusterPolicy (Enforce, Build 021)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Forbids pods in production and staging from sharing the node's host network,
+# PID, or IPC namespaces. Enabling these flags bypasses container isolation and
+# allows a compromised container to:
+#   - hostNetwork: true  → listen on/sniff all node network interfaces, bypass
+#                          Kubernetes NetworkPolicies, access node metadata APIs
+#   - hostPID: true      → view and signal all processes on the node, extract
+#                          secrets from /proc/<pid>/environ of other containers
+#   - hostIPC: true      → access shared memory segments of other processes,
+#                          enabling inter-process data leaks
+#
+# EXCLUSIONS
+# ----------
+# kube-system, kyverno, cert-manager, and ingress-nginx are excluded because
+# CNI plugins (Calico/Cilium), node agents (kube-proxy, fluentd DaemonSets),
+# and ingress controllers legitimately require host network access. This policy
+# only targets the application namespaces where host namespace sharing is never
+# expected.
+#
+# chaos-mesh is also excluded (added Build 022). The chaos-daemon DaemonSet
+# intentionally runs with hostNetwork: true and hostPID: true because it must
+# inject faults at the kernel and network layer — inspecting /proc for process
+# injection, manipulating iptables rules for network chaos, and accessing
+# containerd sockets. This is the designed behaviour of a chaos engineering
+# tool. Chaos Mesh should NEVER be installed in production; it belongs in
+# staging and kind clusters only.
+#
+# IF THIS BLOCKS A LEGITIMATE WORKLOAD
+# -------------------------------------
+# If a workload in production/staging genuinely needs host namespaces (rare),
+# create a time-bound PolicyException in policies/kyverno/policy-exceptions/:
+#
+#   kubectl apply -f policies/kyverno/policy-exceptions/disallow-host-namespaces-<reason>.yaml
+#
+# See policies/kyverno/policy-exceptions/README.md for the full exception workflow.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-host-namespaces
+  annotations:
+    policies.kyverno.io/title: Disallow Host Namespaces
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Forbids pods in production and staging from using hostNetwork, hostPID,
+      or hostIPC. Sharing host namespaces breaks container isolation and allows
+      a compromised container to access node-level network, process, and IPC
+      resources. System namespaces (kube-system, kyverno, cert-manager,
+      ingress-nginx) are excluded as CNI and system components require them.
+      chaos-mesh is excluded because the chaos-daemon DaemonSet legitimately
+      needs host namespaces to inject kernel/network-layer faults.
+spec:
+  # Enforce mode: pods requesting host namespaces in production/staging are rejected.
+  validationFailureAction: Enforce
+
+  background: true
+
+  rules:
+    - name: disallow-host-network
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      # Exclude system namespaces and chaos-mesh (chaos-daemon requires
+      # hostNetwork to manipulate iptables and intercept network traffic for
+      # fault injection at the kernel/network layer).
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
+      validate:
+        message: >-
+          spec.hostNetwork: true is not allowed in production or staging.
+          Remove the hostNetwork field (or set it to false) from your pod spec.
+          If this is a legitimate infrastructure requirement, create a
+          PolicyException in policies/kyverno/policy-exceptions/.
+        pattern:
+          spec:
+            =(hostNetwork): "false"
+
+    - name: disallow-host-pid
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      # Exclude system namespaces and chaos-mesh (chaos-daemon requires
+      # hostPID to inspect /proc for process-level fault injection).
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
+      validate:
+        message: >-
+          spec.hostPID: true is not allowed in production or staging.
+          Remove the hostPID field (or set it to false) from your pod spec.
+          If this is a legitimate infrastructure requirement, create a
+          PolicyException in policies/kyverno/policy-exceptions/.
+        pattern:
+          spec:
+            =(hostPID): "false"
+
+    - name: disallow-host-ipc
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      # Exclude system namespaces. chaos-mesh does not use hostIPC but is
+      # included here for consistency with the other rules in this policy.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
+      validate:
+        message: >-
+          spec.hostIPC: true is not allowed in production or staging.
+          Remove the hostIPC field (or set it to false) from your pod spec.
+          If this is a legitimate infrastructure requirement, create a
+          PolicyException in policies/kyverno/policy-exceptions/.
+        pattern:
+          spec:
+            =(hostIPC): "false"

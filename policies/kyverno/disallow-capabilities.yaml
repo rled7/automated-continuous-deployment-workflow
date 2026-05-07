@@ -1,0 +1,243 @@
+# =============================================================================
+# disallow-capabilities — ClusterPolicy (Enforce, Build 021)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Forbids containers in production and staging from adding dangerous Linux
+# capabilities to their security context. Even without running in privileged
+# mode, a container with specific capabilities can break out of its isolation
+# or cause serious harm to the node:
+#
+#   NET_ADMIN    → modify network interfaces, routing tables, firewall rules
+#                  (iptables, tc), and bypass NetworkPolicies
+#   SYS_ADMIN    → a superset of many capabilities; can mount filesystems,
+#                  modify kernel parameters, manage namespaces — essentially
+#                  a backdoor to the host kernel
+#   SYS_PTRACE   → trace and inspect any process on the node; allows reading
+#                  memory and secrets from other containers via /proc
+#   SYS_MODULE   → load and unload kernel modules; trivial kernel-level RCE
+#   NET_RAW      → craft raw IP/ICMP packets; used for network scanning and
+#                  spoofing; can bypass some NetworkPolicy implementations
+#
+# If a container genuinely needs one of the safe capabilities (e.g.,
+# NET_BIND_SERVICE to bind a port < 1024), those are NOT blocked here.
+# Only the five high-risk capabilities listed above are denied.
+#
+# EXCLUSIONS
+# ----------
+# kube-system, kyverno, cert-manager, and ingress-nginx are excluded. System
+# components (CNI agents, load-balancer controllers, node exporters) may
+# legitimately need capabilities like NET_ADMIN or NET_RAW to manage kernel
+# networking on behalf of the cluster.
+#
+# chaos-mesh is also excluded (added Build 022). The chaos-daemon DaemonSet
+# requires NET_ADMIN to manipulate iptables rules and tc (traffic control) for
+# network fault injection, and SYS_PTRACE to inspect kernel namespaces for
+# process-level chaos. These are the designed capabilities of a chaos
+# engineering tool. Chaos Mesh should NEVER be installed in production; it
+# belongs in staging and kind clusters only.
+#
+# IF THIS BLOCKS A LEGITIMATE WORKLOAD
+# -------------------------------------
+# Re-evaluate whether the capability is truly necessary; most workloads can
+# be refactored to avoid NET_ADMIN (use a sidecar CNI plugin) or NET_RAW
+# (use a user-space implementation). If unavoidable, create a time-bound
+# PolicyException in policies/kyverno/policy-exceptions/:
+#
+#   kubectl apply -f policies/kyverno/policy-exceptions/disallow-capabilities-<reason>.yaml
+#
+# See policies/kyverno/policy-exceptions/README.md for the full exception workflow.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-capabilities
+  annotations:
+    policies.kyverno.io/title: Disallow Dangerous Linux Capabilities
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Forbids containers in production and staging from adding the five highest-risk
+      Linux capabilities: NET_ADMIN, SYS_ADMIN, SYS_PTRACE, SYS_MODULE, NET_RAW.
+      These capabilities break container isolation and can allow a compromised
+      container to attack the host kernel or neighboring containers.
+      System namespaces (kube-system, kyverno, cert-manager, ingress-nginx)
+      are excluded as system components legitimately require some of them.
+      chaos-mesh is excluded because the chaos-daemon DaemonSet legitimately
+      needs NET_ADMIN and SYS_PTRACE to inject network and process-level faults.
+spec:
+  # Enforce mode: pods adding blocked capabilities in production/staging are rejected.
+  validationFailureAction: Enforce
+
+  background: true
+
+  rules:
+    - name: disallow-net-admin
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      # Exclude system namespaces and chaos-mesh (chaos-daemon uses NET_ADMIN
+      # to manipulate iptables and tc for network fault injection).
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
+      validate:
+        message: >-
+          Adding the NET_ADMIN capability is not allowed in production or staging.
+          NET_ADMIN grants control over network interfaces, routing, and firewalls —
+          it can bypass NetworkPolicies and expose the node network to the container.
+          Remove NET_ADMIN from securityContext.capabilities.add.
+          If genuinely required, create a PolicyException in policies/kyverno/policy-exceptions/.
+        deny:
+          conditions:
+            any:
+              - key: "NET_ADMIN"
+                operator: AnyIn
+                value: "{{ request.object.spec.containers[].securityContext.capabilities.add[] }}"
+
+    - name: disallow-sys-admin
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      # Exclude system namespaces and chaos-mesh.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
+      validate:
+        message: >-
+          Adding the SYS_ADMIN capability is not allowed in production or staging.
+          SYS_ADMIN is a superset of many capabilities and provides near-root access
+          to the host kernel (filesystem mounts, namespace management, kernel params).
+          Remove SYS_ADMIN from securityContext.capabilities.add.
+          If genuinely required, create a PolicyException in policies/kyverno/policy-exceptions/.
+        deny:
+          conditions:
+            any:
+              - key: "SYS_ADMIN"
+                operator: AnyIn
+                value: "{{ request.object.spec.containers[].securityContext.capabilities.add[] }}"
+
+    - name: disallow-sys-ptrace
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      # Exclude system namespaces and chaos-mesh (chaos-daemon uses SYS_PTRACE
+      # to inspect kernel namespaces for process-level fault injection).
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
+      validate:
+        message: >-
+          Adding the SYS_PTRACE capability is not allowed in production or staging.
+          SYS_PTRACE allows a process to inspect and control any other process on the
+          node, including reading memory and environment variables from other containers.
+          Remove SYS_PTRACE from securityContext.capabilities.add.
+          If genuinely required, create a PolicyException in policies/kyverno/policy-exceptions/.
+        deny:
+          conditions:
+            any:
+              - key: "SYS_PTRACE"
+                operator: AnyIn
+                value: "{{ request.object.spec.containers[].securityContext.capabilities.add[] }}"
+
+    - name: disallow-sys-module
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      # Exclude system namespaces and chaos-mesh.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
+      validate:
+        message: >-
+          Adding the SYS_MODULE capability is not allowed in production or staging.
+          SYS_MODULE allows loading and unloading kernel modules, which provides
+          unrestricted kernel-level code execution — the most severe container
+          escape vector available.
+          Remove SYS_MODULE from securityContext.capabilities.add.
+          If genuinely required, create a PolicyException in policies/kyverno/policy-exceptions/.
+        deny:
+          conditions:
+            any:
+              - key: "SYS_MODULE"
+                operator: AnyIn
+                value: "{{ request.object.spec.containers[].securityContext.capabilities.add[] }}"
+
+    - name: disallow-net-raw
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      # Exclude system namespaces and chaos-mesh.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
+      validate:
+        message: >-
+          Adding the NET_RAW capability is not allowed in production or staging.
+          NET_RAW allows crafting raw IP/ICMP packets, enabling network scanning,
+          packet spoofing, and bypassing some NetworkPolicy implementations.
+          Remove NET_RAW from securityContext.capabilities.add.
+          If genuinely required, create a PolicyException in policies/kyverno/policy-exceptions/.
+        deny:
+          conditions:
+            any:
+              - key: "NET_RAW"
+                operator: AnyIn
+                value: "{{ request.object.spec.containers[].securityContext.capabilities.add[] }}"

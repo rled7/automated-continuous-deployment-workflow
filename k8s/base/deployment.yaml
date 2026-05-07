@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: my-app
+      # seccompProfile required by PSS restricted (k8s >= 1.25).
+      # RuntimeDefault uses the container runtime's default seccomp profile,
+      # which blocks a wide set of dangerous syscalls while being broadly
+      # compatible with well-behaved applications.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: registry-credentials
+      containers:
+        - name: my-app
+          image: my-app:latest
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          envFrom:
+            - configMapRef:
+                name: my-app-config
+            - secretRef:
+                name: my-app-secrets
+          # Build 017: explicit env entries for DB connection vars so they appear
+          # in container inspect and are cross-referenceable by other tooling.
+          # DB_HOST and DB_PASSWORD come from the SealedSecret (secretRef above).
+          # DB_PORT, DB_USER, DB_NAME come from the ConfigMap (configMapRef above);
+          # these explicit entries make the intent clear and allow per-overlay override.
+          env:
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: my-app-config
+                  key: DB_PORT
+                  optional: true   # base has no value; overlay patches supply it
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: my-app-config
+                  key: DB_USER
+                  optional: true
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: my-app-config
+                  key: DB_NAME
+                  optional: true
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 3000
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    # Pod Security Standards — restricted profile on staging mirrors production.
+    # Catching PSS violations in staging (warn/audit) before they reach production
+    # avoids surprise blocks. Enforce is also set: staging must pass restricted.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

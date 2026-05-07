@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-app-config
+data:
+  NODE_ENV: "development"
+  PORT: "3000"
+  LOG_LEVEL: "info"
+  REDIS_URL: "redis://redis:6379"

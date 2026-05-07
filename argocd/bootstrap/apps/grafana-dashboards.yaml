@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: grafana-dashboards
+  namespace: argocd
+  annotations:
+    # Wave 10: deploy after Grafana itself is up (kube-prometheus-stack at wave 0).
+    # The Grafana sidecar polls for ConfigMaps labelled grafana_dashboard: "1"
+    # and imports them automatically — no Grafana restart needed.
+    argocd.argoproj.io/sync-wave: "10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/rled7/automated-continuous-deployment-workflow
+    targetRevision: HEAD
+    path: monitoring/grafana/dashboards
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

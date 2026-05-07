@@ -1,0 +1,112 @@
+# RED metrics dashboard (Rate, Errors, Duration) for my-app.
+# The kube-prometheus-stack Grafana sidecar auto-imports ConfigMaps
+# labelled grafana_dashboard: "1" from any namespace watched by the sidecar.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-app-overview
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  app-overview.json: |
+    {
+      "title": "my-app — RED Metrics",
+      "uid": "my-app-red",
+      "schemaVersion": 38,
+      "version": 1,
+      "time": { "from": "now-1h", "to": "now" },
+      "refresh": "30s",
+      "timezone": "browser",
+      "tags": ["my-app", "red"],
+      "panels": [
+        {
+          "id": 1,
+          "title": "Request Rate (req/s)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(rate(http_request_duration_ms_count[5m]))",
+              "legendFormat": "req/s",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": { "mode": "palette-classic" }
+            }
+          }
+        },
+        {
+          "id": 2,
+          "title": "Error Rate %",
+          "type": "stat",
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "100 * sum(rate(http_request_duration_ms_count{status_code=~\"5..\"}[5m])) / sum(rate(http_request_duration_ms_count[5m]))",
+              "legendFormat": "error %",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red", "value": 5 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 3,
+          "title": "P95 Latency (ms)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket[5m])) by (le))",
+              "legendFormat": "p95 ms",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "color": { "mode": "palette-classic" }
+            }
+          }
+        },
+        {
+          "id": 4,
+          "title": "5xx Errors by Route",
+          "type": "table",
+          "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum by (route) (rate(http_request_duration_ms_count{status_code=~\"5..\"}[5m]))",
+              "legendFormat": "{{route}}",
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "reqps" }
+          },
+          "transformations": [
+            { "id": "sortBy", "options": { "fields": [{ "displayName": "Value", "desc": true }] } }
+          ]
+        }
+      ]
+    }

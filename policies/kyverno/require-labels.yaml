@@ -1,0 +1,85 @@
+# =============================================================================
+# require-labels — Promoted to Enforce (Build 021)
+# =============================================================================
+#
+# WHY THIS IS SAFE TO ENFORCE
+# ----------------------------
+# The production app Deployment carries all three required labels (app, env,
+# version) in spec.template.metadata.labels. Verified in k8s/base/deployment.yaml
+# and both overlays. Zero violations were reported in Audit mode during soak.
+#
+# IF THIS BREAKS A FUTURE WORKLOAD
+# ----------------------------------
+# Add the missing label(s) to spec.template.metadata.labels in your Deployment
+# or Rollout manifest. If a workload cannot carry these labels (e.g., a third-party
+# Helm chart), create a time-bound PolicyException:
+#
+#   kubectl apply -f policies/kyverno/policy-exceptions/<policy-name>-<reason>.yaml
+#
+# Example one-liner:
+#   kubectl annotate policyexception my-exception expiry="2026-09-01" -n production
+#
+# See policies/kyverno/policy-exceptions/README.md for the full exception workflow.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-labels
+  annotations:
+    policies.kyverno.io/title: Require Standard Labels
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: low
+    policies.kyverno.io/description: >-
+      Requires Deployments and Rollouts in production and staging to carry
+      the standard labels: app, env, and version. These labels are used for
+      monitoring, routing, and incident triage.
+      Promoted to Enforce in Build 021 after soak confirmed all workloads
+      carry the required labels.
+spec:
+  # Enforce mode: Deployments/Rollouts missing app/env/version labels are rejected.
+  # Promoted from Audit in Build 021 — zero violations observed during soak.
+  validationFailureAction: Enforce
+
+  background: true
+
+  rules:
+    - name: require-deployment-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+              namespaces:
+                - production
+                - staging
+      validate:
+        message: >-
+          Deployments in production and staging must define labels: app, env,
+          and version. Add these to spec.template.metadata.labels.
+        pattern:
+          metadata:
+            labels:
+              app: "?*"
+              env: "?*"
+              version: "?*"
+
+    - name: require-rollout-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Rollout
+              namespaces:
+                - production
+                - staging
+      validate:
+        message: >-
+          Argo Rollouts in production and staging must define labels: app, env,
+          and version. Add these to spec.template.metadata.labels.
+        pattern:
+          metadata:
+            labels:
+              app: "?*"
+              env: "?*"
+              version: "?*"

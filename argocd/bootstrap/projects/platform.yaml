@@ -1,0 +1,36 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+spec:
+  description: "Project for platform/infrastructure components (cert-manager, ingress-nginx, sealed-secrets, observability, etc.)"
+
+  sourceRepos:
+    - https://github.com/rled7/automated-continuous-deployment-workflow
+    - https://charts.bitnami.com/bitnami
+    - https://charts.jetstack.io
+    - https://prometheus-community.github.io/helm-charts
+    - https://argoproj.github.io/argo-helm
+    - https://grafana.github.io/helm-charts
+    - https://open-telemetry.github.io/opentelemetry-helm-charts
+    - https://kubernetes.github.io/ingress-nginx
+    - https://bitnami-labs.github.io/sealed-secrets
+    - https://kyverno.github.io/kyverno
+    # Build 022: chaos engineering + backup tooling
+    - https://charts.chaos-mesh.org
+    - https://charts.min.io
+    - https://vmware-tanzu.github.io/helm-charts
+
+  destinations:
+    - namespace: "*"
+      server: https://kubernetes.default.svc
+
+  # Allow platform components to manage cluster-scoped resources (CRDs, ClusterIssuers, etc.)
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

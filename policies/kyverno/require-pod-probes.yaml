@@ -1,0 +1,226 @@
+# =============================================================================
+# require-pod-probes — ClusterPolicy (Audit, Build 021 — soak before Enforce)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Requires every container in Deployments, Rollouts, StatefulSets, and
+# DaemonSets in production and staging to define both a livenessProbe and a
+# readinessProbe.
+#
+# Without probes:
+#   - readinessProbe: Kubernetes routes traffic to a pod before it is actually
+#     ready to serve requests, causing transient 502/503 errors during rollouts.
+#   - livenessProbe: Kubernetes cannot detect a deadlocked or hung process and
+#     will not restart the container, leaving it in a "running but broken" state
+#     that can go unnoticed for extended periods.
+#
+# PROBE TYPES
+# -----------
+# Any Kubernetes probe type is acceptable: httpGet, tcpSocket, or exec.
+# The choice depends on the workload:
+#   - HTTP services → httpGet (path: /health/live, port: 3000)
+#   - TCP services  → tcpSocket (port: <service-port>)
+#   - Sidecar/batch → exec with a health-check script
+#
+# INTENTIONALLY KEPT IN AUDIT (Build 021 — new policy, soak required)
+# -------------------------------------------------------------------
+# This is a new policy introduced in Build 021. Per the promotion criteria,
+# new policies must soak in Audit for at least 7 days before Enforce promotion.
+# During soak, PolicyReport violations will surface any existing workloads
+# (Helm charts, operators, sidecar injectors) that do not define probes.
+#
+# PROMOTE TO ENFORCE AFTER:
+#   1. Deployed in Audit for >= 7 days.
+#   2. `kubectl get policyreports -A` shows zero FAIL results in production
+#      and staging for this policy.
+#   3. No undocumented exception has been filed.
+#   4. Promotion reviewed by at least one platform team member.
+# Expected promotion date: 2026-05-14 (7 days after Build 021 deployment).
+#
+# IF THIS BREAKS A FUTURE WORKLOAD
+# ----------------------------------
+# Add livenessProbe and readinessProbe to each container in the workload spec.
+# If a workload genuinely cannot define probes (e.g., an operator-managed
+# pod where the operator controls the spec), create a time-bound PolicyException:
+#
+#   kubectl apply -f policies/kyverno/policy-exceptions/require-pod-probes-<reason>.yaml
+#
+# See policies/kyverno/policy-exceptions/README.md for the full exception workflow.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-pod-probes
+  annotations:
+    policies.kyverno.io/title: Require Liveness and Readiness Probes
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Requires livenessProbe and readinessProbe on every container in Deployments,
+      Rollouts, StatefulSets, and DaemonSets in production and staging.
+      Missing probes cause traffic to be routed to unready pods (missing readiness)
+      or leave deadlocked processes running indefinitely (missing liveness).
+      Currently in Audit mode — promoted to Enforce after a 7-day soak period
+      with zero PolicyReport violations.
+spec:
+  # Audit mode: violations are recorded in PolicyReports but pods are NOT blocked.
+  # NEW POLICY in Build 021 — must soak for >= 7 days before promoting to Enforce.
+  # Planned Enforce promotion: 2026-05-14 (check policyreports first).
+  validationFailureAction: Audit
+
+  background: true
+
+  rules:
+    - name: require-deployment-probes
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+              namespaces:
+                - production
+                - staging
+      validate:
+        message: >-
+          Every container in a Deployment must define both livenessProbe and
+          readinessProbe. Without readinessProbe, Kubernetes routes traffic to
+          pods before they are ready. Without livenessProbe, deadlocked processes
+          are never restarted. Add both probes to spec.template.spec.containers[].
+        pattern:
+          spec:
+            template:
+              spec:
+                containers:
+                  - livenessProbe:
+                      ?(httpGet):
+                        path: "?*"
+                        port: "?*"
+                      ?(tcpSocket):
+                        port: "?*"
+                      ?(exec):
+                        command:
+                          - "?*"
+                    readinessProbe:
+                      ?(httpGet):
+                        path: "?*"
+                        port: "?*"
+                      ?(tcpSocket):
+                        port: "?*"
+                      ?(exec):
+                        command:
+                          - "?*"
+
+    - name: require-rollout-probes
+      match:
+        any:
+          - resources:
+              kinds:
+                - Rollout
+              namespaces:
+                - production
+                - staging
+      validate:
+        message: >-
+          Every container in an Argo Rollout must define both livenessProbe and
+          readinessProbe. Without readinessProbe, Kubernetes routes traffic to
+          pods before they are ready. Without livenessProbe, deadlocked processes
+          are never restarted. Add both probes to spec.template.spec.containers[].
+        pattern:
+          spec:
+            template:
+              spec:
+                containers:
+                  - livenessProbe:
+                      ?(httpGet):
+                        path: "?*"
+                        port: "?*"
+                      ?(tcpSocket):
+                        port: "?*"
+                      ?(exec):
+                        command:
+                          - "?*"
+                    readinessProbe:
+                      ?(httpGet):
+                        path: "?*"
+                        port: "?*"
+                      ?(tcpSocket):
+                        port: "?*"
+                      ?(exec):
+                        command:
+                          - "?*"
+
+    - name: require-statefulset-probes
+      match:
+        any:
+          - resources:
+              kinds:
+                - StatefulSet
+              namespaces:
+                - production
+                - staging
+      validate:
+        message: >-
+          Every container in a StatefulSet must define both livenessProbe and
+          readinessProbe. Add both probes to spec.template.spec.containers[].
+        pattern:
+          spec:
+            template:
+              spec:
+                containers:
+                  - livenessProbe:
+                      ?(httpGet):
+                        path: "?*"
+                        port: "?*"
+                      ?(tcpSocket):
+                        port: "?*"
+                      ?(exec):
+                        command:
+                          - "?*"
+                    readinessProbe:
+                      ?(httpGet):
+                        path: "?*"
+                        port: "?*"
+                      ?(tcpSocket):
+                        port: "?*"
+                      ?(exec):
+                        command:
+                          - "?*"
+
+    - name: require-daemonset-probes
+      match:
+        any:
+          - resources:
+              kinds:
+                - DaemonSet
+              namespaces:
+                - production
+                - staging
+      validate:
+        message: >-
+          Every container in a DaemonSet must define both livenessProbe and
+          readinessProbe. Add both probes to spec.template.spec.containers[].
+        pattern:
+          spec:
+            template:
+              spec:
+                containers:
+                  - livenessProbe:
+                      ?(httpGet):
+                        path: "?*"
+                        port: "?*"
+                      ?(tcpSocket):
+                        port: "?*"
+                      ?(exec):
+                        command:
+                          - "?*"
+                    readinessProbe:
+                      ?(httpGet):
+                        path: "?*"
+                        port: "?*"
+                      ?(tcpSocket):
+                        port: "?*"
+                      ?(exec):
+                        command:
+                          - "?*"

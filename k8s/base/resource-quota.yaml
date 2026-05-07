@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: my-app-quota
+spec:
+  hard:
+    # CPU and memory budgets for the namespace.
+    # Production overlay (quota-patch.yaml) bumps these values significantly.
+    requests.cpu: "2"
+    requests.memory: "2Gi"
+    limits.cpu: "4"
+    limits.memory: "4Gi"
+
+    # Object count limits prevent runaway pod/service proliferation.
+    pods: "20"
+    count/services: "10"
+    persistentvolumeclaims: "5"

@@ -1,0 +1,29 @@
+# letsencrypt-staging.yaml
+#
+# When to use: cloud deployments where you have a real public DNS name but want
+# to test the ACME HTTP-01 flow without consuming your Let's Encrypt production
+# rate limit. Staging certificates are issued by a test CA that is NOT trusted by
+# browsers — expect a certificate warning. Use letsencrypt-prod once you've
+# confirmed the challenge flow works.
+#
+# Prerequisites:
+#   - The Ingress host must resolve publicly to your cluster's external IP/LB.
+#   - Port 80 must be reachable from the internet (for HTTP-01 challenge).
+#   - Replace <your-email> with a real address for expiry notifications.
+#
+# To activate: change cert-manager.io/cluster-issuer annotation in your Ingress
+# overlays from selfsigned-issuer to letsencrypt-staging.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: <your-email>
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx

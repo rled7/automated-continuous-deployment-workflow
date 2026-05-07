@@ -1,0 +1,57 @@
+# =============================================================================
+# PodChaos — pod-failure experiment (Build 022)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Randomly kills up to 50% of pods matching app=my-app in the staging namespace
+# for 60 seconds. Tests whether Kubernetes restarts pods fast enough to keep
+# the service healthy, and whether Argo Rollouts detects the instability and
+# pauses further rollouts.
+#
+# SAFETY
+# ------
+# - This experiment ONLY targets the staging namespace. NEVER apply to production
+#   without an explicit approval workflow and a dedicated change-freeze window.
+# - Maximum blast radius: 50% of matching pods (random-max-percent: 50).
+# - Duration is capped at 60s. The experiment self-terminates; delete the
+#   resource to stop early.
+#
+# HOW TO RUN
+#   kubectl apply -f chaos/pod-failure.yaml
+#
+# HOW TO OBSERVE
+#   kubectl describe podchaos pod-failure-staging -n staging
+#   kubectl get pods -n staging -w
+#
+# HOW TO STOP (early termination)
+#   kubectl delete -f chaos/pod-failure.yaml
+#
+# HYPOTHESIS
+#   When 50% of app pods are killed, Kubernetes should reschedule them within
+#   30s. The /health/ready endpoint should remain available via the surviving
+#   pods throughout the experiment. Argo Rollouts should detect the instability
+#   if an active rollout is in progress.
+# =============================================================================
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: pod-failure-staging
+  namespace: staging
+spec:
+  action: pod-failure
+
+  # Target selector: only pods with app=my-app in staging
+  selector:
+    namespaces:
+      - staging
+    labelSelectors:
+      app: my-app
+
+  # Blast radius: kill at most 50% of matching pods at random
+  mode: random-max-percent
+  value: "50"
+
+  # Duration: experiment self-terminates after 60 seconds
+  duration: "60s"

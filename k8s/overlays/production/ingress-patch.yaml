@@ -1,0 +1,38 @@
+# ── kind / nip.io configuration ───────────────────────────────────────────────
+# The hostname below uses nip.io wildcard DNS so the Ingress works on a local
+# kind cluster without registering a real domain.
+# app.127.0.0.1.nip.io resolves to 127.0.0.1 — traffic reaches the
+# ingress-nginx NodePort via the kind extraPortMappings on port 443.
+#
+# The self-signed ClusterIssuer is used because Let's Encrypt HTTP-01 challenges
+# cannot reach a local cluster.  Expect a browser certificate warning — that is
+# normal for local dev.
+#
+# ── Cloud deploy swap ─────────────────────────────────────────────────────────
+# When deploying to a cloud cluster with real public DNS:
+#   1. Change host to your real production hostname, e.g. app.yourdomain.com
+#   2. Change cert-manager.io/cluster-issuer to letsencrypt-prod
+#   3. Ensure port 80 is reachable from the internet for ACME HTTP-01 challenges
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app
+  annotations:
+    cert-manager.io/cluster-issuer: selfsigned-issuer
+spec:
+  tls:
+    - hosts:
+        - app.127.0.0.1.nip.io
+      secretName: my-app-tls
+  rules:
+    - host: app.127.0.0.1.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-app
+                port:
+                  number: 80

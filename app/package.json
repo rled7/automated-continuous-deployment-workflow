@@ -4,19 +4,48 @@
   "scripts": {
     "lint": "eslint src/**/*.js",
     "build": "cp -r src dist",
-    "test": "jest",
-    "test:unit": "jest --testPathPattern=unit",
-    "test:integration": "jest --testPathPattern=integration",
+    "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest",
+    "test:unit": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --testPathPattern=unit",
+    "test:integration": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --testPathPattern=integration",
     "test:smoke": "jest smoke/smoke.test.js",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install --with-deps chromium",
+    "test:mutation": "stryker run",
     "start": "node dist/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "migrate": "knex --knexfile=knexfile.js migrate:latest",
+    "migrate:rollback": "knex --knexfile=knexfile.js migrate:rollback",
+    "migrate:make": "knex --knexfile=knexfile.js migrate:make"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "helmet": "^8.0.0",
+    "pino": "^9.0.0",
+    "pino-http": "^10.0.0",
+    "prom-client": "^15.0.0",
+    "express-rate-limit": "^7.0.0",
+    "zod": "^3.23.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.57.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.56.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.57.0",
+    "@opentelemetry/resources": "^1.30.0",
+    "@opentelemetry/semantic-conventions": "^1.28.0",
+    "pg": "^8.13.0",
+    "ioredis": "^5.4.0",
+    "knex": "^3.1.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",
-    "@jest/globals": "^29.7.0"
+    "@jest/globals": "^29.7.0",
+    "jest-junit": "^16.0.0",
+    "supertest": "^7.0.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-jest": "^27.9.0",
+    "pg-mem": "^3.0.0",
+    "@playwright/test": "^1.49.0",
+    "@stryker-mutator/core": "^8.7.0",
+    "@stryker-mutator/jest-runner": "^8.7.0"
   },
   "type": "module"
 }

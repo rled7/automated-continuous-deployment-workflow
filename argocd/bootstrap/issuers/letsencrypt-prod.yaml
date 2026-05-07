@@ -1,0 +1,27 @@
+# letsencrypt-prod.yaml
+#
+# When to use: production cloud deployments with a real public DNS name.
+# Certificates are issued by the Let's Encrypt production CA and are trusted by
+# all major browsers. Rate limits apply (50 certs/domain/week) — don't use this
+# while iterating on your Ingress configuration; use letsencrypt-staging first.
+#
+# Prerequisites:
+#   - Same as letsencrypt-staging (public DNS + reachable port 80).
+#   - Replace <your-email> with a real address for expiry notifications.
+#
+# To activate: change cert-manager.io/cluster-issuer annotation in your Ingress
+# overlays from selfsigned-issuer (or letsencrypt-staging) to letsencrypt-prod.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: <your-email>
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx

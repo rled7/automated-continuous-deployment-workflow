@@ -12,6 +12,40 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 023 — Developer experience: pre-commit hooks + GitHub Actions PR checks + README rewrite
+**Date:** 2026-05-07
+**Scope:** Tier 5 — DX
+
+### Added
+
+- `package.json` (at repo root) — owns repo-wide dev tooling only (husky 9, lint-staged 15, commitlint 19, prettier 3). Comment makes the intent explicit; the actual app is in `app/`.
+- `commitlint.config.js` — extends `@commitlint/config-conventional`. Allowed scopes: `app`, `infra`, `ci`, `docs`, `chore`, `test`, `sec`. Header max length 100. Subject must start with a letter.
+- `.prettierrc.json` — `semi: true`, `singleQuote: true`, `trailingComma: 'all'`, `printWidth: 100`.
+- `.prettierignore` — ignores `dist/`, `coverage/`, `reports/`, `node_modules/`, snapshot dirs.
+- `.husky/pre-commit` — runs `npx --no -- lint-staged` against staged files.
+- `.husky/commit-msg` — runs `npx --no -- commitlint --edit "$1"` to validate commit messages.
+- `.github/workflows/pr-checks.yml` — fast PR feedback (~30–60s): lint + unit tests on every PR to `main` or `develop`. Uploads coverage artifact. Cancels in-progress runs on new push.
+- `.github/workflows/conventional-commits.yml` — validates PR titles via `amannn/action-semantic-pull-request` against the same Conventional Commits ruleset commitlint enforces locally.
+- `scripts/setup-branch-protection.sh` — `gh api` script that codifies branch protection state for `main` and `develop`. Required since GitHub branch protection can't be expressed in repo files. Idempotent.
+- `docs/branch-protection.md` — what the protection script sets, when to re-run it, emergency hotfix bypass procedure.
+- `docs/dev-experience.md` — pre-commit lifecycle, Conventional Commits format, two-pipeline feedback loop (GH Actions + Jenkins), bypass guidance.
+- `docs/tech-stack.md` — full tooling rationale extracted from the original README. Covers every major component and why it was chosen.
+
+### Modified
+
+- `README.md` — full rewrite. New top-down structure: 1-paragraph elevator pitch → mermaid architecture diagram → 5-min kind quick-start → pipeline-at-a-glance table (15 stages) → directory layout → "Where things live" navigation table → status table mapping every Build (013–023) to a tier → "what would still need to change for cloud production" checklist → contributing/license. The original 250-line tooling-rationale dump moved to `docs/tech-stack.md` so it isn't lost.
+
+### Closes (from production-readiness extension plan)
+- Tier 5: developer experience — pre-commit gating, fast PR feedback path, codified branch protection, current README
+
+### Judgment calls
+- **Husky lives at repo root, not under `app/`.** Reason: pre-commit hooks must fire on ANY commit, not only commits that touch `app/`. The root `package.json` owns ONLY repo-wide dev tooling; `app/package.json` keeps the app deps. The two are independent.
+- **Two PR pipelines (GH Actions + Jenkins) running in parallel.** GH Actions gives <1-minute feedback for lint + unit tests. Jenkins runs the full ~10–25-minute pipeline. Both are required status checks; the developer fixes lint/test issues without waiting for Jenkins.
+- **README cuts:** dropped the original ASCII pipeline diagram (replaced by mermaid), the manual "Configure Jenkins" section (JCasC handles it), and the per-tool rationale prose. Preserved the rationale by moving it to `docs/tech-stack.md`. New README is ~210 lines.
+- **Branch protection script is bash + `gh api`, not Terraform.** For a repo with one or two GitHub repos, 60 lines is more reviewable than introducing a Terraform provider. Documented the migration path.
+
+---
+
 ## Build 022 — Chaos Mesh + Velero backups + DR runbook + synthetic monitoring docs
 **Date:** 2026-05-07
 **Scope:** Resilience tier — chaos engineering infrastructure, backup/recovery stack, and three new operational docs closing the resilience gap.

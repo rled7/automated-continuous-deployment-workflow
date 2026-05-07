@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Pre-commit: runs lint-staged against staged files only.
+# Bypass with --no-verify if absolutely needed; fix the underlying issue instead.
+npx --no -- lint-staged

@@ -1,0 +1,47 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+# Cancel in-progress runs when a new commit is pushed to the PR
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-unit-test:
+    name: Lint + Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Lint
+        working-directory: app
+        run: npm run lint
+
+      - name: Unit tests
+        working-directory: app
+        env:
+          NODE_OPTIONS: --experimental-vm-modules
+        run: npm run test:unit
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: app/coverage/
+          retention-days: 7

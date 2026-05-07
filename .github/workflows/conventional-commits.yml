@@ -1,0 +1,38 @@
+name: Conventional Commits
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  validate-pr-title:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate PR title
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            docs
+            test
+            refactor
+            perf
+            ci
+            sec
+          scopes: |
+            app
+            infra
+            ci
+            docs
+            chore
+            test
+            sec
+          requireScope: false
+          subjectPattern: ^[A-Za-z].+

@@ -1,245 +1,210 @@
-# Jenkins CI/CD Pipeline — 24/7 Auto-Deploy
+# Automated Continuous Deployment Workflow
 
-A fully automated CI/CD pipeline: every `git push` triggers build → test → deploy → rollback (if anything fails). Zero manual intervention in production.
+Production-grade Jenkins-based CI/CD pipeline for a Node.js Express app. **GitOps** with Argo CD, **progressive delivery** via Argo Rollouts, full **observability** (metrics + logs + traces), **supply-chain hardening** (SBOM + cosign + multi-arch), automated **cluster security** (Kyverno), **backups** (Velero), and **chaos engineering** (Chaos Mesh). Designed to run end-to-end on a local kind cluster — no cloud spend required.
 
 ---
 
 ## Architecture
 
+```mermaid
+graph TD
+  Dev[Developer] -->|git push| GH[GitHub]
+  GH -->|webhook| GHA[GH Actions: lint + unit tests]
+  GH -->|webhook| Jenkins[Jenkins Pipeline]
+
+  subgraph "Jenkins pipeline"
+    Jenkins --> SAST[SonarQube + OWASP + Gitleaks + ESLint]
+    SAST --> Build[npm build]
+    Build --> Validate[kubeconform: validate k8s manifests]
+    Validate --> Test[Jest unit + integration]
+    Test --> ImgBuild[buildx multi-arch + Trivy + syft SBOM + cosign sign + grype]
+    ImgBuild --> DeployS[Deploy → staging]
+    DeployS --> E2E[Playwright E2E + k6 perf vs baseline]
+    E2E --> Approve{Manual gate}
+    Approve --> DeployP[Deploy → production]
+    DeployP --> DORA[Push DORA metrics]
+  end
+
+  Jenkins -->|push image| Reg[Container Registry]
+  GH -->|reconcile| Argo[Argo CD]
+  Argo -->|sync| Cluster[(Kubernetes Cluster)]
+  Reg -->|pull| Cluster
+
+  subgraph "Cluster"
+    Cluster --> Rollout[Argo Rollouts: canary 25→50→100]
+    Rollout --> AppPods[my-app pods]
+    AppPods -->|metrics| Prom[Prometheus]
+    AppPods -->|logs| Promtail[Promtail] --> Loki
+    AppPods -->|traces OTLP| Otel[OTel Collector] --> Tempo
+    Prom --> Grafana
+    Loki --> Grafana
+    Tempo --> Grafana
+    Prom --> AM[Alertmanager] -->|page| PD[PagerDuty]
+    AM -->|warn| Slack
+    Kyverno[Kyverno admission] -.policies.-> Cluster
+    Velero -->|daily backup| MinIO[MinIO / S3]
+    Chaos[Chaos Mesh] -.staging only.-> AppPods
+  end
+
+  DORA -->|push| PG[Pushgateway] --> Prom
 ```
-Developer Push
-     │
-     ▼
-┌─────────────┐    Webhook    ┌──────────────────────────────────────────────┐
-│   GitHub    │──────────────▶│              Jenkins Pipeline                │
-└─────────────┘               │                                              │
-                               │  1. Checkout                                 │
-                               │  2. Lint + SonarQube + Vuln Scan (parallel) │
-                               │  3. Build (npm run build)                    │
-                               │  4. Unit Tests + Integration Tests (parallel)│
-                               │  5. Docker Build + Trivy Scan + Push         │
-                               │  6. Deploy → Staging (develop branch)        │
-                               │  7. Performance Tests (k6)                   │
-                               │  8. Deploy → Production (main branch)        │
-                               │     └─ Auto-rollback on failure              │
-                               └──────────────────────────────────────────────┘
-```
+
+The full stage list lives in [`Jenkinsfile`](./Jenkinsfile). Tech-stack rationale is in [`docs/tech-stack.md`](./docs/tech-stack.md).
 
 ---
 
-## Project Structure
-
-```
-jenkins-cicd/
-├── Jenkinsfile                  # Full pipeline definition
-├── .env.example                 # Environment variables template
-├── app/
-│   └── src/
-│       ├── server.js            # Express app with graceful shutdown
-│       └── routes/health.js     # /health/live + /health/ready endpoints
-├── docker/
-│   ├── Dockerfile               # Multi-stage production image
-│   └── docker-compose.yml       # Local Jenkins + SonarQube + Registry
-├── jenkins/
-│   ├── jenkins.yaml             # Jenkins Configuration as Code (JCasC)
-│   └── plugins.txt              # Required Jenkins plugins
-├── k8s/
-│   ├── production/deployment.yaml   # HPA, PDB, rolling update, ingress
-│   └── staging/deployment.yaml
-├── monitoring/
-│   └── prometheus.yaml          # Prometheus scrape + alert rules
-├── tests/
-│   ├── performance/load-test.js # k6 load test (ramp → spike → ramp down)
-│   └── smoke/smoke.test.js      # Post-deploy smoke tests
-└── scripts/
-    └── setup.sh                 # Bootstrap script
-```
-
----
-
-## Quick Start
-
-### 1. Clone & Configure
+## Quick start (local kind, ~5 minutes)
 
 ```bash
-git clone https://github.com/YOUR_ORG/my-app
-cd jenkins-cicd
-cp .env.example .env
-# Edit .env with your credentials
+# 1. Spin up a local cluster (config exposes 80/443 to host)
+kind create cluster --config docs/kind-config.yaml   # see docs/cluster-setup.md for the inline config
+
+# 2. Bootstrap the platform via Argo CD (installs ingress-nginx, cert-manager,
+#    sealed-secrets, kube-prometheus-stack, loki, tempo, promtail, otel-collector,
+#    kyverno, argo-rollouts, velero, minio, chaos-mesh).
+./scripts/setup.sh --bootstrap-argo
+
+# 3. Wait for sync (~2-3 min on first run)
+kubectl get applications -n argocd -w
+
+# 4. Apply the my-app overlays
+kubectl apply -f argocd/AppProject.yaml
+kubectl apply -f argocd/Application-staging.yaml
+kubectl apply -f argocd/Application-production.yaml
+
+# 5. Seal real secrets (replace values first)
+./scripts/seal-secret.sh production my-app-secrets \
+    db-host=app-db.production.svc.cluster.local \
+    db-password=changeme | kubectl apply -f -
+
+# 6. Visit the app
+open http://app.127.0.0.1.nip.io
 ```
 
-### 2. Start Local CI Stack
+Detailed walkthrough in [`docs/cluster-setup.md`](./docs/cluster-setup.md) and [`docs/local-dev.md`](./docs/local-dev.md).
 
-```bash
-chmod +x scripts/setup.sh
-./scripts/setup.sh --local
+---
+
+## Pipeline at a glance
+
+| # | Stage | What it does | Fails pipeline? |
+|---|---|---|---|
+| 1 | Checkout | Pulls code, sets `env.ENV` | Yes |
+| 2 | Code Quality & Security (parallel) | SonarQube + OWASP DC (CVSS≥7) + ESLint + Gitleaks | Yes (except lint) |
+| 3 | Build | `npm ci && npm run build` | Yes |
+| 4 | Validate Manifests | `kubeconform` against every Kustomize overlay | Yes |
+| 5 | Test (parallel) | Jest unit + integration | Yes |
+| 6 | Deploy → PR Preview | Per-PR namespace via `scripts/pr-preview-up.sh` | Yes (PR builds only) |
+| 7 | Docker Build & Push | `buildx` multi-arch → Trivy → push → syft SBOM → cosign sign → SLSA attest | Yes |
+| 8 | Scan SBOM | `grype --fail-on high` against the SBOM | Yes |
+| 9 | Migrate | `knex migrate:latest` Job in target namespace | Yes |
+| 10 | Deploy → Staging | Kustomize → `kubectl apply -k` (develop branch) | Yes |
+| 11 | Performance Tests | k6 load test + baseline comparison | Yes |
+| 12 | E2E Tests | Playwright against staging URL | Yes |
+| 13 | Mutation Tests | Stryker (nightly cron OR manual `RUN_MUTATION_TESTS`) | Yes |
+| 14 | Deploy → Production | Manual gate → Kustomize apply → Argo Rollouts canary 25→50→100 | Yes |
+| 15 | Release | On `v*.*.*` tag: re-tag + GitHub Release via `gh` | — |
+| post-failure | Auto-rollback | `kubectl set image` to previous revision; push `change_failure_total` to Pushgateway | — |
+
+---
+
+## Directory layout
+
 ```
-
-Opens:
-- Jenkins  → http://localhost:8080
-- SonarQube → http://localhost:9000
-
-### 3. Configure Jenkins
-
-Jenkins auto-configures itself via `jenkins/jenkins.yaml` (JCasC). Add these credentials manually in **Manage Jenkins → Credentials**:
-
-| ID | Type | Description |
-|----|------|-------------|
-| `docker-registry-credentials` | Username/Password | Docker registry |
-| `kubeconfig` | Secret file | Kubernetes config |
-| `sonarqube-token` | Secret text | SonarQube token |
-| `slack-token` | Secret text | Slack bot token |
-| `github-credentials` | Username/Password | GitHub PAT |
-
-### 4. Set Up Kubernetes (Production)
-
-```bash
-./scripts/setup.sh --k8s
-```
-
-### 5. Push to Trigger the Pipeline
-
-```bash
-git checkout -b develop
-git push origin develop   # → triggers staging deploy
-
-git checkout main
-git merge develop
-git push origin main      # → triggers production deploy (with approval gate)
+.
+├── README.md                        ← this file
+├── CHANGELOG.md                     ← every build's changes (newest first)
+├── Jenkinsfile                      ← pipeline definition
+├── package.json                     ← root: husky + lint-staged + commitlint + prettier
+├── skaffold.yaml                    ← local hot-reload dev (Skaffold)
+├── .env.example                     ← env vars template
+├── .gitleaks.toml / .trivyignore    ← scanner allowlists
+├── .husky/                          ← pre-commit + commit-msg hooks
+├── .github/                         ← CODEOWNERS, PR/issue templates, dependabot, GH Actions
+│
+├── app/                             ← Express service (middleware, metrics, OTel, Postgres, Redis)
+│   ├── src/                           middleware/, routes/, lib/{logger,metrics,otel,db,redis}/
+│   ├── e2e/                           Playwright specs
+│   ├── migrations/                    knex SQL migrations
+│   ├── jest.config.js                 unit + integration projects
+│   └── stryker.conf.json              mutation testing config
+│
+├── tests/                           ← out-of-app tests
+│   ├── performance/                   k6 load test + baseline.json + compare-baseline.js
+│   └── smoke/                         post-deploy axios checks
+│
+├── docker/                          ← Dockerfile, docker-compose, Jenkins JCasC, jenkins-agent image
+├── k8s/                             ← Kustomize: base/ + overlays/{production,staging} + secrets/
+├── argocd/                          ← GitOps Applications + bootstrap app-of-apps + ClusterIssuers
+├── monitoring/                      ← Prometheus rules, Alertmanager config, Grafana dashboards, SLO defs, Velero schedules
+├── policies/kyverno/                ← 9 admission policies + exception templates
+├── chaos/                           ← Chaos Mesh experiments (staging-only blast radius)
+├── scripts/                         ← setup.sh, release.sh, seal-secret.sh, pr-preview-{up,down}.sh, setup-branch-protection.sh
+└── docs/                            ← runbook, dr-runbook, releasing, secrets, testing, etc.
 ```
 
 ---
 
-## Pipeline Stages
+## Where things live
 
-| Stage | What it does | Fails pipeline? |
-|-------|-------------|-----------------|
-| Checkout | Pulls code, sets env vars | Yes |
-| SonarQube | Code quality gate | Yes |
-| Dependency Scan | OWASP CVE check (CVSS ≥ 8) | Yes |
-| Lint | ESLint | No (warns) |
-| Build | `npm run build` | Yes |
-| Unit Tests | Jest + coverage (≥80%) | Yes |
-| Integration Tests | Jest integration suite | Yes |
-| Docker Build | Multi-stage build | Yes |
-| Trivy Scan | Container image CVE scan | No (warns) |
-| Deploy → Staging | Rolling update to staging | Yes |
-| Performance Tests | k6 (p95 < 500ms, error rate < 1%) | Yes |
-| Deploy → Production | Rolling update, manual approval | Yes |
-| **Auto-Rollback** | **Reverts production on failure** | — |
-
----
-
-## 24/7 Reliability Features
-
-- **Rolling updates** — `maxUnavailable: 0` means zero downtime deploys
-- **Liveness/Readiness probes** — Kubernetes only routes traffic to healthy pods
-- **HPA** — Auto-scales from 3 → 20 pods based on CPU/memory
-- **Pod Disruption Budget** — Guarantees ≥2 pods available during node maintenance
-- **Graceful shutdown** — SIGTERM handler closes connections cleanly in 55s
-- **Automatic rollback** — If production deploy fails, Jenkins reverts to previous image automatically
-- **Prometheus alerts** — Pages on-call if error rate, latency, or pod restarts spike
+| Looking for | Read |
+|---|---|
+| How the pipeline works | [`Jenkinsfile`](./Jenkinsfile), [`docs/runbook.md`](./docs/runbook.md) |
+| How to deploy locally | [`docs/cluster-setup.md`](./docs/cluster-setup.md), [`docs/local-dev.md`](./docs/local-dev.md) |
+| How to run tests | [`docs/testing.md`](./docs/testing.md) |
+| Operational alerts + on-call | [`docs/runbook.md`](./docs/runbook.md), [`docs/oncall.md`](./docs/oncall.md), [`monitoring/prometheus.yaml`](./monitoring/prometheus.yaml) |
+| Disaster recovery | [`docs/dr-runbook.md`](./docs/dr-runbook.md) |
+| Postmortem template | [`docs/postmortem-template.md`](./docs/postmortem-template.md) |
+| Secrets workflow | [`docs/secrets.md`](./docs/secrets.md) |
+| Release flow | [`docs/RELEASING.md`](./docs/RELEASING.md) |
+| PR previews | [`docs/pr-preview.md`](./docs/pr-preview.md) |
+| Chaos engineering | [`docs/chaos-engineering.md`](./docs/chaos-engineering.md), [`chaos/README.md`](./chaos/README.md) |
+| Database + migrations | [`docs/database.md`](./docs/database.md) |
+| OpenTelemetry / tracing | [`app/src/lib/otel.js`](./app/src/lib/otel.js), [`docs/log-aggregation.md`](./docs/log-aggregation.md) |
+| DORA metrics | [`docs/dora-metrics.md`](./docs/dora-metrics.md) |
+| Cosign / signing trust | [`docs/cosign-trust.md`](./docs/cosign-trust.md) |
+| Kyverno policy promotion | [`docs/policy-promotion.md`](./docs/policy-promotion.md) |
+| Pre-commit hooks + dev loop | [`docs/dev-experience.md`](./docs/dev-experience.md) |
+| Branch protection | [`docs/branch-protection.md`](./docs/branch-protection.md) |
+| Why these tools | [`docs/tech-stack.md`](./docs/tech-stack.md) |
 
 ---
 
-## Rollback
+## Status
 
-**Automatic** (triggered on pipeline failure):
-```
-Jenkins detects deploy failure → kubectl set image → previous image → done
-```
+**All 6 production-readiness phases (A–F) plus 4 extended hardening tiers complete.** See [`CHANGELOG.md`](./CHANGELOG.md) for the build-by-build log.
 
-**Manual** (any time):
-```bash
-# Roll back to previous revision
-kubectl rollout undo deployment/my-app --namespace=production
+| Tier | Builds | Closes |
+|---|---|---|
+| Phase A — bootstrap | 014 | Argo CD app-of-apps, sealed-secrets, kind nip.io |
+| Phase B — agent image | 013 | Custom Jenkins agent with all CLIs bundled |
+| Phase C — pipeline holes | 015 | Tempo, Promtail, DORA pushes, scanner enforcement, PR-teardown |
+| Phase D — cluster security | 016 | Kyverno + 5 policies, NetworkPolicies, quotas, PSS-restricted, RBAC |
+| Phase E — app data layer | 017 | Postgres, Redis, knex migrations, real health checks |
+| Phase F — operations | 018 | Alertmanager receivers, Grafana dashboards, postmortem + on-call |
+| Tier 1 — supply-chain | 019 | Multi-arch, grype, cosign keyless trust, SLSA provenance |
+| Tier 2 — test depth | 020 | Playwright E2E, Stryker mutation, k6 baseline comparison |
+| Tier 3 — policy enforce | 021 | Kyverno Audit→Enforce + 4 hardening policies |
+| Tier 4 — resilience | 022 | Chaos Mesh, Velero + MinIO, DR runbook, synthetic monitoring |
+| Tier 5 — DX | 023 | Pre-commit hooks, GH Actions PR checks, README rewrite |
 
-# Roll back to specific revision
-kubectl rollout undo deployment/my-app --to-revision=3 --namespace=production
+### What would still need to change for cloud production
 
-# Check rollout history
-kubectl rollout history deployment/my-app --namespace=production
-```
+- Replace `app.127.0.0.1.nip.io` with a real domain.
+- Swap `selfsigned-issuer` for `letsencrypt-prod` (cluster issuer already defined; just change the annotation).
+- Replace MinIO with native object storage (S3 / GCS / Azure Blob).
+- Swap Sealed Secrets for External Secrets + Vault if you need cross-cluster secret sharing.
+- Replace `localhost:5000` registry with a real one (GHCR, ECR, GAR, Harbor).
+- Promote `verify-image-signatures` Kyverno policy from Audit to Enforce after first signed deploy soaks for 7 days.
+- Configure real Alertmanager receivers (replace `REPLACE_ME` placeholders in `argocd/bootstrap/apps/kube-prometheus-stack.yaml`).
+- Run `./scripts/setup-branch-protection.sh` against the real GitHub repo.
 
 ---
 
-## Branch Strategy
+## Contributing
 
-| Branch | Deploys to | Gate |
-|--------|-----------|------|
-| `feature/*` | (none) | Tests only |
-| `develop` | Staging | All tests + perf tests |
-| `main` | Production | Manual approval + all tests |
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Short version: feature branches off `develop`, Conventional Commits, one PR per logical change, all checks green.
 
+## License
 
-
---------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-
-CI/CD Orchestration
-Jenkins
-The core pipeline engine. Every git push triggers the full build → test → deploy → rollback sequence automatically. Chosen over GitHub Actions or GitLab CI because Jenkins is self-hosted (full control over secrets, no vendor lock-in), has a massive plugin ecosystem, and is the industry standard in enterprise DevOps environments — which matches the diagram you shared.
-
-Application Runtime
-Node.js 20 (LTS)
-The application server runtime. Chosen over Python/Django or Java/Spring because it's lightweight, has excellent container startup times (critical for rolling deploys), and the async I/O model handles high-concurrency API traffic efficiently with minimal memory.
-Express.js
-The HTTP framework powering the app and health endpoints. Chosen over Fastify or NestJS for its simplicity — the pipeline demo doesn't need an opinionated framework, and Express has zero overhead for exposing the /health/live and /health/ready endpoints Kubernetes depends on.
-
-Containerization
-Docker
-Packages the app and all its dependencies into a portable, reproducible image. Chosen universally — there's no real alternative here for container-based deployments.
-Multi-stage Dockerfile
-A specific Docker pattern used to keep the final production image small. The build tools and dev dependencies are used in earlier stages and thrown away — only the compiled output and production node_modules end up in the final image. Alternatives like single-stage builds produce images 3–5x larger.
-Docker Compose
-Used to run the local development infrastructure (Jenkins, SonarQube, PostgreSQL, Redis, local registry) as a single stack. Chosen over running everything manually because one command (docker-compose up) boots the entire CI environment reproducibly.
-
-Container Orchestration
-Kubernetes
-Manages running the application in production — scheduling pods across nodes, health checking, auto-scaling, and rolling out new versions with zero downtime. Chosen over Docker Swarm or plain EC2 because it has native rolling update strategies, the HPA for autoscaling, and Pod Disruption Budgets for maintenance safety. It's also the production standard at scale.
-Kubernetes Manifests (YAML)
-The declarative configuration files that describe everything Kubernetes needs to know: deployment strategy, resource limits, probes, ingress rules, and autoscaling policies. Chosen over Helm charts to keep the codebase simple and readable — Helm adds significant complexity that isn't needed unless you're managing many environments with shared templates.
-
-Code Quality & Security
-SonarQube
-Static analysis tool that scans code for bugs, code smells, and security vulnerabilities before any build or deploy happens. If the Quality Gate fails, the pipeline stops. Chosen over ESLint alone because SonarQube goes far deeper — it tracks technical debt, detects security hotspots (like hardcoded secrets or SQL injection risks), and gives a pass/fail gate Jenkins can enforce.
-OWASP Dependency Check
-Scans node_modules against the National Vulnerability Database for known CVEs. Fails the pipeline if any dependency has a CVSS score of 8 or higher (High/Critical). Chosen over Snyk because it's free, open source, and runs entirely on-premises with no data leaving your environment.
-Trivy
-Scans the built Docker image for OS-level and library vulnerabilities before it's pushed to the registry. Chosen over Clair or Anchore because Trivy is significantly faster, has no server component to maintain, and produces very low false-positive rates.
-ESLint
-JavaScript linter that catches syntax errors, style violations, and common anti-patterns at the source level — the fastest and cheapest check in the pipeline. Chosen over JSHint or TSLint (deprecated) because it's the current standard with the broadest plugin ecosystem.
-
-Testing
-Jest
-The unit and integration test runner. Produces JUnit XML reports Jenkins can consume, and generates Cobertura-format coverage reports with an 80% line coverage threshold. Chosen over Mocha/Chai because Jest bundles the test runner, assertion library, mocking, and coverage in a single tool with zero configuration.
-k6
-Load and performance testing tool that runs against staging after every deploy to staging. Enforces SLA thresholds: p95 response time under 500ms, error rate under 1%. Chosen over JMeter because k6 tests are written in plain JavaScript, it produces clean JSON output Jenkins can archive, and it's dramatically faster and lighter to run in CI than JMeter's Java/XML setup.
-Smoke Tests (Jest + Axios)
-Lightweight post-deploy tests that run immediately after each deployment to verify the app is actually serving traffic correctly. Fast on purpose — they check health endpoints, a core API route, and response time, then exit. A separate concern from unit tests because they test the live deployed environment, not isolated code.
-
-Infrastructure & Networking
-NGINX Ingress Controller
-Routes external HTTPS traffic into the Kubernetes cluster and to the correct service. Handles TLS termination, rate limiting, and redirects. Chosen over AWS ALB Ingress or Traefik because NGINX Ingress is cloud-agnostic (works the same on AWS, GCP, Azure, or bare metal) and has the most mature feature set.
-cert-manager
-Automatically provisions and renews TLS certificates from Let's Encrypt. Chosen because it makes HTTPS completely hands-off — no manual certificate renewals ever.
-
-Monitoring & Alerting
-Prometheus
-Scrapes metrics from application pods and Kubernetes nodes on a 15-second interval. Evaluates alert rules continuously. Chosen over Datadog or New Relic because it's open source, self-hosted, and the de facto standard for Kubernetes monitoring.
-Grafana (referenced as the dashboard layer for Prometheus)
-Visualizes Prometheus metrics in dashboards. Chosen over Kibana because Kibana is optimized for log data whereas Grafana is built specifically for time-series metrics from Prometheus.
-Alertmanager
-Receives firing alerts from Prometheus and routes them to Slack. Handles deduplication so you don't get spammed with the same alert every 15 seconds. Part of the Prometheus ecosystem — no meaningful alternative when running Prometheus.
-
-Configuration & Secrets
-Jenkins Configuration as Code (JCasC)
-Defines Jenkins' entire configuration — credentials, tools, jobs, plugins, authorization — in a single YAML file that's version-controlled. Chosen over manual UI configuration because it makes Jenkins fully reproducible: destroy and rebuild the Jenkins server and it comes back identical with one file.
-Kubernetes Secrets
-Stores sensitive values (database passwords, API keys) as encrypted objects in the cluster, injected into pods as environment variables at runtime. The alternative — hardcoding secrets in Docker images or YAML files — is a serious security vulnerability.
-Kubernetes ConfigMaps
-Stores non-sensitive configuration (Redis URL, feature flags) separately from the application image, so config can change without rebuilding the container.
-
-Notifications
-Slack (Jenkins Slack Plugin)
-Sends pipeline status messages (started, success, failure, rollback) to a designated channel in real time. Chosen over email because it's immediate, visible to the whole team, and actionable — you see a failure and can click through to the Jenkins build in seconds.
+This is a learning artifact. Add a `LICENSE` file if you publish.

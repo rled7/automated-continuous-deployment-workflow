@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Commit-msg: validates the commit message against Conventional Commits.
+# Allowed scopes are defined in commitlint.config.js.
+npx --no -- commitlint --edit "$1"

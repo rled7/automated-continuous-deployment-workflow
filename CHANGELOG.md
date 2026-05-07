@@ -12,6 +12,46 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 019 — Multi-arch images, SBOM scanning, cosign keyless trust, SLSA provenance
+**Date:** 2026-05-07
+**Scope:** Supply-chain final mile — trust infrastructure that enables Build 021 to promote `verify-image-signatures` from Audit to Enforce.
+
+### Added
+
+- `docs/cosign-trust.md` — New document explaining keyless cosign signing (Fulcio short-lived certs, Rekor transparency log), the two trust paths (keyless vs. key-based KMS), the rationale for choosing keyless (no key management, ephemeral certs, public audit trail in Rekor), local verification instructions (`cosign verify --certificate-identity ... --certificate-oidc-issuer ... IMAGE`), and step-by-step migration guide to KMS-backed key-based signing with provider-specific examples for AWS, GCP, and Azure.
+
+### Modified
+
+- `docker/Dockerfile` — Added `RUN --mount=type=cache,target=/root/.npm` BuildKit cache mounts to both npm install steps in the multi-stage build (production-deps and all-deps layers). Each platform in a multi-arch build gets its own cache namespace automatically; subsequent builds skip re-downloading the npm registry cache.
+
+- `docker/jenkins-agent/Dockerfile` — Added `GRYPE_VERSION=v0.85.0` to the ENV block and a new install step (`curl -sSfL .../install.sh | sh -s -- -b /usr/local/bin`) for grype (Anchore's SBOM vulnerability scanner). Added `grype version` to the sanity-check `RUN` so the image build fails fast if grype is missing or mis-installed.
+
+- `Jenkinsfile` — Four changes in the Docker Build & Push stage and a new stage:
+  1. **Multi-arch build**: replaced `docker.build(...)` + `appImage.push()` with `docker buildx build --platform linux/amd64,linux/arm64 --push`. A `docker buildx create --use --name multiarch --driver docker-container || docker buildx use multiarch` setup call precedes it. Comments document the binfmt_misc QEMU requirement (kind clusters have it; cloud VM agents may need the one-time `tonistiigi/binfmt --install all` privileged container).
+  2. **Cosign keyless sign**: `COSIGN_EXPERIMENTAL=1 cosign sign --yes "${FULL_IMAGE}"` signs the multi-arch manifest list digest. Comments document the OIDC issuer dependency and cosign v2+ default keyless behaviour.
+  3. **SLSA provenance attestation**: `cosign attest --yes --type slsaprovenance` attaches a SLSA Build L2 predicate. `BUILD_START_ISO` is captured in the Checkout stage via `date -u +%Y-%m-%dT%H:%M:%SZ`. Comments note that `builder.id = ${JENKINS_URL}` is self-attested (not OIDC-bound), making this L2 not L3.
+  4. **Scan SBOM stage (new, Stage 7b)**: `grype sbom:reports/sbom.cdx.json --fail-on high --output table | tee reports/grype.txt` — fails the pipeline on any HIGH or CRITICAL vulnerability. Runs after Docker Build & Push (consumes `reports/sbom.cdx.json` from syft). `reports/grype.txt` is archived as a build artifact.
+
+- `policies/kyverno/verify-image-signatures.yaml` — Tightened from placeholder values to real Sigstore public infrastructure references:
+  - `issuer: "https://token.actions.githubusercontent.com"` (GitHub Actions OIDC)
+  - `subject: "https://github.com/rled7/automated-continuous-deployment-workflow/.github/workflows/*"` (glob matches any workflow file)
+  - `rekor.url: https://rekor.sigstore.dev` (public Rekor log)
+  - Added a verbose comment block at the top explaining the policy's purpose, how keyless signing works, the OIDC issuer/subject matching rules, the Build 021 Enforce promotion checklist, and a note that no extra Kyverno config is needed for public Sigstore roots (Kyverno bundles the Fulcio root CA and Rekor public key).
+  - `validationFailureAction: Audit` preserved — Build 021 promotes to Enforce once a full release cycle runs clean.
+
+### Judgment calls
+
+- **SLSA predicate fields — demo vs. real**: The SLSA provenance predicate attached by `cosign attest` is a self-attested L2 artefact. `builder.id` is `${JENKINS_URL}`, which is self-reported by the pipeline and not independently verifiable via an OIDC token. For real SLSA L3, the builder identity must come from an OIDC token minted by a trusted, external build service (e.g. GitHub Actions Reusable Workflows with SLSA provenance generator, or SLSA-verified Tekton builds). This is documented in the Jenkinsfile comment block and in this CHANGELOG. The predicate is useful as a demo and as a foundation for L3 migration; it is not a compliance claim.
+- **grype `--fail-on high`**: High is the starting threshold. Once a clean baseline is established and a suppression list (grype's `.grype.yaml`) covers accepted/false-positive findings, tighten to `--fail-on critical` for consistency with Trivy's existing `--severity HIGH,CRITICAL` gate. Both scanners running in parallel on different feeds provides defence in depth.
+- **Registry cache (`--cache-from`/`--cache-to`)**: The buildx step also wires a registry-side layer cache (`type=registry,mode=max`) so incremental layer rebuilds are fast on cloud agents that have no local Docker daemon state between builds. This is an improvement beyond the task specification but has no downside.
+- **BuildKit cache mounts in multi-arch context**: `--mount=type=cache` in the Dockerfile is per-platform-per-builder; BuildKit automatically namespaces caches by platform so `linux/amd64` and `linux/arm64` builds never share a potentially incompatible native binary cache. No agent-image changes are needed beyond what the jenkins-agent Dockerfile already provides (docker.io installed, Docker socket mounted via the Kubernetes pod spec).
+
+### Enables
+
+- Build 021: promote `verify-image-signatures` from Audit to Enforce (after ≥ 1 full release cycle with zero PolicyReport violations).
+
+---
+
 ## Build 018 — Alertmanager receivers, Grafana dashboards, postmortem + on-call docs
 **Date:** 2026-05-06
 **Scope:** Phase F of the production-readiness plan (closes Phase F — operational maturity)

@@ -1,14 +1,21 @@
 # ─── Stage 1: Dependencies ────────────────────────────────────────────────────
+# Build 019: BuildKit cache mounts on npm install steps avoid re-downloading the
+# npm cache on every build. The /root/.npm cache is preserved across builds when
+# the image is built with `docker buildx build` (BuildKit is the default backend).
+# For multi-arch builds (linux/amd64,linux/arm64) each platform gets its own
+# cache namespace automatically via the platform-specific build context.
 FROM node:20-alpine AS deps
 WORKDIR /app
 
 # Install only production dependencies first (layer cache optimization)
 COPY app/package*.json ./
-RUN npm ci --only=production --ignore-scripts && \
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --only=production --ignore-scripts && \
     cp -R node_modules /tmp/prod_modules
 
 # Install all deps (including dev) for build
-RUN npm ci --ignore-scripts
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --ignore-scripts
 
 # ─── Stage 2: Build ───────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder

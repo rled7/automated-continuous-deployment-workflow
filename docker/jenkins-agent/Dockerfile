@@ -24,6 +24,7 @@ ENV NODE_VERSION=20.18.1 \
     SYFT_VERSION=v1.18.1 \
     COSIGN_VERSION=v2.4.1 \
     TRIVY_VERSION=v0.58.1 \
+    GRYPE_VERSION=v0.85.0 \
     DEPENDENCY_CHECK_VERSION=11.1.1 \
     K6_VERSION=v0.55.0 \
     GH_VERSION=2.63.2
@@ -68,6 +69,13 @@ RUN curl -fsSLo /usr/local/bin/cosign \
 RUN curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION#v}_Linux-64bit.tar.gz" \
         | tar -xzf - -C /usr/local/bin trivy
 
+# ── grype (SBOM vulnerability scanner) ──────────────────────────────────────
+# Build 019: grype scans CycloneDX / SPDX SBOMs for known CVEs using the
+# Anchore Grype DB. Complements Trivy (different NVD feed cadence and heuristics).
+# Used in the 'Scan SBOM' Jenkinsfile stage: grype sbom:reports/sbom.cdx.json
+RUN curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+        | sh -s -- -b /usr/local/bin "${GRYPE_VERSION}"
+
 # ── OWASP Dependency Check ───────────────────────────────────────────────────
 RUN curl -fsSLo /tmp/dc.zip \
         "https://github.com/jeremylong/DependencyCheck/releases/download/v${DEPENDENCY_CHECK_VERSION}/dependency-check-${DEPENDENCY_CHECK_VERSION}-release.zip" \
@@ -93,6 +101,7 @@ RUN node --version \
     && syft version \
     && cosign version \
     && trivy --version \
+    && grype version \
     && dependency-check.sh --version \
     && k6 version \
     && gh --version

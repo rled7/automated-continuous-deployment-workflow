@@ -52,6 +52,10 @@ pipeline {
                     // Bug 1 fix: compute ENV here instead of in environment{} block
                     // to avoid mixing Groovy function calls with declarative env vars
                     env.ENV = getEnvironment()
+                    // Build 019: capture build start time in ISO-8601 UTC for SLSA provenance.
+                    // Must be set here (not in environment{}) so it's available as a shell var
+                    // inside later sh steps without needing a Groovy closure.
+                    env.BUILD_START_ISO = sh(script: "date -u +%Y-%m-%dT%H:%M:%SZ", returnStdout: true).trim()
                 }
                 echo "📦 Branch: ${env.GIT_BRANCH_NAME} | Author: ${env.GIT_AUTHOR}"
                 notifySlack("🔄 *Build Started* — ${APP_NAME} #${BUILD_NUMBER}\n*Branch:* ${env.GIT_BRANCH_NAME}\n*Commit:* ${env.GIT_MESSAGE}")
@@ -243,6 +247,20 @@ pipeline {
         }
 
         // ─── STAGE 7: DOCKER BUILD & PUSH ────────────────────────────────────
+        // Build 019: replaced docker.build() with docker buildx to produce a
+        // multi-arch manifest list (linux/amd64 + linux/arm64). The manifest
+        // list is pushed directly to the registry via --push; no separate
+        // appImage.push() is needed.
+        //
+        // Agent requirements for buildx multi-arch:
+        //   - Docker daemon with the docker-container buildx driver (default on
+        //     Docker ≥ 23 when BuildKit is enabled).
+        //   - binfmt_misc QEMU emulation for cross-arch builds. On kind clusters
+        //     this is available by default. On cloud VM agents without QEMU, run
+        //     once during agent bootstrap:
+        //       docker run --privileged --rm tonistiigi/binfmt --install all
+        //   - The agent's docker socket must be accessible (already assumed by
+        //     earlier builds).
         stage('Docker Build & Push') {
             steps {
                 script {
@@ -250,35 +268,126 @@ pipeline {
                     // don't end up with "https://https://..." if the credential
                     // already contains the scheme.
                     def registryUrl = "${DOCKER_REGISTRY}".replaceFirst(/^https?:\/\//, '')
-                    docker.withRegistry("https://${registryUrl}", 'docker-registry-credentials') {
-                        def appImage = docker.build("${FULL_IMAGE}", "-f docker/Dockerfile .")
+                    withCredentials([usernamePassword(credentialsId: 'docker-registry-credentials',
+                                                      usernameVariable: 'DOCKER_USER',
+                                                      passwordVariable: 'DOCKER_PASS')]) {
+                        sh """
+                            echo "\${DOCKER_PASS}" | docker login "${registryUrl}" -u "\${DOCKER_USER}" --password-stdin
 
-                        // Build 015: Trivy now fails the stage on HIGH/CRITICAL CVEs.
-                        // Escape hatch: add CVE IDs to .trivyignore with a justification
-                        // and expiry date (format: # CVE-2024-XXXX  # reason, expiry: YYYY-MM-DD).
-                        // .trivyignore is automatically picked up by trivy via --ignorefile.
-                        sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --ignorefile .trivyignore ${FULL_IMAGE}"
+                            # Ensure a buildx builder with the docker-container driver exists.
+                            # The docker-container driver supports multi-platform builds via QEMU.
+                            # If a builder named 'multiarch' already exists, reuse it.
+                            docker buildx create --use --name multiarch --driver docker-container || docker buildx use multiarch
 
-                        appImage.push()
-                        appImage.push('latest')
-                        echo "🐳 Pushed ${FULL_IMAGE}"
+                            # Build and push the multi-arch manifest list in one step.
+                            # --push streams layers directly to the registry without a local load;
+                            # this is required for multi-platform images (they cannot be loaded
+                            # into the local Docker daemon simultaneously).
+                            docker buildx build \
+                              --platform linux/amd64,linux/arm64 \
+                              --push \
+                              -t ${FULL_IMAGE} \
+                              -t ${DOCKER_REGISTRY}/${APP_NAME}:latest \
+                              -f docker/Dockerfile \
+                              --cache-from type=registry,ref=${DOCKER_REGISTRY}/${APP_NAME}:cache \
+                              --cache-to   type=registry,ref=${DOCKER_REGISTRY}/${APP_NAME}:cache,mode=max \
+                              .
+                        """
                     }
+
+                    // Build 015 / Build 019: Trivy still scans the pushed image.
+                    // Trivy v0.58+ supports manifest lists / multi-arch OCI indexes
+                    // natively — it picks the host platform's digest by default.
+                    // To scan all platforms explicitly, add --platform flags.
+                    // Escape hatch: add CVE IDs to .trivyignore with a justification
+                    // and expiry date (format: # CVE-2024-XXXX  # reason, expiry: YYYY-MM-DD).
+                    sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --ignorefile .trivyignore ${FULL_IMAGE}"
 
                     // Build 009 — point 13: generate SBOM and sign the image.
                     sh """
                         mkdir -p reports
-                        # Generate CycloneDX SBOM with syft
+                        # Generate CycloneDX SBOM with syft from the pushed manifest list.
+                        # syft resolves the manifest list and generates a combined SBOM.
                         syft "${FULL_IMAGE}" -o cyclonedx-json > reports/sbom.cdx.json
                     """
 
-                    // Keyless cosign signing via OIDC (Sigstore / Fulcio + Rekor).
-                    // In production this requires the Jenkins agent to have a valid
-                    // OIDC token issued by a Fulcio-trusted OIDC provider.
+                    // Build 019: Keyless cosign signing of the manifest list digest.
+                    // cosign sign targets the digest (immutable) rather than the mutable tag.
+                    // OIDC issuer: depends on the OIDC provider configured for the Jenkins agent.
+                    //   - GitHub Actions: https://token.actions.githubusercontent.com
+                    //   - On-prem Jenkins with Keycloak: your Keycloak realm OIDC URL
+                    //   - COSIGN_EXPERIMENTAL=1 is legacy; cosign v2+ uses keyless by default
+                    //     when no --key flag is provided and OIDC is available.
                     sh """
                         COSIGN_EXPERIMENTAL=1 cosign sign --yes "${FULL_IMAGE}"
                     """
 
+                    // Build 019: SLSA provenance attestation.
+                    // Attaches a SLSA Build L2 provenance predicate to the image as a
+                    // cosign attestation. The attestation is stored in the same registry
+                    // OCI repository alongside the image (using the cosign tag convention).
+                    //
+                    // IMPORTANT — real vs. demo fields:
+                    //   - buildType: demo placeholder; a real SLSA L3 builder would use a
+                    //     URI registered with slsa.dev and the identity would come from the
+                    //     OIDC token, not be self-attested.
+                    //   - builder.id: ${JENKINS_URL} is self-reported — not independently
+                    //     verifiable without an external OIDC token binding. Treat as L2.
+                    //   - metadata.reproducible: false — Node.js builds are not reproducible
+                    //     byte-for-byte due to timestamps in npm artefacts.
+                    //   - For a verifiable SLSA L3 builder, replace this with a build service
+                    //     that mints the provenance from an OIDC token it controls.
+                    sh '''
+                        cosign attest --yes --type slsaprovenance \
+                          --predicate <(cat <<EOF
+{
+  "buildType": "https://jenkins.io/buildType/v1",
+  "builder": {"id": "${JENKINS_URL}"},
+  "invocation": {
+    "configSource": {
+      "uri": "git+${GIT_URL}",
+      "digest": {"sha1": "${GIT_COMMIT}"}
+    }
+  },
+  "metadata": {
+    "buildStartedOn": "${BUILD_START_ISO}",
+    "buildFinishedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "completeness": {
+      "parameters": true,
+      "environment": true,
+      "materials": true
+    },
+    "reproducible": false
+  }
+}
+EOF
+) ${FULL_IMAGE}
+                    '''
+
                     archiveArtifacts artifacts: 'reports/sbom.cdx.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ─── STAGE 7b: SCAN SBOM ─────────────────────────────────────────────
+        // Build 019: grype scans the CycloneDX SBOM produced by syft above.
+        // This is a second gate *after* the Trivy image scan: Trivy scans the
+        // container filesystem layers; grype scans the SBOM component list and
+        // can match packages Trivy misses (different NVD feed cadence).
+        //
+        // --fail-on high: pipeline fails if any HIGH or CRITICAL vuln is found.
+        // Next tightening level: --fail-on critical (once a clean baseline is
+        // established and a false-positive suppression list is in place).
+        stage('Scan SBOM') {
+            steps {
+                sh '''
+                    mkdir -p reports
+                    grype sbom:reports/sbom.cdx.json --fail-on high --output table | tee reports/grype.txt
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/grype.txt', allowEmptyArchive: true
                 }
             }
         }

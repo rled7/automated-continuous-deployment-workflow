@@ -1,20 +1,69 @@
 # =============================================================================
-# Image Signature Verification Policy
+# Image Signature Verification Policy — Build 019
 # =============================================================================
-# IMPORTANT: This policy will NOT pass admission for real workloads until you
-# have:
-#   1. Signed your images with cosign using keyless signing:
-#        cosign sign --yes ghcr.io/YOUR_ORG/my-app:SHA
-#   2. Configured the cluster to trust the OIDC issuer used during signing
-#      (GitHub Actions uses https://token.actions.githubusercontent.com).
-#   3. Updated the imageReferences pattern below to match your actual registry.
 #
-# The Rekor transparency log (rekor.sigstore.dev) is used for audit; the Fulcio
-# CA (fulcio.sigstore.dev) issues the short-lived signing certificates.
+# PURPOSE
+# -------
+# This policy verifies that every container image admitted into the
+# `production` namespace was signed by the expected OIDC identity using
+# cosign keyless signing (Sigstore Fulcio + Rekor). Once this policy is
+# promoted to Enforce (planned for Build 021), any image that:
+#   - lacks a valid cosign signature, OR
+#   - was signed by a different OIDC subject/issuer than configured below
+# will be REJECTED at Kubernetes admission time. This closes the supply-chain
+# gap between "image built in CI" and "image running in production".
 #
-# Staying as Audit is the safe default: violations are recorded in
-# PolicyReports but pods are not blocked. Switch to Enforce only after
-# verifying that all production images are signed in CI.
+# HOW KEYLESS COSIGN SIGNING WORKS (summary)
+# -------------------------------------------
+#  1. The Jenkins agent authenticates to an OIDC provider (e.g. GitHub OIDC,
+#     Keycloak) and receives a short-lived OIDC ID token.
+#  2. cosign exchanges that token with Fulcio (fulcio.sigstore.dev) for an
+#     ephemeral X.509 signing certificate whose Subject is the OIDC subject
+#     (e.g. the GitHub Actions workflow URI or the Jenkins service account).
+#  3. cosign creates a signature over the image manifest digest and uploads
+#     both the certificate and the signature to Rekor (rekor.sigstore.dev),
+#     the public immutable transparency log.
+#  4. At verification time, Kyverno (via cosign embedded libraries) resolves
+#     the OCI manifest, fetches the signature + certificate from the Rekor
+#     inclusion proof, validates the cert chain up to the Fulcio root CA, and
+#     checks that the certificate's Subject and Issuer match the values below.
+#
+# OIDC ISSUER NOTE
+# ----------------
+# The `issuer` below is set to the GitHub Actions OIDC issuer. If the
+# Jenkins pipeline signs with a different OIDC provider (e.g. on-prem
+# Keycloak, HashiCorp Vault JWT auth, or a cloud provider OIDC endpoint),
+# update `issuer` to match that provider's well-known OIDC issuer URL.
+# The issuer MUST match the `iss` claim in the OIDC token that was used
+# when cosign sign was called. Mismatches will cause all verifications to
+# fail even if the signature is otherwise valid.
+#
+# SUBJECT NOTE
+# ------------
+# The `subject` below uses the GitHub Actions workflow URI pattern with a
+# glob. For a Jenkins OIDC token, the subject would typically be the
+# Kubernetes service account URI (e.g.
+#   system:serviceaccount:jenkins:jenkins
+# or, with Keycloak, a client_id-bound subject). Update to match your
+# actual signer identity before promoting to Enforce.
+#
+# PROMOTION TO ENFORCE (Build 021 checklist)
+# ------------------------------------------
+#   1. Run in Audit for ≥ 1 full release cycle — confirm zero violations in
+#      PolicyReports (kubectl get policyreport -A).
+#   2. Verify the subject/issuer values match the actual signer identity by
+#      running: cosign verify --certificate-identity '<subject>' \
+#                             --certificate-oidc-issuer '<issuer>' \
+#                             <IMAGE>
+#   3. Change validationFailureAction below from Audit to Enforce.
+#   4. Confirm that unsigned images (e.g. third-party base images in
+#      non-production namespaces) are excluded from the match.namespaces list.
+#
+# SIGSTORE PUBLIC INFRASTRUCTURE
+# --------------------------------
+# No extra Kyverno config is required to trust the public Sigstore roots.
+# Kyverno bundles the Fulcio root CA and the Rekor public key; the `rekor.url`
+# below just points verification at the correct log instance.
 # =============================================================================
 
 apiVersion: kyverno.io/v1
@@ -27,14 +76,14 @@ metadata:
     policies.kyverno.io/severity: high
     policies.kyverno.io/description: >-
       Verifies that container images are signed using cosign keyless signing
-      (Sigstore Fulcio + Rekor). Only images from the configured registry
-      pattern are subject to verification. Audit mode is the safe default
-      until all images are signed in CI and the OIDC issuer is trusted.
+      (Sigstore Fulcio + Rekor) by the expected OIDC identity. Only images
+      admitted into the `production` namespace are subject to verification.
+      Audit mode is the safe default until Build 021 promotes to Enforce.
 spec:
-  # Audit mode: SAFE DEFAULT. Do not switch to Enforce until:
-  #   - All production images are signed with cosign in CI (GitHub Actions)
-  #   - You have validated that the OIDC issuer matches the issuer below
-  #   - PolicyReports show zero violations for a full release cycle
+  # Audit mode: violations are recorded in PolicyReports but pods are NOT
+  # blocked. Switch to Enforce only after verifying all production images
+  # are signed and the subject/issuer values below match the actual signer.
+  # Build 021 will promote this to Enforce.
   validationFailureAction: Audit
 
   background: false  # verifyImages rules must run at admission time only
@@ -50,17 +99,31 @@ spec:
                 - production
       verifyImages:
         - imageReferences:
-            # Replace with your actual registry, e.g.:
+            # Replace with your actual registry path, e.g.:
             #   ghcr.io/YOUR_ORG/my-app:*
             #   docker.io/YOUR_ORG/my-app:*
             - "ghcr.io/YOUR_ORG/my-app:*"
           attestors:
             - entries:
                 - keyless:
-                    # Fulcio CA — issues short-lived certs bound to OIDC identity
+                    # Fulcio CA — issues short-lived certs bound to the OIDC identity.
+                    # Uses Sigstore's public Fulcio root; no additional CA config needed.
+
+                    # OIDC issuer: must match the `iss` claim in the OIDC token used
+                    # during cosign sign. GitHub Actions OIDC issuer shown below.
+                    # For on-prem Jenkins with Keycloak, use your realm's issuer URL,
+                    # e.g.: https://keycloak.example.com/realms/jenkins
                     issuer: "https://token.actions.githubusercontent.com"
-                    # Replace with your GitHub org/repo OIDC subject:
-                    subject: "https://github.com/YOUR_ORG/YOUR_REPO/.github/workflows/ci.yml@refs/heads/main"
+
+                    # OIDC subject: must match the `sub` claim in the signing token.
+                    # For GitHub Actions this is the workflow run URI. The glob (*) at
+                    # the end matches any workflow file in the .github/workflows directory.
+                    # IMPORTANT: update the org/repo path to match your actual repository
+                    # before promoting this policy to Enforce in Build 021.
+                    subject: "https://github.com/rled7/automated-continuous-deployment-workflow/.github/workflows/*"
+
                     rekor:
-                      # Rekor public transparency log
+                      # Rekor public transparency log — all signatures are stored here.
+                      # No key material needed; Kyverno validates inclusion proofs against
+                      # the bundled Rekor public key.
                       url: https://rekor.sigstore.dev

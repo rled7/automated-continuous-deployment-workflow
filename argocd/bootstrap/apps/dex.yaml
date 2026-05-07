@@ -1,0 +1,115 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dex
+  namespace: argocd
+  annotations:
+    # Wave -10: Dex must be running before oauth2-proxy (wave 0) and before
+    # any protected Ingress can successfully redirect for authentication.
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://charts.dexidp.io
+    chart: dex
+    targetRevision: "0.20.0"
+    helm:
+      valuesObject:
+        config:
+          # OIDC issuer URL — must match the host Dex is served at.
+          # oauth2-proxy and all OIDC clients must reference this exact URL.
+          issuer: https://auth.127.0.0.1.nip.io
+
+          storage:
+            # "memory" is suitable for kind/local only: state is lost on pod restart.
+            # For production switch to the "kubernetes" storage backend:
+            #   type: kubernetes
+            #   config:
+            #     inCluster: true
+            # This persists Dex state (auth codes, refresh tokens) in Kubernetes
+            # CRDs (dexidp.io/v1) without needing an external database.
+            type: memory
+
+          # ── OAuth2 clients ────────────────────────────────────────────────
+          staticClients:
+            - id: oauth2-proxy
+              # REPLACE_ME: generate a strong random secret and store it in a
+              # SealedSecret.  Both Dex and oauth2-proxy must share this value.
+              # Generate: openssl rand -hex 32
+              secret: REPLACE_ME
+              name: oauth2-proxy
+              redirectURIs:
+                - https://oauth2-proxy.127.0.0.1.nip.io/oauth2/callback
+
+          # ── Static demo users (kind/local only) ───────────────────────────
+          # Passwords below are bcrypt-hashed placeholders.
+          # Replace hash values with:  htpasswd -bnBC 12 "" <password> | tr -d ':\n'
+          # Store the real hashes in a SealedSecret and mount into the Dex pod;
+          # do NOT commit real credentials here.
+          staticPasswords:
+            - email: admin@local
+              # REPLACE_ME: bcrypt hash of the admin password
+              hash: "$2y$12$REPLACE_ME_ADMIN_BCRYPT_HASH_HERE_XXXXXXXXXXXXXXXXXXXXXX"
+              username: admin
+              userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+            - email: dev@local
+              # REPLACE_ME: bcrypt hash of the dev password
+              hash: "$2y$12$REPLACE_ME_DEV_BCRYPT_HASH_HERE_XXXXXXXXXXXXXXXXXXXXXXXX"
+              username: dev
+              userID: "bf15dc45-b181-4b2e-9b40-d1c4cc0ef089"
+
+          # ── External identity connectors ──────────────────────────────────
+          # For kind/local: leave connectors empty; static passwords handle auth.
+          # For cloud: add a GitHub or Google connector here, e.g.:
+          #   connectors:
+          #     - type: github
+          #       id: github
+          #       name: GitHub
+          #       config:
+          #         clientID: <GitHub OAuth App Client ID>
+          #         clientSecret: <GitHub OAuth App Client Secret>
+          #         redirectURI: https://auth.yourdomain.com/callback
+          #         orgs:
+          #           - name: your-github-org
+          # Or for an upstream OIDC provider (Google, Okta, Azure AD):
+          #   connectors:
+          #     - type: oidc
+          #       id: google
+          #       name: Google
+          #       config:
+          #         issuer: https://accounts.google.com
+          #         clientID: <Google Client ID>
+          #         clientSecret: <Google Client Secret>
+          #         redirectURI: https://auth.yourdomain.com/callback
+          connectors: []
+
+        # ── Ingress for Dex ──────────────────────────────────────────────────
+        ingress:
+          enabled: true
+          className: nginx
+          annotations:
+            cert-manager.io/cluster-issuer: selfsigned-issuer
+          hosts:
+            - host: auth.127.0.0.1.nip.io
+              paths:
+                - path: /
+                  pathType: Prefix
+          tls:
+            - hosts:
+                - auth.127.0.0.1.nip.io
+              secretName: dex-tls
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: auth
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

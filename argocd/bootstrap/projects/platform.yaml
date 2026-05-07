@@ -21,6 +21,9 @@ spec:
     - https://charts.chaos-mesh.org
     - https://charts.min.io
     - https://vmware-tanzu.github.io/helm-charts
+    # Build 024: edge authentication (Dex OIDC + oauth2-proxy)
+    - https://charts.dexidp.io
+    - https://oauth2-proxy.github.io/manifests
 
   destinations:
     - namespace: "*"

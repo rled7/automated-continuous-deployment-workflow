@@ -1,0 +1,89 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: oauth2-proxy
+  namespace: argocd
+  annotations:
+    # Wave 0: oauth2-proxy starts after Dex (wave -10) is healthy.
+    # Dex must expose the OIDC discovery document before oauth2-proxy starts
+    # so that the provider metadata fetch succeeds on pod init.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://oauth2-proxy.github.io/manifests
+    chart: oauth2-proxy
+    targetRevision: "7.7.30"
+    helm:
+      valuesObject:
+        config:
+          # Must match the staticClient id and secret configured in Dex.
+          clientID: oauth2-proxy
+
+          # REPLACE_ME: must match the secret in dex.yaml staticClients.
+          # Store in a SealedSecret — do NOT commit the real value here.
+          # Generate: openssl rand -hex 32
+          clientSecret: REPLACE_ME
+
+          # REPLACE_ME: 32-byte random value, base64-encoded.
+          # Used to sign oauth2-proxy session cookies.
+          # Generate: openssl rand -base64 32
+          # Rotate by updating the SealedSecret; pods will restart and
+          # existing sessions will be invalidated (users re-authenticate).
+          cookieSecret: REPLACE_ME_32_BYTES_BASE64
+
+        extraArgs:
+          # OIDC provider — delegates token issuance/verification to Dex.
+          - --provider=oidc
+          - --oidc-issuer-url=https://auth.127.0.0.1.nip.io
+
+          # Accept any email domain (static users have @local domain).
+          # Restrict in cloud: --email-domain=yourdomain.com
+          - --email-domain=*
+
+          # Operate as a reverse proxy: pass authenticated requests to the
+          # upstream (handled by nginx auth_request, not by oauth2-proxy directly).
+          - --reverse-proxy=true
+
+          # Cookie/whitelist scope: allow cookies across all nip.io subdomains.
+          # Replace with your real domain in cloud (e.g. .yourdomain.com).
+          - --whitelist-domain=.127.0.0.1.nip.io
+          - --cookie-domain=.127.0.0.1.nip.io
+
+          # kind only: Dex uses a self-signed cert; skip TLS verification.
+          # REMOVE this flag in cloud where Dex has a valid Let's Encrypt cert.
+          - --ssl-insecure-skip-verify=true
+
+        # ── Ingress for oauth2-proxy ─────────────────────────────────────────
+        ingress:
+          enabled: true
+          className: nginx
+          annotations:
+            cert-manager.io/cluster-issuer: selfsigned-issuer
+          hosts:
+            - oauth2-proxy.127.0.0.1.nip.io
+          tls:
+            - hosts:
+                - oauth2-proxy.127.0.0.1.nip.io
+              secretName: oauth2-proxy-tls
+
+        # Resource requests tuned for a single-node kind cluster
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: auth
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

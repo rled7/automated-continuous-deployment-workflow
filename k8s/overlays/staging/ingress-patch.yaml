@@ -20,6 +20,44 @@ metadata:
   name: my-app
   annotations:
     cert-manager.io/cluster-issuer: selfsigned-issuer
+
+    # ── Edge authentication via oauth2-proxy + nginx auth_request ─────────────
+    # nginx-ingress calls the auth-url before proxying each request. If
+    # oauth2-proxy returns 401/403 the user is redirected to auth-signin to
+    # complete the OIDC login flow with Dex. On success a signed cookie is set
+    # and nginx retries the original request transparently.
+    #
+    # The three headers below are forwarded to the upstream after authentication
+    # so backend services can identify the caller without re-verifying the token.
+    nginx.ingress.kubernetes.io/auth-url: "https://oauth2-proxy.127.0.0.1.nip.io/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://oauth2-proxy.127.0.0.1.nip.io/oauth2/start?rd=https://$host$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "Authorization, X-Auth-Request-User, X-Auth-Request-Email"
+    #
+    # ── Unprotected health paths (sketch — not implemented here) ─────────────
+    # To allow /health/* without authentication, create a *second* Ingress object
+    # for the same host but matching only /health/ paths, with NO auth annotations,
+    # and a higher nginx.ingress.kubernetes.io/server-snippet priority:
+    #
+    #   apiVersion: networking.k8s.io/v1
+    #   kind: Ingress
+    #   metadata:
+    #     name: my-app-health-unprotected
+    #     annotations:
+    #       nginx.ingress.kubernetes.io/use-regex: "true"
+    #   spec:
+    #     rules:
+    #       - host: staging.app.127.0.0.1.nip.io
+    #         http:
+    #           paths:
+    #             - path: /health/.*
+    #               pathType: ImplementationSpecific
+    #               backend:
+    #                 service:
+    #                   name: my-app
+    #                   port:
+    #                     number: 80
+    #
+    # Do NOT add auth-url/auth-signin to this second Ingress object.
 spec:
   tls:
     - hosts:

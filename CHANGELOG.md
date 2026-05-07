@@ -12,6 +12,40 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 024 — Edge auth: Dex OIDC + oauth2-proxy + Ingress protection
+**Date:** 2026-05-07
+**Scope:** Tier 6 — Edge authentication
+
+> This is the last substantively new tier of the production-readiness extension. Further builds would be polish only (e.g. fine-tuning chart versions, adding more Dex connectors, or hardening SealedSecret rotation automation).
+
+### Added
+
+- `argocd/bootstrap/apps/dex.yaml` — Argo Application deploying the Dex OIDC provider chart `0.20.0` from `https://charts.dexidp.io`. Target namespace `auth`, sync wave `-10` (must be running before oauth2-proxy). Configures: issuer `https://auth.127.0.0.1.nip.io`, memory storage (comment instructs switching to `kubernetes` backend in prod), one static OAuth2 client (`id: oauth2-proxy`, `secret: REPLACE_ME`), two demo static users (`admin@local`, `dev@local`) with bcrypt hash placeholders (comment instructs replacement via SealedSecret), empty connectors list (comment shows full GitHub and OIDC connector blocks for cloud). Ingress at `auth.127.0.0.1.nip.io` with selfsigned-issuer.
+
+- `argocd/bootstrap/apps/oauth2-proxy.yaml` — Argo Application deploying the oauth2-proxy chart `7.7.30` from `https://oauth2-proxy.github.io/manifests`. Target namespace `auth`, sync wave `0` (after Dex). Configures: `clientID: oauth2-proxy`, `clientSecret: REPLACE_ME` and `cookieSecret: REPLACE_ME_32_BYTES_BASE64` placeholders with generation commands documented inline. `extraArgs`: `--provider=oidc`, `--oidc-issuer-url=https://auth.127.0.0.1.nip.io`, `--email-domain=*`, `--reverse-proxy=true`, `--whitelist-domain=.127.0.0.1.nip.io`, `--cookie-domain=.127.0.0.1.nip.io`, `--ssl-insecure-skip-verify=true` (kind only — flagged for removal in cloud). Ingress at `oauth2-proxy.127.0.0.1.nip.io` with selfsigned-issuer.
+
+- `docs/edge-auth.md` — Full operational runbook covering: why edge auth (centralized login wall, no per-app auth code), full component flow diagram (User → ingress-nginx → auth_request → oauth2-proxy → Dex → JWT cookie → backend), kind demo user login steps, cloud GitHub OAuth connector config block, how to protect additional Ingresses (Grafana, Argo CD UI), cookieSecret and clientSecret rotation via kubeseal workflow, logout URL, and troubleshooting (cookie domain mismatches, redirect loops, OIDC issuer URL mismatches, self-signed cert warnings).
+
+### Modified
+
+- `argocd/bootstrap/projects/platform.yaml` — Added two chart repository sources to `sourceRepos`: `https://charts.dexidp.io` (Dex) and `https://oauth2-proxy.github.io/manifests` (oauth2-proxy).
+
+- `k8s/overlays/production/ingress-patch.yaml` — Added three edge-auth annotations to the production Ingress: `nginx.ingress.kubernetes.io/auth-url`, `auth-signin`, and `auth-response-headers` pointing at oauth2-proxy. Includes a comment block explaining the auth_request flow and a sketch (not implemented) of how to create a second unprotected Ingress for `/health/*` paths using a separate Ingress object without auth annotations.
+
+- `k8s/overlays/staging/ingress-patch.yaml` — Same three auth annotations and sketch comment as the production patch. `host`, `tls`, and `rules` blocks are unchanged; only `annotations` was modified.
+
+### Closes (from production-readiness extension plan)
+- Tier 6: edge authentication — centralised OIDC login wall via Dex + oauth2-proxy, protecting all annotated Ingresses without any application code changes.
+
+### Judgment calls
+- **`REPLACE_ME` placeholders for all secrets.** Real bcrypt hashes, client secrets, and cookie secrets must never be committed to git. Each placeholder is accompanied by a `Generate:` comment with the exact `openssl`/`htpasswd` command. The `docs/edge-auth.md` kubeseal rotation workflow covers how to seal and store them.
+- **`/health/*` bypass is sketched, not implemented.** The comment block in both ingress-patch.yaml files describes the second Ingress pattern in full YAML — enough for an operator to copy-paste — but the object is intentionally absent because health check paths vary per app and should be configured per-service, not in a shared overlay.
+- **Dex chart pinned to `0.20.0`.** This was the latest stable release of the `dex` chart from `https://charts.dexidp.io` as of late 2025. The chart ships Dex v2.39.x.
+- **oauth2-proxy chart pinned to `7.7.30`.** Latest patch in the 7.x line as of late 2025. The chart ships oauth2-proxy v7.7.x.
+- **Memory storage for Dex.** Appropriate for kind/local dev only. The comment in `dex.yaml` explicitly documents the `kubernetes` CRD-backed storage backend as the production upgrade path.
+
+---
+
 ## Build 023 — Developer experience: pre-commit hooks + GitHub Actions PR checks + README rewrite
 **Date:** 2026-05-07
 **Scope:** Tier 5 — DX

@@ -1,0 +1,39 @@
+---
+# ─── ServiceMonitor for my-app ────────────────────────────────────────────────
+# Cleaner alternative to the `additionalScrapeConfigs` entry in
+# argocd/bootstrap/apps/kube-prometheus-stack.yaml. Once this ServiceMonitor is
+# applied, you can REMOVE the static `my-app` entry from additionalScrapeConfigs
+# (the Pushgateway and Jenkins entries should remain — they aren't backed by a
+# Service in the my-app overlay, so they still need static configs).
+#
+# Requires the Prometheus Operator CRDs (provided by kube-prometheus-stack).
+# Synced to the cluster via argocd/bootstrap/apps/app-servicemonitors.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: my-app
+  namespace: monitoring
+  labels:
+    app: my-app
+    # The label selector below must match Prometheus's `serviceMonitorSelector`
+    # in the kube-prometheus-stack values. The default chart uses
+    # `release: <release-name>` which Argo CD sets to the Application name.
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - production
+      - staging
+  selector:
+    matchLabels:
+      app: my-app
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      # Drop high-cardinality labels at scrape time
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: 'go_.*'
+          action: drop

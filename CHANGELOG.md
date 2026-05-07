@@ -12,6 +12,31 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 025 — Polish: LICENSE, Makefile, ServiceMonitor, repo sanity check, demo walkthrough
+**Date:** 2026-05-07
+**Scope:** Final polish — no new capabilities, just convenience + ergonomics.
+
+### Added
+
+- `LICENSE` — MIT license, copyright 2026 rled7. README's License section now points here instead of TODO.
+- `Makefile` — common targets: `make help`, `up`/`down`, `dev`, `test`/`test-e2e`/`test-mutation`, `lint`/`format`/`check`, `build`/`build-multiarch`/`agent-image`, `kind-up`/`kind-down`, `bootstrap`, `skaffold-dev`, `seal-secret`, `branch-protection`, `release`, `migrate`. Targets that need args are documented in their help text.
+- `.editorconfig` — shared IDE settings: 2-space indents (4 for shell, tabs for Make), LF, UTF-8, trim trailing whitespace (except in markdown), final newline.
+- `monitoring/servicemonitor.yaml` — `ServiceMonitor` for the my-app `/metrics` endpoint, scoped to `production` and `staging` namespaces, 15s interval. Cleaner than the static `additionalScrapeConfigs` entry in kube-prometheus-stack values; the static entry can be removed once this is applied. Drops `go_*` runtime metrics at scrape time to control cardinality.
+- `argocd/bootstrap/apps/app-servicemonitors.yaml` — Argo Application (sync wave 10, after Prometheus is up) that syncs `monitoring/servicemonitor.yaml` via a `directory` source filter.
+- `scripts/check-repo.sh` — single-command static validation: ESLint, Jest test discovery, `bash -n` on all shell scripts, `node --check` on JS, YAML parse via yq/python3, kustomize render, kubeconform schema check, gitleaks. Skips gracefully when a tool isn't on PATH. Exit code reflects fail count.
+- `docs/demo.md` — 15-minute end-to-end walkthrough: kind up → bootstrap → seal secrets → hit app → Grafana/Argo CD/Rollouts dashboards → trigger pipeline → chaos experiment → policy violation → tear down. Designed for a "show me what this thing does" interview demo.
+
+### Closes (from production-readiness extension plan)
+- Polish — items flagged in the Build 024 status report
+
+### Judgment calls
+- **MIT license** — chosen as the most permissive standard option for a learning artifact. Swap to Apache-2.0 if patent grant matters; swap to a closed license if it shouldn't be redistributed.
+- **ServiceMonitor coexists with `additionalScrapeConfigs`** — both work; the static entry continues to be the documented path until someone confirms the ServiceMonitor scrape lands in the cluster. Marked as the recommended migration in the file header.
+- **`scripts/check-repo.sh`** is intentionally tolerant of missing tools (skips with a yellow dot rather than failing) so it works on any developer's machine. CI agents should have all the tools and would surface real issues.
+- **Makefile is descriptive, not exhaustive.** Common workflows have a target; one-off commands are still raw shell. Avoids the trap of recreating every CLI.
+
+---
+
 ## Build 024 — Edge auth: Dex OIDC + oauth2-proxy + Ingress protection
 **Date:** 2026-05-07
 **Scope:** Tier 6 — Edge authentication

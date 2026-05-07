@@ -22,6 +22,14 @@
 # only targets the application namespaces where host namespace sharing is never
 # expected.
 #
+# chaos-mesh is also excluded (added Build 022). The chaos-daemon DaemonSet
+# intentionally runs with hostNetwork: true and hostPID: true because it must
+# inject faults at the kernel and network layer — inspecting /proc for process
+# injection, manipulating iptables rules for network chaos, and accessing
+# containerd sockets. This is the designed behaviour of a chaos engineering
+# tool. Chaos Mesh should NEVER be installed in production; it belongs in
+# staging and kind clusters only.
+#
 # IF THIS BLOCKS A LEGITIMATE WORKLOAD
 # -------------------------------------
 # If a workload in production/staging genuinely needs host namespaces (rare),
@@ -46,6 +54,8 @@ metadata:
       a compromised container to access node-level network, process, and IPC
       resources. System namespaces (kube-system, kyverno, cert-manager,
       ingress-nginx) are excluded as CNI and system components require them.
+      chaos-mesh is excluded because the chaos-daemon DaemonSet legitimately
+      needs host namespaces to inject kernel/network-layer faults.
 spec:
   # Enforce mode: pods requesting host namespaces in production/staging are rejected.
   validationFailureAction: Enforce
@@ -62,6 +72,18 @@ spec:
               namespaces:
                 - production
                 - staging
+      # Exclude system namespaces and chaos-mesh (chaos-daemon requires
+      # hostNetwork to manipulate iptables and intercept network traffic for
+      # fault injection at the kernel/network layer).
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
       validate:
         message: >-
           spec.hostNetwork: true is not allowed in production or staging.
@@ -81,6 +103,17 @@ spec:
               namespaces:
                 - production
                 - staging
+      # Exclude system namespaces and chaos-mesh (chaos-daemon requires
+      # hostPID to inspect /proc for process-level fault injection).
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
       validate:
         message: >-
           spec.hostPID: true is not allowed in production or staging.
@@ -100,6 +133,17 @@ spec:
               namespaces:
                 - production
                 - staging
+      # Exclude system namespaces. chaos-mesh does not use hostIPC but is
+      # included here for consistency with the other rules in this policy.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
       validate:
         message: >-
           spec.hostIPC: true is not allowed in production or staging.

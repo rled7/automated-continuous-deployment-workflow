@@ -17,6 +17,10 @@ spec:
     - https://kubernetes.github.io/ingress-nginx
     - https://bitnami-labs.github.io/sealed-secrets
     - https://kyverno.github.io/kyverno
+    # Build 022: chaos engineering + backup tooling
+    - https://charts.chaos-mesh.org
+    - https://charts.min.io
+    - https://vmware-tanzu.github.io/helm-charts
 
   destinations:
     - namespace: "*"

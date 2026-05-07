@@ -1,0 +1,100 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: velero
+  namespace: argocd
+  annotations:
+    # Wave 0: Velero deploys after MinIO (wave -10) is ready so the
+    # BackupStorageLocation can reach the S3 endpoint on first sync.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://vmware-tanzu.github.io/helm-charts
+    chart: velero
+    targetRevision: "7.2.1"
+    helm:
+      valuesObject:
+        # Use the AWS plugin — it speaks the S3 protocol and works against
+        # MinIO (S3-compatible) as well as real AWS S3.
+        initContainers:
+          - name: velero-plugin-for-aws
+            image: velero/velero-plugin-for-aws:v1.10.0
+            volumeMounts:
+              - mountPath: /target
+                name: plugins
+
+        # Configure the default BackupStorageLocation pointing at MinIO.
+        # For real cloud clusters, replace this section with your cloud BSL:
+        #   AWS S3:   provider: aws, bucket: <your-bucket>, region: <region>
+        #   GCS:      provider: gcp, bucket: <your-bucket>
+        #   Azure:    provider: azure, bucket: <your-container>
+        configuration:
+          # S3-compatible provider (works for both MinIO and real AWS S3)
+          provider: aws
+
+          backupStorageLocation:
+            - name: default
+              provider: aws
+              bucket: velero-backups
+              default: true
+              config:
+                # MinIO endpoint within the cluster. Replace with real S3
+                # region config for cloud deployments (remove s3Url).
+                s3Url: http://minio.minio.svc.cluster.local:9000
+                region: minio
+                # Required for path-style S3 access (MinIO default)
+                s3ForcePathStyle: "true"
+                # Insecure HTTP is acceptable for intra-cluster MinIO on kind.
+                # Use HTTPS + TLS cert for production MinIO or real S3.
+                insecureSkipTLSVerify: "true"
+
+          volumeSnapshotLocation:
+            - name: default
+              provider: aws
+              config:
+                region: minio
+
+        # Credentials for MinIO (placeholder — replace via SealedSecret).
+        # These must match the rootUser/rootPassword set in minio.yaml.
+        credentials:
+          useSecret: true
+          secretContents:
+            cloud: |
+              [default]
+              aws_access_key_id=minio-admin
+              aws_secret_access_key=CHANGEME-use-sealed-secret
+
+        # Deploy a schedule via a separate Argo Application (velero-schedules)
+        # rather than here, so schedules can be managed independently.
+        schedules: {}
+
+        # Resource requests tuned for a kind cluster.
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+        # Metrics / ServiceMonitor — enable if kube-prometheus-stack is present
+        metrics:
+          enabled: true
+          serviceMonitor:
+            enabled: false  # flip to true once kube-prometheus-stack is installed
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: velero
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

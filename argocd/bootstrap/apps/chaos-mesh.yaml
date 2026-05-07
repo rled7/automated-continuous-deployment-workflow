@@ -1,0 +1,74 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: chaos-mesh
+  namespace: argocd
+  annotations:
+    # Wave -10: install CRDs before any chaos experiments are applied
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://charts.chaos-mesh.org
+    chart: chaos-mesh
+    targetRevision: "2.7.0"
+    helm:
+      valuesObject:
+        # Install CRDs as part of the Helm chart release so they are managed
+        # by Argo CD / Helm rather than applied out-of-band.
+        installCRDs: true
+
+        # chaos-daemon is the DaemonSet that injects faults at the kernel and
+        # network layer. It requires containerd socket access on kind clusters.
+        chaosDaemon:
+          # containerd is the default CRI for kind clusters. Change to
+          # "docker" if using Docker Desktop or "crio" for OpenShift.
+          runtime: containerd
+          # Path to the containerd socket on the host. Standard for kind and
+          # most kubeadm-based clusters.
+          socketPath: /run/containerd/containerd.sock
+
+        # Dashboard is useful for visualising active chaos experiments.
+        # Disabled by default in kind to reduce resource usage; enable for
+        # persistent dev/staging clusters.
+        dashboard:
+          enabled: false
+
+        # Resource requests tuned for a kind cluster. Increase for production
+        # or larger staging environments.
+        controllerManager:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+
+        chaosDaemon:
+          runtime: containerd
+          socketPath: /run/containerd/containerd.sock
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: chaos-mesh
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      # CRDs can be large — increase the server-side apply timeout if needed
+      - ServerSideApply=true

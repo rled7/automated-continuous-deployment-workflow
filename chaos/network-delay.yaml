@@ -1,0 +1,72 @@
+# =============================================================================
+# NetworkChaos — network-delay experiment (Build 022)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Injects 100ms ± 30ms latency on egress traffic from app=my-app pods to
+# app=app-db pods for 2 minutes. Tests whether application timeout settings
+# are correctly configured and whether latency degrades user-facing response
+# times in a predictable, handled way (rather than causing cascading failures).
+#
+# SAFETY
+# ------
+# - This experiment ONLY targets the staging namespace.
+# - Only egress from app pods to database pods is delayed; all other traffic
+#   is unaffected.
+# - Duration is capped at 2 minutes. The experiment self-terminates.
+#
+# HOW TO RUN
+#   kubectl apply -f chaos/network-delay.yaml
+#
+# HOW TO OBSERVE
+#   kubectl describe networkchaos network-delay-staging -n staging
+#   kubectl logs -n staging -l app=my-app --tail=50
+#   # Watch for timeout errors or slow-query log entries in the DB
+#
+# HOW TO STOP (early termination)
+#   kubectl delete -f chaos/network-delay.yaml
+#
+# HYPOTHESIS
+#   With 100ms ± 30ms added latency, application response times should
+#   increase by approximately the same amount. If the DB client timeout
+#   is set to < 100ms, this experiment will surface it immediately.
+#   The app should return degraded (but not errored) responses, not 5xx.
+# =============================================================================
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-delay-staging
+  namespace: staging
+spec:
+  action: delay
+
+  # Source: egress from app pods
+  selector:
+    namespaces:
+      - staging
+    labelSelectors:
+      app: my-app
+
+  # Direction: delay outbound traffic from app pods
+  direction: egress
+
+  # Target: only delay traffic heading to database pods
+  target:
+    selector:
+      namespaces:
+        - staging
+      labelSelectors:
+        app: app-db
+    mode: all
+
+  # Delay parameters: 100ms base with ±30ms jitter (uniform distribution)
+  delay:
+    latency: 100ms
+    jitter: 30ms
+    # Correlation: 25% correlation between successive packets (realistic jitter)
+    correlation: "25"
+
+  # Duration: experiment self-terminates after 2 minutes
+  duration: "2m"

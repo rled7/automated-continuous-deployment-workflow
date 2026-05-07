@@ -31,6 +31,13 @@
 # legitimately need capabilities like NET_ADMIN or NET_RAW to manage kernel
 # networking on behalf of the cluster.
 #
+# chaos-mesh is also excluded (added Build 022). The chaos-daemon DaemonSet
+# requires NET_ADMIN to manipulate iptables rules and tc (traffic control) for
+# network fault injection, and SYS_PTRACE to inspect kernel namespaces for
+# process-level chaos. These are the designed capabilities of a chaos
+# engineering tool. Chaos Mesh should NEVER be installed in production; it
+# belongs in staging and kind clusters only.
+#
 # IF THIS BLOCKS A LEGITIMATE WORKLOAD
 # -------------------------------------
 # Re-evaluate whether the capability is truly necessary; most workloads can
@@ -58,6 +65,8 @@ metadata:
       container to attack the host kernel or neighboring containers.
       System namespaces (kube-system, kyverno, cert-manager, ingress-nginx)
       are excluded as system components legitimately require some of them.
+      chaos-mesh is excluded because the chaos-daemon DaemonSet legitimately
+      needs NET_ADMIN and SYS_PTRACE to inject network and process-level faults.
 spec:
   # Enforce mode: pods adding blocked capabilities in production/staging are rejected.
   validationFailureAction: Enforce
@@ -74,6 +83,17 @@ spec:
               namespaces:
                 - production
                 - staging
+      # Exclude system namespaces and chaos-mesh (chaos-daemon uses NET_ADMIN
+      # to manipulate iptables and tc for network fault injection).
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
       validate:
         message: >-
           Adding the NET_ADMIN capability is not allowed in production or staging.
@@ -97,6 +117,16 @@ spec:
               namespaces:
                 - production
                 - staging
+      # Exclude system namespaces and chaos-mesh.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
       validate:
         message: >-
           Adding the SYS_ADMIN capability is not allowed in production or staging.
@@ -120,6 +150,17 @@ spec:
               namespaces:
                 - production
                 - staging
+      # Exclude system namespaces and chaos-mesh (chaos-daemon uses SYS_PTRACE
+      # to inspect kernel namespaces for process-level fault injection).
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
       validate:
         message: >-
           Adding the SYS_PTRACE capability is not allowed in production or staging.
@@ -143,6 +184,16 @@ spec:
               namespaces:
                 - production
                 - staging
+      # Exclude system namespaces and chaos-mesh.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
       validate:
         message: >-
           Adding the SYS_MODULE capability is not allowed in production or staging.
@@ -167,6 +218,16 @@ spec:
               namespaces:
                 - production
                 - staging
+      # Exclude system namespaces and chaos-mesh.
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - cert-manager
+                - ingress-nginx
+                - chaos-mesh
       validate:
         message: >-
           Adding the NET_RAW capability is not allowed in production or staging.

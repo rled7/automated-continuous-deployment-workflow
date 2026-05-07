@@ -1,0 +1,66 @@
+# =============================================================================
+# StressChaos — cpu-stress experiment (Build 022)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Consumes 80% of CPU on one random app=my-app pod for 60 seconds. Tests:
+#   1. HPA (Horizontal Pod Autoscaler) — does it detect the load spike and
+#      scale out within the observation window?
+#   2. Argo Rollouts — does a rollout in progress detect the instability
+#      (high error rate or failed analysis) and pause?
+#   3. Resource limits — does the pod stay within its CPU limit (no
+#      node-level starvation) or get throttled?
+#
+# SAFETY
+# ------
+# - This experiment ONLY targets the staging namespace.
+# - One pod is stressed at a time (mode: one). The rest continue serving.
+# - Duration is capped at 60 seconds.
+#
+# HOW TO RUN
+#   kubectl apply -f chaos/cpu-stress.yaml
+#
+# HOW TO OBSERVE
+#   kubectl describe stresschaos cpu-stress-staging -n staging
+#   kubectl top pods -n staging -l app=my-app
+#   kubectl get hpa -n staging -w
+#   # Watch HPA desired replicas increase as average CPU exceeds threshold
+#
+# HOW TO STOP (early termination)
+#   kubectl delete -f chaos/cpu-stress.yaml
+#
+# HYPOTHESIS
+#   Within 60s of the stress starting, HPA should detect elevated CPU
+#   across the deployment (one pod at 80% raises the average) and begin
+#   scaling. Argo Rollouts analysis should detect degraded success rate
+#   if the stressed pod is slow to respond. The stressed pod should be
+#   CPU-throttled (not OOM killed) because the stress is CPU-only.
+# =============================================================================
+
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: cpu-stress-staging
+  namespace: staging
+spec:
+  # Target: one random app pod in staging
+  selector:
+    namespaces:
+      - staging
+    labelSelectors:
+      app: my-app
+
+  # Mode: stress exactly one pod at random
+  mode: one
+
+  stressors:
+    cpu:
+      # Number of CPU stressor workers — use 1 to keep blast radius
+      # predictable on a kind cluster with limited vCPUs.
+      workers: 1
+      # Load: aim for 80% CPU utilisation on the target pod
+      load: 80
+
+  # Duration: 60 seconds
+  duration: "60s"

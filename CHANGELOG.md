@@ -12,6 +12,67 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 022 — Chaos Mesh + Velero backups + DR runbook + synthetic monitoring docs
+**Date:** 2026-05-07
+**Scope:** Resilience tier — chaos engineering infrastructure, backup/recovery stack, and three new operational docs closing the resilience gap.
+
+### Added
+
+- `argocd/bootstrap/apps/chaos-mesh.yaml` — Argo Application deploying Chaos Mesh chart `2.7.0` from `https://charts.chaos-mesh.org`. Target namespace `chaos-mesh`, sync wave `-10`. `installCRDs: true`, `chaosDaemon.runtime: containerd` (kind default), `socketPath: /run/containerd/containerd.sock`. Dashboard disabled by default for kind. Resource requests tuned for kind.
+
+- `argocd/bootstrap/apps/minio.yaml` — Argo Application deploying MinIO chart `5.2.0` from `https://charts.min.io`. Target namespace `minio`, sync wave `-10`. Standalone mode, single replica, 10 Gi PVC. Bucket `velero-backups` pre-created. Prominent comment block: SKIP in real cloud — use S3/GCS/Azure Blob instead. Credentials are placeholder; must be replaced via SealedSecret.
+
+- `argocd/bootstrap/apps/velero.yaml` — Argo Application deploying Velero chart `7.2.1` from `https://vmware-tanzu.github.io/helm-charts`. Target namespace `velero`, sync wave `0` (after MinIO). AWS plugin (S3-compatible; works against MinIO). BSL pointing at `http://minio.minio.svc.cluster.local:9000`, bucket `velero-backups`, `s3ForcePathStyle: true`. Schedules managed separately via `velero-schedules` Application.
+
+- `argocd/bootstrap/apps/velero-schedules.yaml` — Argo Application (directory source) pointing at `monitoring/velero/`, sync wave `10`. Deploys Velero `Schedule` CRs after Velero CRDs are available.
+
+- `monitoring/velero/schedules.yaml` — Three `velero.io/v1` Schedule resources:
+  - `daily-production`: daily at 02:00 UTC, production namespace, TTL 30 days (720 h)
+  - `daily-staging`: daily at 02:30 UTC, staging namespace, TTL 7 days (168 h)
+  - `weekly-cluster`: Sundays at 03:00 UTC, all namespaces, TTL 90 days (2160 h)
+  Comment block sketches pre-backup `pg_dumpall` hook for self-hosted Postgres.
+
+- `chaos/pod-failure.yaml` — `PodChaos` targeting `app: my-app` in `staging`, action `pod-failure`, 60s, `random-max-percent: 50`. Comment: staging only; never production without an approval workflow.
+
+- `chaos/network-delay.yaml` — `NetworkChaos` injecting 100ms ± 30ms (25% correlation) on egress from `app: my-app` to `app: app-db` in `staging` for 2 minutes.
+
+- `chaos/network-partition.yaml` — `NetworkChaos` full bidirectional partition between `app: my-app` and `app: app-db` in `staging` for 30 seconds. Tests DB-down 503 behaviour.
+
+- `chaos/cpu-stress.yaml` — `StressChaos` targeting one random `app: my-app` pod in `staging`, 80% CPU (1 worker), 60 seconds. Tests HPA scale-out and Argo Rollouts instability detection.
+
+- `chaos/io-delay.yaml` — `IOChaos` 50ms latency on reads+writes at `/app/logs` volume on one random `app: my-app` pod in `staging` for 60 seconds. Tests whether synchronous log I/O degrades request latency.
+
+- `chaos/README.md` — Explains how to run (`kubectl apply`), observe (`kubectl describe`), and stop (`kubectl delete`) experiments. Full experiment catalogue table. Workflow: hypothesize → small blast radius → observe → refine. Chaos diary template. Monthly game-day cadence + workshop format. Safety gates (namespace must contain `staging`).
+
+- `docs/dr-runbook.md` — Full DR runbook. RPO 24 h (daily backups), RTO 1 h (app-only), RTO 4 h (full cluster). Backup verification commands. Quarterly DR drill checklist (6 steps, from provisioning a fresh cluster to data integrity checks). Playbooks for six disaster scenarios: pod failures, single-AZ outage, region outage (known limitation), database corruption, cluster destruction, and compromised SealedSecret master key.
+
+- `docs/synthetic-monitoring.md` — Explains synthetic vs reactive monitoring. Self-hosted option: k6 CronJob every 5 min, results exported via Prometheus remote-write. Sketch of `monitoring/synthetic-cron.yaml` in a code block (not committed — opt-in). SaaS comparison table: Checkly, Pingdom, UptimeRobot, Better Stack with pricing. Recommendation: start with self-hosted k6 CronJob; promote to SaaS when geo-distributed checks are needed.
+
+- `docs/chaos-engineering.md` — Why chaos engineering (test monitoring/alerts/autoscaling before a real incident). Workflow (hypothesize → small blast radius → observe → refine). The four canonical experiments mapped to hypotheses and pass criteria. Monthly game-day cadence + workshop format (two-team: operators + on-call responders). SLO/SLI connection table. Cross-reference to `chaos/README.md`.
+
+### Modified
+
+- `argocd/bootstrap/projects/platform.yaml` — Added three chart repos to `sourceRepos` whitelist: `https://charts.chaos-mesh.org`, `https://charts.min.io`, `https://vmware-tanzu.github.io/helm-charts`.
+
+- `policies/kyverno/disallow-host-namespaces.yaml` — Already included `chaos-mesh` exclusion in all three rules (`disallow-host-network`, `disallow-host-pid`, `disallow-host-ipc`) with comment explaining the chaos-daemon requires host namespaces to inject faults at the kernel/network layer. Policy logic unchanged.
+
+- `policies/kyverno/disallow-privileged-containers.yaml` — Added `chaos-mesh` to the `exclude` block of the `disallow-privileged-containers` rule. Added comment block explaining chaos-daemon needs elevated privileges for fault injection. Updated `policies.kyverno.io/description` annotation. Policy logic unchanged.
+
+- `policies/kyverno/disallow-capabilities.yaml` — Added `chaos-mesh` to the `exclude` block of all five rules (NET_ADMIN, SYS_ADMIN, SYS_PTRACE, SYS_MODULE, NET_RAW). Comments on `disallow-net-admin` and `disallow-sys-ptrace` explain the specific capabilities chaos-daemon requires. Updated `policies.kyverno.io/description` annotation. Policy logic unchanged.
+
+### Judgment calls
+
+- **Chaos Mesh version 2.7.0**: latest stable 2.x as of late 2025. The 2.x line is the current stable series; 3.x was not yet GA.
+- **Velero version 7.2.1**: latest stable 7.x. The 7.x series adds improved BSL health checks and better CRD lifecycle management.
+- **MinIO chart 5.2.0**: the community chart from `charts.min.io` tracks MinIO RELEASE.* releases. Chart 5.x aligns with the standalone/distributed split.
+- **RPO 24 hours**: matches the daily backup cadence. Acceptable for a demo/staging cluster. Real production with transactional DB should use WAL streaming or hourly snapshots.
+- **RTO 1 hour (app-only)**: based on observed Argo CD sync time + Velero restore speed on a kind cluster. Cloud deployments with faster storage should achieve this comfortably.
+- **Retention windows**: 30 days (production daily) / 7 days (staging daily) / 90 days (weekly cluster) — standard tiered retention. Staging kept short to control MinIO disk usage.
+- **Blast radius for chaos experiments**: conservative defaults (50% pods, one pod for stress/IO, 30–60s durations). Practitioners should widen blast radius only after confirming hypothesis holds at smaller scale.
+- **Policy exclusions were surgical**: the `disallow-host-namespaces` policy already included `chaos-mesh` (added correctly in the same Build 022 session). Adding `chaos-mesh` to `disallow-privileged-containers` and `disallow-capabilities` required adding `exclude` blocks to rules that previously had none — the policy logic (validate/deny conditions) was untouched.
+
+---
+
 ## Build 021 — Kyverno Audit→Enforce promotions + 4 new hardening policies
 **Date:** 2026-05-07
 **Scope:** Cluster security hardening — promote three safe Kyverno policies from Audit to Enforce, add four new ClusterPolicies for host-namespace isolation, privileged-container prevention, dangerous-capability blocking, and probe requirements.

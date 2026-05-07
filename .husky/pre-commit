@@ -1,4 +1,16 @@
 #!/usr/bin/env sh
-# Pre-commit: runs lint-staged against staged files only.
+# Pre-commit:
+#   1. lint-staged — ESLint + Prettier on staged files
+#   2. gitleaks (if installed) — catch secrets before they leave the laptop;
+#      the same scan also runs in CI as a safety net.
 # Bypass with --no-verify if absolutely needed; fix the underlying issue instead.
+
+set -e
+
 npx --no -- lint-staged
+
+if command -v gitleaks >/dev/null 2>&1; then
+    gitleaks protect --staged --redact --no-banner --config .gitleaks.toml
+else
+    echo "  · gitleaks not installed — skipping local secret scan (CI will still run it)"
+fi

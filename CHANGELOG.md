@@ -12,6 +12,30 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 026 — Polish: VS Code dev container + pre-commit gitleaks scan
+**Date:** 2026-05-07
+**Scope:** Onboarding ergonomics — drop the dev environment in 30 seconds; catch secrets before they leave the laptop.
+
+### Added
+
+- `.devcontainer/devcontainer.json` — VS Code dev container config. Bundles node 20, docker-in-docker, kubectl + helm + kustomize, kind, kubeseal, skaffold, trivy, cosign, syft, gh. Installs ESLint, Prettier, Docker, Kubernetes, YAML, GitHub Actions, Playwright, EditorConfig VS Code extensions. `postCreateCommand` runs `npm install` at root + `app/`. `~/.kube` mounted from host so cluster context persists.
+- `.devcontainer/README.md` — explains usage, what's preinstalled, the `~/.kube` mount, and the docker-in-docker caveat.
+
+### Modified
+
+- `.husky/pre-commit` — added a local gitleaks scan (`gitleaks protect --staged --redact --config .gitleaks.toml`) before the commit lands. Catches secrets on the laptop instead of waiting for CI. Skips with a yellow note if gitleaks isn't installed (CI is the safety net).
+
+### Closes
+- Onboarding friction — a new contributor with VS Code now reaches "ready to commit" in one prompt instead of installing 8 CLIs.
+- Pre-CI secret detection — gitleaks ran only in CI; now also runs locally on staged changes.
+
+### Judgment calls
+- **`postCreateCommand` runs both `npm install`s** to kick off Husky (root) and the app deps (app/). Trade-off: first container boot is ~10 min instead of ~5. Acceptable; second boot is instant.
+- **`~/.kube` is bind-mounted** so users can talk to a kind cluster they spun up on the host. If you want full isolation, remove the mount and run kind inside the dev container instead.
+- **Dev-container features come from third-party registries** (`devcontainers-contrib`, `dhoeric`). Pin versions in production-grade environments; skipped here to track upstream.
+
+---
+
 ## Build 025 — Polish: LICENSE, Makefile, ServiceMonitor, repo sanity check, demo walkthrough
 **Date:** 2026-05-07
 **Scope:** Final polish — no new capabilities, just convenience + ergonomics.

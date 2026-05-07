@@ -1,0 +1,67 @@
+{
+  "name": "automated-continuous-deployment-workflow",
+  "image": "mcr.microsoft.com/devcontainers/base:debian",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": false,
+      "username": "vscode",
+      "uid": 1000,
+      "gid": 1000
+    },
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": { "version": "latest" },
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+      "version": "latest",
+      "helm": "latest"
+    },
+    "ghcr.io/devcontainers-contrib/features/kind:1": {},
+    "ghcr.io/devcontainers-contrib/features/kustomize:1": {},
+    "ghcr.io/devcontainers-contrib/features/kubeseal:1": {},
+    "ghcr.io/devcontainers-contrib/features/skaffold:1": {},
+    "ghcr.io/dhoeric/features/trivy:1": {},
+    "ghcr.io/dhoeric/features/cosign:1": {},
+    "ghcr.io/dhoeric/features/syft:1": {}
+  },
+  "postCreateCommand": "npm install && cd app && npm install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-azuretools.vscode-docker",
+        "ms-kubernetes-tools.vscode-kubernetes-tools",
+        "redhat.vscode-yaml",
+        "redhat.vscode-commons",
+        "github.vscode-github-actions",
+        "github.vscode-pull-request-github",
+        "EditorConfig.EditorConfig",
+        "ms-playwright.playwright"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "[javascript]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+        "[json]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+        "[yaml]": { "editor.defaultFormatter": "redhat.vscode-yaml" },
+        "files.eol": "\n",
+        "git.autofetch": true,
+        "yaml.schemas": {
+          "kubernetes": "k8s/**/*.yaml"
+        }
+      }
+    }
+  },
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=${localEnv:HOME}/.kube,target=/home/vscode/.kube,type=bind,consistency=cached"
+  ],
+  "forwardPorts": [3000, 8080, 9000],
+  "portsAttributes": {
+    "3000": { "label": "App" },
+    "8080": { "label": "Jenkins" },
+    "9000": { "label": "SonarQube" }
+  }
+}

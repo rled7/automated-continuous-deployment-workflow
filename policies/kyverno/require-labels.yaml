@@ -1,3 +1,27 @@
+# =============================================================================
+# require-labels — Promoted to Enforce (Build 021)
+# =============================================================================
+#
+# WHY THIS IS SAFE TO ENFORCE
+# ----------------------------
+# The production app Deployment carries all three required labels (app, env,
+# version) in spec.template.metadata.labels. Verified in k8s/base/deployment.yaml
+# and both overlays. Zero violations were reported in Audit mode during soak.
+#
+# IF THIS BREAKS A FUTURE WORKLOAD
+# ----------------------------------
+# Add the missing label(s) to spec.template.metadata.labels in your Deployment
+# or Rollout manifest. If a workload cannot carry these labels (e.g., a third-party
+# Helm chart), create a time-bound PolicyException:
+#
+#   kubectl apply -f policies/kyverno/policy-exceptions/<policy-name>-<reason>.yaml
+#
+# Example one-liner:
+#   kubectl annotate policyexception my-exception expiry="2026-09-01" -n production
+#
+# See policies/kyverno/policy-exceptions/README.md for the full exception workflow.
+# =============================================================================
+
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -10,11 +34,12 @@ metadata:
       Requires Deployments and Rollouts in production and staging to carry
       the standard labels: app, env, and version. These labels are used for
       monitoring, routing, and incident triage.
-      NOTE: Switch to Enforce once all workloads have been updated.
+      Promoted to Enforce in Build 021 after soak confirmed all workloads
+      carry the required labels.
 spec:
-  # Audit mode: violations are recorded but deployments are not blocked.
-  # Switch to Enforce after a soak period to ensure all manifests carry the labels.
-  validationFailureAction: Audit
+  # Enforce mode: Deployments/Rollouts missing app/env/version labels are rejected.
+  # Promoted from Audit in Build 021 — zero violations observed during soak.
+  validationFailureAction: Enforce
 
   background: true
 

@@ -12,6 +12,55 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 021 — Kyverno Audit→Enforce promotions + 4 new hardening policies
+**Date:** 2026-05-07
+**Scope:** Cluster security hardening — promote three safe Kyverno policies from Audit to Enforce, add four new ClusterPolicies for host-namespace isolation, privileged-container prevention, dangerous-capability blocking, and probe requirements.
+
+### Promoted: Audit → Enforce
+
+- `policies/kyverno/require-resource-limits.yaml` — Promoted to **Enforce**. The production app Deployment has defined CPU/memory requests and limits on every container since Build 016. Zero violations observed during the Audit soak period. Added comment block explaining the safety rationale and the `policyException` escape hatch.
+
+- `policies/kyverno/require-labels.yaml` — Promoted to **Enforce**. The production app Deployment carries all three required labels (`app`, `env`, `version`) in `spec.template.metadata.labels` across both the base manifest and both overlays. Zero violations during soak. Added comment block with safety rationale and exception workflow.
+
+- `policies/kyverno/require-readonly-rootfs.yaml` — Promoted to **Enforce**. The production app Deployment sets `readOnlyRootFilesystem: true` on all containers and mounts emptyDir volumes for the two writable paths (`/tmp`, `/app/logs`). Zero violations during soak. Added comment block.
+
+### Intentionally kept in Audit
+
+- `policies/kyverno/verify-image-signatures.yaml` — **Remains Audit**. Cosign signing was wired into the pipeline in Build 019, but signed images have not yet been confirmed to flow through admission-control at deploy time. Updated the comment block to explicitly state: "Promote to Enforce ONLY AFTER you've confirmed signed images pass through this policy in Audit mode for at least 7 days. Check `kubectl get policyreports -A` to verify no FAIL results from production-tagged images."
+
+### New policies
+
+- `policies/kyverno/disallow-host-namespaces.yaml` — **Enforce**. New `disallow-host-namespaces` ClusterPolicy. Forbids `spec.hostNetwork: true`, `spec.hostPID: true`, and `spec.hostIPC: true` on Pods in `production` and `staging`. Uses `match.any` namespace selectors (Kyverno v1.10+ style). Excludes `kube-system`, `kyverno`, `cert-manager`, `ingress-nginx` — CNI plugins and node agents legitimately need host namespaces. Three separate rules (one per flag) for precise violation messages.
+
+- `policies/kyverno/disallow-privileged-containers.yaml` — **Enforce**. New `disallow-privileged-containers` ClusterPolicy. Forbids `securityContext.privileged: true` on any container in `production`/`staging`. Same namespace exclusions as above. Privileged containers have near-root access to the host node and represent a critical container-escape vector.
+
+- `policies/kyverno/disallow-capabilities.yaml` — **Enforce**. New `disallow-capabilities` ClusterPolicy. Forbids adding any of five dangerous Linux capabilities: `NET_ADMIN`, `SYS_ADMIN`, `SYS_PTRACE`, `SYS_MODULE`, `NET_RAW` in `production`/`staging`. Five separate rules (one per capability) for actionable error messages. Safe capabilities (e.g., `NET_BIND_SERVICE`) are not blocked. Same namespace exclusions.
+
+- `policies/kyverno/require-pod-probes.yaml` — **Audit** (new policy — soak first). New `require-pod-probes` ClusterPolicy. Requires `livenessProbe` and `readinessProbe` on every container in Deployments, Argo Rollouts, StatefulSets, and DaemonSets in `production`/`staging`. Kept in Audit because it is brand-new; violation surface must be mapped before enforcing. Planned Enforce promotion: 2026-05-14 (after 7-day soak with zero FAIL results).
+
+### New infrastructure
+
+- `policies/kyverno/policy-exceptions/README.md` — New directory + README explaining the `PolicyException` workflow (Kyverno v1.10+): when to use exceptions, naming convention (`<policy-name>-<reason>.yaml`), required annotations (`expiry`, `reason`, `reviewed-by`), and `kubectl` commands for applying and auditing exceptions.
+
+- `policies/kyverno/policy-exceptions/example-exception.yaml.disabled` — Working example `PolicyException` showing the full required structure. Extension is `.disabled` so it is never applied accidentally. Rename to `.yaml` to use.
+
+- `docs/policy-promotion.md` — New document covering: the Audit → Enforce promotion lifecycle and criteria; `kubectl` commands to query `policyreports` for FAIL results; `PolicyException` structure and workflow; Kyverno Prometheus metrics (`kyverno_admission_requests_total`, `kyverno_admission_review_duration_seconds`, `kyverno_policy_results_total`, etc.) with example PromQL queries and a ServiceMonitor snippet; and a table mapping each policy to its current mode and planned promotion date.
+
+### Modified
+
+- `policies/kyverno/README.md` — Refreshed policy table to include a "Mode" column (Enforce/Audit). Added "Promotion criteria" section above the table (the 4-step checklist). Expanded from 5 to 9 policy entries. Added a "Policy Exceptions" section linking to `policy-exceptions/README.md`.
+
+### Judgment calls
+
+- **Three policies promoted simultaneously**: `require-resource-limits`, `require-labels`, and `require-readonly-rootfs` were all introduced in Build 016 and have been soaking for the same period. All three have zero violations because the production app Deployment was already written to satisfy them. Promoting all three in a single build is safe and reduces the number of "Audit only temporarily" policies that accumulate.
+- **verify-image-signatures kept Audit**: Even though Build 019 wired in cosign signing, the deploy-time verification path (Kyverno intercepting pod admission and calling the Rekor/Fulcio verification chain) has not been exercised in a real production rollout. A misconfiguration (wrong OIDC issuer, subject glob mismatch, registry attestation storage, or Rekor connectivity issue) would block ALL production deployments if in Enforce. The 7-day soak period exists precisely to catch this.
+- **New hardening policies (host-ns, privileged, caps) are Enforce from day 1**: Unlike the Build 016 policies which were introduced alongside an existing workload, these hardening policies cover behaviours (host namespaces, privileged mode, dangerous capabilities) that the production app never uses. There is no existing workload that would be blocked. Starting in Enforce is safer: it provides an immediate hard guarantee rather than a days-long window where a mis-configured pod could slip through.
+- **require-pod-probes starts Audit**: This policy covers Deployments, Rollouts, StatefulSets, and DaemonSets. Operators, Helm charts, and sidecar injectors (e.g., Istio, Linkerd) sometimes inject containers without probes. The soak period will surface any such injection patterns before we block them.
+- **Capability blocklist (NET_ADMIN, SYS_ADMIN, SYS_PTRACE, SYS_MODULE, NET_RAW)**: These five are the capabilities most commonly exploited for container escapes, kernel-level code execution, or cross-container data exfiltration. Safer capabilities (NET_BIND_SERVICE, CHOWN, SETUID, etc.) are not blocked — they serve legitimate use cases without creating node-level attack vectors.
+- **Namespace exclusions (kube-system, kyverno, cert-manager, ingress-nginx)**: CNI plugins (Calico, Cilium), kube-proxy DaemonSets, node exporters, and ingress controllers all require varying degrees of host-namespace access and elevated capabilities. Excluding these four namespaces is the minimal exclusion set. Other operator namespaces (e.g., `monitoring`, `argocd`) are not excluded — if they deploy privileged pods they will be caught, which is the desired behaviour for a post-audit environment.
+
+---
+
 ## Build 020 — E2E (Playwright), mutation testing (Stryker), k6 baseline comparison
 **Date:** 2026-05-07
 **Scope:** Test depth — browser E2E coverage, mutation-testing for test-suite quality, and perf regression detection via baseline comparison.

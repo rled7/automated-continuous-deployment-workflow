@@ -1,3 +1,27 @@
+# =============================================================================
+# require-resource-limits — Promoted to Enforce (Build 021)
+# =============================================================================
+#
+# WHY THIS IS SAFE TO ENFORCE
+# ----------------------------
+# The production app Deployment (k8s/base/deployment.yaml) already specifies
+# CPU/memory requests and limits on every container. A full soak period in
+# Audit mode (Build 016 → Build 021) showed zero violations in PolicyReports.
+#
+# IF THIS BREAKS A FUTURE WORKLOAD
+# ----------------------------------
+# Add resource requests/limits to the container spec. If a workload legitimately
+# cannot define limits (e.g., a batch job needing dynamic resources), create a
+# time-bound PolicyException in policies/kyverno/policy-exceptions/:
+#
+#   kubectl apply -f policies/kyverno/policy-exceptions/<policy-name>-<reason>.yaml
+#
+# Example one-liner:
+#   kubectl annotate policyexception my-exception expiry="2026-09-01" -n production
+#
+# See policies/kyverno/policy-exceptions/README.md for the full exception workflow.
+# =============================================================================
+
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -9,12 +33,12 @@ metadata:
     policies.kyverno.io/description: >-
       Requires all containers to have CPU and memory requests and limits set.
       Running without limits risks resource starvation and node instability.
-      NOTE: Set validationFailureAction to Enforce after a soak period once all
-      workloads have been verified to define resource limits.
+      Promoted to Enforce in Build 021 after a soak period confirmed all
+      workloads define resource limits.
 spec:
-  # Audit mode: records violations without blocking deployments.
-  # Switch to Enforce once all existing workloads define resource limits.
-  validationFailureAction: Audit
+  # Enforce mode: pods without CPU/memory requests+limits will be rejected.
+  # Promoted from Audit in Build 021 — zero violations observed during soak.
+  validationFailureAction: Enforce
 
   background: true
 

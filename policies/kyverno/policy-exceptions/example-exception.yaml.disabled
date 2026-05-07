@@ -1,0 +1,60 @@
+# =============================================================================
+# EXAMPLE PolicyException — rename to .yaml to apply
+# =============================================================================
+#
+# This file demonstrates the structure of a Kyverno PolicyException.
+# A PolicyException exempts a specific set of resources from a policy WITHOUT
+# weakening the policy globally for all workloads.
+#
+# HOW TO USE THIS FILE
+# --------------------
+# 1. Copy this file: cp example-exception.yaml.disabled <policy>-<reason>.yaml
+# 2. Update: metadata.name, metadata.namespace, spec.exceptions[].policyName,
+#    spec.match.any[].resources (kinds, namespaces, names), and all annotations.
+# 3. Set an expiry date — no open-ended exceptions.
+# 4. Get the exception reviewed by a platform team member.
+# 5. Rename to .yaml and apply: kubectl apply -f <policy>-<reason>.yaml
+# 6. Verify: kubectl get policyexception -n <namespace>
+#
+# NEVER leave this file named .yaml in the directory — it is a template only.
+# =============================================================================
+
+apiVersion: kyverno.io/v2beta1
+kind: PolicyException
+metadata:
+  name: example-exception-readonly-rootfs
+  namespace: production
+  annotations:
+    # ISO 8601 expiry date — REQUIRED. After this date the exception must be
+    # renewed (with fresh justification) or removed once the workload is fixed.
+    policies.kyverno.io/expiry: "2026-09-01"
+
+    # Human-readable reason — REQUIRED. Explain why the workload cannot comply
+    # with the policy right now, and what the remediation plan is.
+    policies.kyverno.io/reason: >-
+      The legacy-reporting-job container (vendor chart reporting@1.3.0) writes
+      temporary files directly to /. The chart does not support
+      readOnlyRootFilesystem. Upgrade to reporting@2.0.0 (planned 2026-08-15,
+      ticket INFRA-4567) will add volumeMounts for writable paths. Exception
+      expires 2026-09-01 to force resolution before the chart reaches EOL.
+
+    # Platform team member who reviewed and approved this exception — REQUIRED.
+    policies.kyverno.io/reviewed-by: "platform-team/alice"
+
+spec:
+  exceptions:
+    - policyName: require-readonly-rootfs
+      ruleNames:
+        - require-readonly-rootfs  # name of the rule inside the ClusterPolicy
+
+  match:
+    any:
+      - resources:
+          kinds:
+            - Pod
+          namespaces:
+            - production
+          # Scope the exception to specific pods by name prefix or label selector.
+          # Use names (exact match or wildcard) to avoid over-broad exceptions.
+          names:
+            - "legacy-reporting-job-*"

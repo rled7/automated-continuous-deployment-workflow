@@ -31,12 +31,21 @@ pipeline {
         timestamps()
     }
 
+    // Build 020: RUN_MUTATION_TESTS lets operators trigger mutation testing on
+    // demand without waiting for the nightly cron window.
+    parameters {
+        booleanParam(name: 'RUN_MUTATION_TESTS', defaultValue: false, description: 'Run Stryker mutation tests this build')
+    }
+
     triggers {
         githubPush()
         // Bug 8 note: pollSCM is a safety-net fallback for environments where
         // GitHub webhooks cannot reach Jenkins (e.g. local/firewalled installs).
         // In production with working webhooks this will rarely fire.
         pollSCM('H/5 * * * *')
+        // Build 020: nightly cron triggers mutation testing at 3 am UTC (±hash window).
+        // The H hash spreads concurrent jobs across the hour to avoid thundering-herd.
+        cron('H 3 * * *')
     }
 
     stages {
@@ -408,6 +417,9 @@ EOF
         }
 
         // ─── STAGE 9: PERFORMANCE TESTS (STAGING) ────────────────────────────
+        // Build 020: compare-baseline.js runs after k6 to detect perf regressions
+        // against the committed baseline (tests/performance/baseline.json).
+        // Thresholds: p95 +20%, p99 +25%, error rate 2× — see docs/perf-baseline.md.
         stage('Performance Tests') {
             when { branch 'develop' }
             steps {
@@ -417,6 +429,10 @@ EOF
                       --out json=reports/k6-results.json \
                       --env BASE_URL=https://staging.${APP_NAME}.internal \
                       tests/performance/load-test.js
+
+                    node tests/performance/compare-baseline.js \
+                      --current  reports/k6-results.json \
+                      --baseline tests/performance/baseline.json
                 '''
             }
             post {
@@ -425,6 +441,68 @@ EOF
                         reportDir: 'reports',
                         reportFiles: 'k6-results.json',
                         reportName: 'k6 Performance Report'
+                    ])
+                }
+            }
+        }
+
+        // ─── STAGE 9b: E2E TESTS (STAGING) ───────────────────────────────────
+        // Build 020: Playwright E2E tests run against the staging environment
+        // after the staging deploy and performance tests succeed.
+        //
+        // `playwright install --with-deps chromium` calls apt to install system
+        // dependencies (fonts, libnss3, etc.).  This works because the custom
+        // Jenkins agent image is Debian-based.  For air-gapped environments,
+        // bake the browser into the agent image:
+        //   RUN npx playwright install --with-deps chromium
+        // in docker/jenkins-agent/Dockerfile.
+        stage('E2E Tests') {
+            when { branch 'develop' }
+            steps {
+                dir('app') {
+                    sh '''
+                        mkdir -p reports
+                        npm ci --prefer-offline
+                        npx playwright install --with-deps chromium
+                        BASE_URL=https://staging.app.${APP_NAME}.internal npm run test:e2e
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'app/reports/junit-e2e.xml'
+                }
+            }
+        }
+
+        // ─── STAGE 9c: MUTATION TESTS (NIGHTLY / ON-DEMAND) ──────────────────
+        // Build 020: Stryker mutation testing is slow (O(n) test runs per mutant).
+        // Gated to nightly cron (H 3 * * *) or when RUN_MUTATION_TESTS=true.
+        // DO NOT run on every commit — it would make PRs unacceptably slow.
+        // break: 50 means a mutation score < 50% fails the pipeline.
+        // See docs/testing.md for threshold rationale.
+        stage('Mutation Tests') {
+            when {
+                anyOf {
+                    triggeredBy 'TimerTrigger'
+                    expression { params.RUN_MUTATION_TESTS == true }
+                }
+            }
+            steps {
+                dir('app') {
+                    sh '''
+                        mkdir -p reports/mutation
+                        NODE_OPTIONS=--experimental-vm-modules npm run test:mutation
+                    '''
+                }
+            }
+            post {
+                always {
+                    publishHTML(target: [
+                        allowMissing: true,
+                        reportDir: 'app/reports/mutation',
+                        reportFiles: 'index.html',
+                        reportName: 'Stryker Mutation Report'
                     ])
                 }
             }

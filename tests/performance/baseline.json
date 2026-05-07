@@ -1,0 +1,7 @@
+{
+  "http_req_duration": { "p95": 320, "p99": 850, "avg": 145 },
+  "http_req_failed":   { "rate": 0.002 },
+  "iterations":        { "rate": 245 },
+  "captured_at":       "2026-05-07T00:00:00Z",
+  "git_sha":           "BASELINE"
+}

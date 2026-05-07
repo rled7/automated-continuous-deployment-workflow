@@ -12,6 +12,53 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 020 — E2E (Playwright), mutation testing (Stryker), k6 baseline comparison
+**Date:** 2026-05-07
+**Scope:** Test depth — browser E2E coverage, mutation-testing for test-suite quality, and perf regression detection via baseline comparison.
+
+### Added
+
+- `app/playwright.config.js` — Playwright E2E configuration. Test dir `app/e2e/`, reporter list + JUnit XML (`reports/junit-e2e.xml` for Jenkins `junit()` step), baseURL from `BASE_URL` env var (default `http://localhost:3000`), chromium only (firefox/webkit skipped for CI speed), retries 1, timeout 30 s. Air-gapped note: `playwright install --with-deps chromium` calls apt; bake the browser into the agent image for offline environments.
+
+- `app/e2e/smoke.spec.js` — Playwright smoke spec: asserts `/health/live` → 200, `/health/ready` → 200, `/api/items` → 200 + JSON array. Confirms the service is live and responding after deployment.
+
+- `app/e2e/happy-path.spec.js` — Playwright happy-path spec: POST `/api/items` with a unique timestamped name → 201 + `id`; GET `/api/items` → confirms the new item appears in the list. End-to-end create-then-read flow.
+
+- `app/e2e/error-cases.spec.js` — Playwright error-case spec: POST with empty body → 400 + `{ error: { message, requestId } }`; POST with name > 100 chars → 400; GET `/api/nonexistent` → 404. Validates structured error responses.
+
+- `app/stryker.conf.json` — Stryker mutation configuration. Mutates `src/lib/**`, `src/middleware/**`, `src/routes/**` (excludes test files). Test runner: Jest (via `@stryker-mutator/jest-runner`). Coverage analysis: `perTest` (faster than `all`). Thresholds: high 80, low 60, break 50. HTML report written to `reports/mutation/index.html`.
+
+- `tests/performance/baseline.json` — Committed reference values from a known-good k6 run: `http_req_duration.p95 = 320 ms`, `p99 = 850 ms`, `avg = 145 ms`; `http_req_failed.rate = 0.002`; `iterations.rate = 245/s`. Used by `compare-baseline.js` for regression detection.
+
+- `tests/performance/compare-baseline.js` — Node script that reads k6 NDJSON output (`--out json=FILE`) and `baseline.json`, computes percentiles from the full sample population (nearest-rank), and prints a comparison table. Exits 1 if: p95 regressed > 20%, p99 regressed > 25%, or error rate > 2× baseline (i.e., +100%). Exits 0 if all metrics pass.
+
+- `docs/perf-baseline.md` — Explains how the baseline is established (stable build, capture k6 output, commit), when to re-baseline (after legitimate improvements; never to mask regressions), and how to run the comparison locally with example output.
+
+- `docs/testing.md` — Test pyramid reference doc. Covers all six layers (unit, integration, E2E, smoke, perf, mutation), what runs when (PR / staging / nightly), how to run each suite locally, Jest coverage thresholds (80/70/60 lines/branches/functions), and Stryker mutation score thresholds (break at 50).
+
+### Modified
+
+- `app/package.json` — Added `devDependencies`: `@playwright/test ^1.49.0`, `@stryker-mutator/core ^8.7.0`, `@stryker-mutator/jest-runner ^8.7.0`. Added scripts: `test:e2e` (`playwright test`), `test:e2e:install` (`playwright install --with-deps chromium`), `test:mutation` (`stryker run`).
+
+- `Jenkinsfile` — Four changes:
+  1. **`parameters` block** — added `booleanParam(name: 'RUN_MUTATION_TESTS', ...)` so operators can trigger mutation testing on demand.
+  2. **`triggers` block** — added `cron('H 3 * * *')` for nightly mutation test runs (hash spreads load across the hour).
+  3. **Performance Tests stage** — added `node tests/performance/compare-baseline.js` invocation after k6, comparing current results against `tests/performance/baseline.json`.
+  4. **E2E Tests stage (new, stage 9b)** — runs `playwright install --with-deps chromium` then `npm run test:e2e` against `https://staging.app.${APP_NAME}.internal`. Gated to `develop` branch. JUnit report published via `junit 'app/reports/junit-e2e.xml'`.
+  5. **Mutation Tests stage (new, stage 9c)** — runs `stryker run` with `NODE_OPTIONS=--experimental-vm-modules`. Gated to `TimerTrigger` or `params.RUN_MUTATION_TESTS == true`. HTML mutation report published via `publishHTML`. Intentionally NOT gated to a branch so nightly runs can execute on any branch.
+
+### Judgment calls
+
+- **Playwright version ^1.49.0**: latest stable in the ^1.x line at the time of this build. The `@playwright/test` package bundles the test runner; no separate install is needed.
+- **Stryker version ^8.7.0**: latest stable ^8.x. `@stryker-mutator/jest-runner` must match the core version exactly.
+- **Mutation `break: 50` threshold**: conservative starting point. The initial run against the existing test suite is expected to score in the 60–75% range. Tighten `break` to 60 after two or three successful nightly runs establish a reliable baseline score.
+- **Baseline values (320 ms p95, 850 ms p99, 0.2% error rate)**: representative of a medium-load staging environment. These are the initial seed values; the first actual k6 run against staging will either confirm them or trigger a re-baseline.
+- **k6 regression thresholds (+20% p95, +25% p99, 2× error rate)**: chosen to absorb normal run-to-run jitter (~5–10%) while catching genuine regressions. A 20% p95 spike on a 320 ms baseline means p95 hit 384 ms — clearly worth investigating.
+- **E2E `when { branch 'develop' }` only**: E2E tests require a deployed staging environment. Running them on feature branches would require per-branch staging deploys, which is not in scope for this build.
+- **Mutation Tests not branch-gated**: the cron trigger fires on the default branch, but the `when` condition only checks trigger type and parameter — any branch that triggers a nightly build will run mutations. This is intentional: mutation coverage is a repo-wide metric, not per-branch.
+
+---
+
 ## Build 019 — Multi-arch images, SBOM scanning, cosign keyless trust, SLSA provenance
 **Date:** 2026-05-07
 **Scope:** Supply-chain final mile — trust infrastructure that enables Build 021 to promote `verify-image-signatures` from Audit to Enforce.

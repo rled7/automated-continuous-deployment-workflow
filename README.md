@@ -1,5 +1,11 @@
 # Automated Continuous Deployment Workflow
 
+[![PR Checks](https://github.com/rled7/automated-continuous-deployment-workflow/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/rled7/automated-continuous-deployment-workflow/actions/workflows/pr-checks.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-20%20LTS-339933?logo=node.js&logoColor=white)](./app/package.json)
+[![OpenAPI](https://img.shields.io/badge/OpenAPI-3.0.3-6BA539?logo=openapiinitiative&logoColor=white)](./app/openapi.yaml)
+[![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-FE5196?logo=conventionalcommits&logoColor=white)](https://www.conventionalcommits.org)
+
 Production-grade Jenkins-based CI/CD pipeline for a Node.js Express app. **GitOps** with Argo CD, **progressive delivery** via Argo Rollouts, full **observability** (metrics + logs + traces), **supply-chain hardening** (SBOM + cosign + multi-arch), automated **cluster security** (Kyverno), **backups** (Velero), and **chaos engineering** (Chaos Mesh). Designed to run end-to-end on a local kind cluster — no cloud spend required.
 
 ---
@@ -173,6 +179,8 @@ Detailed walkthrough in [`docs/cluster-setup.md`](./docs/cluster-setup.md) and [
 
 | Looking for | Read |
 |---|---|
+| API contract | [`app/openapi.yaml`](./app/openapi.yaml) (also served at `GET /openapi.yaml`) |
+| Production deployment checklist | [`docs/production-deployment.md`](./docs/production-deployment.md), `./scripts/production-checklist.sh` |
 | How the pipeline works | [`Jenkinsfile`](./Jenkinsfile), [`docs/runbook.md`](./docs/runbook.md) |
 | How to deploy locally | [`docs/cluster-setup.md`](./docs/cluster-setup.md), [`docs/local-dev.md`](./docs/local-dev.md) |
 | How to run tests | [`docs/testing.md`](./docs/testing.md) |

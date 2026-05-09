@@ -1,0 +1,236 @@
+openapi: 3.0.3
+info:
+  title: my-app API
+  version: 1.0.0
+  description: |
+    Demo Express service used as the workload for the CI/CD pipeline in this
+    repo. Exposes a minimal items CRUD plus health, metrics, and request-ID
+    headers used by every middleware in the stack.
+
+    Auth: requests pass through `oauth2-proxy` at the Ingress edge in cloud
+    deployments. The app sees `X-Auth-Request-Email` and `X-Auth-Request-User`
+    headers populated by the proxy. Local kind/dev does not enforce auth.
+  contact:
+    name: Platform Team
+    url: https://github.com/rled7/automated-continuous-deployment-workflow
+  license:
+    name: MIT
+    url: https://github.com/rled7/automated-continuous-deployment-workflow/blob/main/LICENSE
+
+servers:
+  - url: http://localhost:3000
+    description: Local dev (npm start with DB_FAKE=1 REDIS_FAKE=1)
+  - url: http://app.127.0.0.1.nip.io
+    description: Local kind cluster
+  - url: https://app.example.com
+    description: Production (replace with your domain)
+
+tags:
+  - name: Health
+    description: Liveness + readiness probes used by Kubernetes
+  - name: Items
+    description: CRUD on the `items` table (Postgres-backed)
+  - name: Observability
+    description: Prometheus scrape endpoint + OpenAPI spec
+
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      description: Returns 200 if the process is up. Used by k8s livenessProbe.
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliveResponse'
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      description: |
+        Returns 200 if the app and its dependencies are ready to serve traffic.
+        Returns 503 during graceful shutdown OR if any dependency check fails.
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: Not ready (shutting down or a dep failed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+
+  /api/items:
+    get:
+      tags: [Items]
+      summary: List the 100 most-recently created items
+      responses:
+        '200':
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Item'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    post:
+      tags: [Items]
+      summary: Create an item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateItemRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Item'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /metrics:
+    get:
+      tags: [Observability]
+      summary: Prometheus metrics
+      description: |
+        Exposed in Prometheus text format (`text/plain; version=0.0.4`).
+        Includes default `prom-client` process metrics + the
+        `http_request_duration_ms_*` histogram added by the metrics middleware.
+        Scraped every 15 s by Prometheus via the ServiceMonitor.
+      responses:
+        '200':
+          description: Metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /openapi.yaml:
+    get:
+      tags: [Observability]
+      summary: This OpenAPI spec
+      responses:
+        '200':
+          description: OpenAPI 3.0 spec
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+components:
+  headers:
+    RequestId:
+      description: Echoed back from `x-request-id` request header or generated as UUIDv4
+      schema:
+        type: string
+        format: uuid
+    RateLimitRemaining:
+      description: Remaining requests in the current 60-second window (per-IP, max 100)
+      schema:
+        type: integer
+
+  schemas:
+    AliveResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [alive]
+
+    ReadyResponse:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ready, not-ready, shutting-down]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ok, unhealthy]
+          example:
+            database: ok
+            redis: ok
+
+    Item:
+      type: object
+      required: [id, name, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 42
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: "demo-item"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-09T13:16:39.889Z"
+
+    CreateItemRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message, requestId]
+          properties:
+            message:
+              type: string
+            requestId:
+              type: string
+              format: uuid
+            issues:
+              type: array
+              description: Zod validation issues (only present on 400 responses)
+              items:
+                type: object
+
+  responses:
+    ValidationError:
+      description: Request body failed Zod validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RateLimited:
+      description: Per-IP rate limit exceeded (100 req / 60 s)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

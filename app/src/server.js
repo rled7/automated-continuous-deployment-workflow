@@ -1,6 +1,7 @@
 import './lib/otel.js';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
+import { readFileSync } from 'fs';
 import express from 'express';
 import helmet from 'helmet';
 import pinoHttp from 'pino-http';
@@ -88,6 +89,18 @@ app.get('/metrics', async (req, res) => {
   } catch (err) {
     res.status(500).end(err.message);
   }
+});
+
+// 7b. OpenAPI spec — read once at startup, served as application/yaml.
+//     Path resolves to app/openapi.yaml in dev (src/server.js → ../) and
+//     /app/openapi.yaml in the prod image (dist/server.js → ../).
+const OPENAPI_SPEC = readFileSync(
+  fileURLToPath(new URL('../openapi.yaml', import.meta.url)),
+  'utf8',
+);
+app.get('/openapi.yaml', (req, res) => {
+  res.set('Content-Type', 'application/yaml');
+  res.send(OPENAPI_SPEC);
 });
 
 // 8. Health router

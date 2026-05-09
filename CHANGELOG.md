@@ -12,6 +12,30 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 028 — OpenAPI 3.0 spec + README badges
+**Date:** 2026-05-09
+**Scope:** API contract + visual quality-of-life on the README.
+
+### Added
+
+- `app/openapi.yaml` — full OpenAPI 3.0.3 spec for the service: `/health/{live,ready}`, `/api/items` (GET + POST with Zod-equivalent schemas), `/metrics`, `/openapi.yaml`. Documents the `X-Request-Id` and `RateLimit-*` response headers, the rate-limit policy, and the auth model (`X-Auth-Request-Email` / `-User` headers from oauth2-proxy in cloud deployments). Three `servers` entries (local dev, kind, production placeholder).
+- `app/src/server.js` — new route `GET /openapi.yaml`, content-type `application/yaml`, served from the spec file (read once at startup via `fs.readFileSync` + `import.meta.url` relative path so it works in both dev and the Docker image).
+- `app/src/__tests__/integration/api.test.js` — new test for `GET /openapi.yaml`: 200, content-type, presence of every documented path. Test count is now **19** (was 18).
+
+### Modified
+
+- `README.md` — added 5 status badges at the top (PR Checks, License, Node 20, OpenAPI 3.0.3, Conventional Commits). Added an "API contract" row + a "Production deployment checklist" row to the navigation table.
+
+### Closes
+- Documentation gap — the API surface is now machine-readable and contract-tested.
+
+### Judgment calls
+- **Spec lives at `app/openapi.yaml`**, not repo root, so the Dockerfile's `COPY app/ .` ships it with the image without an extra COPY rule. README links go to `app/openapi.yaml`.
+- **No Swagger UI shipped.** Any client can paste the YAML into [editor.swagger.io](https://editor.swagger.io) or Postman; bundling `swagger-ui-express` would add ~200 KB to the image for a feature most viewers don't need at runtime.
+- **Spec read once at startup**, not per-request, so the `/openapi.yaml` route is essentially free.
+
+---
+
 ## Build 027 — Verified app boot + production deployment guide + checklist
 **Date:** 2026-05-09
 **Scope:** Hardening the "go-live" path. Booted the app end-to-end, fixed a real startup bug, codified the 5 outstanding production items.

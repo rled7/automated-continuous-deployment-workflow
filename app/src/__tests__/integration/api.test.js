@@ -82,4 +82,18 @@ describe('Integration — Express app', () => {
       expect(res.body.status).toBe('alive');
     });
   });
+
+  describe('GET /openapi.yaml', () => {
+    test('returns 200 with application/yaml and an OpenAPI 3 spec', async () => {
+      const res = await request(app).get('/openapi.yaml');
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toMatch(/^application\/yaml/);
+      expect(res.text).toMatch(/^openapi: 3\.0\.\d/);
+      expect(res.text).toContain('title: my-app API');
+      expect(res.text).toContain('/api/items');
+      expect(res.text).toContain('/health/live');
+      expect(res.text).toContain('/health/ready');
+      expect(res.text).toContain('/metrics');
+    });
+  });
 });

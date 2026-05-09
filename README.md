@@ -8,6 +8,22 @@
 
 Production-grade Jenkins-based CI/CD pipeline for a Node.js Express app. **GitOps** with Argo CD, **progressive delivery** via Argo Rollouts, full **observability** (metrics + logs + traces), **supply-chain hardening** (SBOM + cosign + multi-arch), automated **cluster security** (Kyverno), **backups** (Velero), and **chaos engineering** (Chaos Mesh). Designed to run end-to-end on a local kind cluster — no cloud spend required.
 
+## What's in the box
+
+**Application** — Node 20 / Express / Postgres / Redis / OpenTelemetry. Helmet security headers, request-ID middleware, structured pino JSON logging, prom-client metrics, Zod request validation, per-IP rate limiting, real graceful shutdown (readiness flip → 5 s drain → DB pool drain → Redis close → server.close → exit). 19 Jest unit + integration tests, k6 load test with baseline regression detection, Playwright E2E, Stryker mutation testing. OpenAPI 3.0 spec served at `GET /openapi.yaml`.
+
+**Pipeline (Jenkins, 15 stages)** — Checkout → SonarQube + OWASP DC + ESLint + Gitleaks (parallel) → Build → kubeconform manifest validation → Jest (parallel) → PR-preview deploy → multi-arch image build + Trivy + syft SBOM + cosign keyless sign + SLSA attest → grype SBOM scan → knex migrate → staging deploy → k6 perf vs baseline → Playwright E2E → Stryker (nightly) → manual gate → Argo Rollouts canary → DORA metric push → on-failure auto-rollback → tagged GitHub Release.
+
+**GitOps + cluster** — Argo CD app-of-apps installs ingress-nginx, cert-manager (+ self-signed / LE-staging / LE-prod issuers), kube-prometheus-stack, Loki, Tempo, Promtail, OTel Collector, Pushgateway, Argo Rollouts, Kyverno, Velero, MinIO, Chaos Mesh, Dex, oauth2-proxy. Kustomize overlays for `production` and `staging`; per-PR preview namespaces.
+
+**Security** — 9 Kyverno admission policies (resource limits, labels, read-only rootFS, no `:latest`, no host namespaces, no privileged, dangerous-cap blocklist, pod probes, image-signature verification). Default-deny `NetworkPolicy` + explicit allow rules. Pod Security Standards `restricted` enforcement. Sealed Secrets workflow. Edge auth via Dex (OIDC) + oauth2-proxy. Pre-commit gitleaks + commitlint. Dependabot weekly updates. Branch protection codified in `scripts/setup-branch-protection.sh`.
+
+**Observability** — Prometheus scrape (15 s) + Alertmanager routing (PagerDuty for `severity: page/critical`, Slack for `severity: warning`) + Grafana with 4 auto-imported dashboards (app-overview, slo, dora, pipeline) + multi-window burn-rate SLO alerts (99.9 % availability target, P95 < 500 ms latency). Loki via Promtail DaemonSet. Tempo OTLP receiver. DORA metrics (deploy frequency, lead time, change failure rate, MTTR) pushed from Jenkinsfile.
+
+**Resilience** — Velero daily backups of `production` + `staging` to MinIO (swappable to S3/GCS/Azure Blob). Chaos Mesh experiments: pod-failure, network-delay, network-partition, CPU-stress, IO-delay (staging only). DR runbook with quarterly drill checklist + RPO 24 h / RTO 1 h targets.
+
+**Developer experience** — `Makefile` for every common command. `.devcontainer/` for one-click VS Code setup. Husky + lint-staged + commitlint + Prettier pre-commit. Two-pipeline PR feedback (GH Actions for fast lint+unit, Jenkins for full pipeline). `scripts/check-repo.sh` static validation; `scripts/production-checklist.sh` pre-flight gate.
+
 ---
 
 ## Architecture
@@ -80,8 +96,88 @@ curl -s http://localhost:3000/metrics | head     # → prom-client metrics
 Run the test suite:
 
 ```bash
-cd app && npm test       # 18 tests pass in ~3s
+cd app && npm test       # 19 tests pass in ~3s
 ```
+
+Or use the Makefile shortcuts (see `make help` for the full list):
+
+```bash
+make install        # install root + app dev deps (also installs husky hooks)
+make dev            # local hot-reload server
+make test           # unit + integration
+make test-e2e       # Playwright E2E (needs running app or BASE_URL)
+make build          # build the production Docker image
+make up / make down # docker-compose stack (Jenkins + Sonar + Postgres + Redis + ...)
+make kind-up        # spin up local kind cluster
+make bootstrap      # apply Argo CD platform Apps to current cluster
+make check          # static validation (ESLint + Jest discovery + bash -n + YAML + kubeconform + gitleaks)
+```
+
+VS Code users: open the repo, click **Reopen in Container** when prompted — `.devcontainer/devcontainer.json` provisions every CLI (kubectl, kind, kubeseal, helm, kustomize, skaffold, trivy, cosign, syft, gh, node 20). See [`.devcontainer/README.md`](./.devcontainer/README.md).
+
+---
+
+## API surface
+
+| Method · Path | Returns | Auth | Used for |
+|---|---|---|---|
+| `GET /health/live` | `200 {"status":"alive"}` | open | Kubernetes `livenessProbe` |
+| `GET /health/ready` | `200` healthy / `503` not ready | open | Kubernetes `readinessProbe`; flips to 503 during shutdown drain or when DB/Redis fail |
+| `GET /api/items` | `200` array of `{id,name,created_at}` | OIDC (cloud) | Lists 100 most-recent rows |
+| `POST /api/items` | `201 {id,name,created_at}` / `400` validation / `429` rate-limit | OIDC (cloud) | Body `{"name": string<=100}`; Zod-validated |
+| `GET /metrics` | `200` Prometheus text format | open | `prom-client` defaults + `http_request_duration_ms` histogram (104 series) |
+| `GET /openapi.yaml` | `200 application/yaml` | open | Machine-readable API contract |
+
+Every response includes `x-request-id`, helmet security headers (CSP, HSTS, X-Content-Type-Options, etc.), and rate-limit headers (`RateLimit-Limit: 100`, `RateLimit-Remaining`, `RateLimit-Reset`). Full schemas + examples in [`app/openapi.yaml`](./app/openapi.yaml). Behavior contract pinned by 19 Jest tests in `app/src/__tests__/`.
+
+---
+
+## Daily developer flow
+
+How a contributor uses this pipeline day-to-day:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  make install                              first-time only                   │
+│  make dev      OR  skaffold dev            local hot-reload (laptop / kind)  │
+│                                                                              │
+│  edit files → save → pre-commit hook fires:                                  │
+│     · ESLint --fix on staged JS                                              │
+│     · Prettier --write on staged JSON/MD/YAML                                │
+│     · gitleaks protect --staged   (secret scan)                              │
+│     · commitlint                  (Conventional Commits format)              │
+│                                                                              │
+│  git push origin feature/foo                                                 │
+│  gh pr create --base develop                                                 │
+│                                                                              │
+│  ──> GH Actions: lint + 19 unit/integration tests           ~30–60 s         │
+│  ──> Jenkins:    full pipeline (15 stages, see below)       ~10–25 min       │
+│        └─ Deploy → PR Preview namespace `preview-pr-N`                       │
+│                                                                              │
+│  PR merged to develop  →  staging deploy + smoke + perf vs baseline + E2E    │
+│  PR merged to main     →  manual gate                                        │
+│                              ↓                                               │
+│                          Argo Rollouts canary 25% → 50% → 100%               │
+│                          (Prometheus AnalysisTemplate gates each step)       │
+│                                                                              │
+│  Rollback on failure   →  auto: kubectl set image to previous revision       │
+│                              + push change_failure_total to Pushgateway      │
+│                                                                              │
+│  Tag a release          →  git tag v1.2.3 && git push --follow-tags          │
+│                              → Jenkins re-tags image + creates GH Release    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+To plug a new app into this pipeline (instead of the included Express demo):
+1. Replace `app/src/` with your service.
+2. Update `app/openapi.yaml` to match.
+3. Update `app/migrations/` if your schema differs.
+4. Adjust `app/jest.config.js` thresholds + test files.
+5. Update `app/package.json` deps + scripts (`build`, `start`, `migrate`).
+6. Update `docker/Dockerfile` if your runtime differs from Node 20.
+7. The rest of the pipeline (Jenkins, Argo CD, Kubernetes manifests, monitoring, Kyverno, Velero, Chaos Mesh, edge auth) is service-agnostic.
+
+End-to-end demo run with annotations: [`docs/demo.md`](./docs/demo.md). Pre-commit hook lifecycle: [`docs/dev-experience.md`](./docs/dev-experience.md).
 
 ## Quick start (local kind, ~5 minutes)
 
@@ -180,7 +276,12 @@ Detailed walkthrough in [`docs/cluster-setup.md`](./docs/cluster-setup.md) and [
 | Looking for | Read |
 |---|---|
 | API contract | [`app/openapi.yaml`](./app/openapi.yaml) (also served at `GET /openapi.yaml`) |
+| End-to-end demo walkthrough | [`docs/demo.md`](./docs/demo.md) |
 | Production deployment checklist | [`docs/production-deployment.md`](./docs/production-deployment.md), `./scripts/production-checklist.sh` |
+| Edge auth (Dex + oauth2-proxy) | [`docs/edge-auth.md`](./docs/edge-auth.md) |
+| Dev container (VS Code) | [`.devcontainer/README.md`](./.devcontainer/README.md) |
+| Custom Jenkins agent image | [`docs/agent-image.md`](./docs/agent-image.md) |
+| Repo sanity check | [`scripts/check-repo.sh`](./scripts/check-repo.sh) (run via `make check`) |
 | How the pipeline works | [`Jenkinsfile`](./Jenkinsfile), [`docs/runbook.md`](./docs/runbook.md) |
 | How to deploy locally | [`docs/cluster-setup.md`](./docs/cluster-setup.md), [`docs/local-dev.md`](./docs/local-dev.md) |
 | How to run tests | [`docs/testing.md`](./docs/testing.md) |
@@ -219,6 +320,10 @@ Detailed walkthrough in [`docs/cluster-setup.md`](./docs/cluster-setup.md) and [
 | Tier 3 — policy enforce | 021 | Kyverno Audit→Enforce + 4 hardening policies |
 | Tier 4 — resilience | 022 | Chaos Mesh, Velero + MinIO, DR runbook, synthetic monitoring |
 | Tier 5 — DX | 023 | Pre-commit hooks, GH Actions PR checks, README rewrite |
+| Tier 6 — Edge auth | 024 | Dex OIDC + oauth2-proxy + Ingress protection |
+| Tier 7 — Polish + dev container | 025, 026 | LICENSE, Makefile, ServiceMonitor, repo sanity check, demo doc, VS Code dev container, pre-commit gitleaks |
+| Tier 8 — Live-readiness | 027, 028 | Logger boot fix, production deployment guide + checklist, OpenAPI 3.0 spec served from `/openapi.yaml`, README badges |
+| Tier 9 — README sync | 029 | Audit pass: API surface section, daily developer flow, navigation table additions, status table refresh |
 
 ### Going to cloud production
 
@@ -244,4 +349,4 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Short version: feature branches off 
 
 ## License
 
-This is a learning artifact. Add a `LICENSE` file if you publish.
+MIT — see [`LICENSE`](./LICENSE).

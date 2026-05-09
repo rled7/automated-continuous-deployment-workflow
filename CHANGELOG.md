@@ -12,6 +12,47 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 029 — README sync to actual capabilities + audit pass
+**Date:** 2026-05-09
+**Scope:** Make the README mirror what the repo actually does. No code changes — pure documentation alignment.
+
+### Audit findings
+
+Scanned the README against the 28 prior builds; three stale facts and five missing sections found:
+
+- **Stale fact** — line 83 claimed "18 tests pass"; actual count is 19 (Build 028 added an OpenAPI integration test).
+- **Stale fact** — License section said "Add a `LICENSE` file if you publish"; LICENSE was committed in Build 025 (MIT).
+- **Stale fact** — Status table stopped at Tier 5 / Build 023, missing Builds 024–028.
+- **Missing section** — no API surface / endpoint list. Readers had to open `app/openapi.yaml` to know what the service does.
+- **Missing section** — no "daily developer flow" walkthrough. Quick-start covered cluster bootstrap; nothing covered the everyday loop a contributor uses.
+- **Missing section** — no "What's in the box" capability summary. The elevator pitch was one paragraph; the next thing was the architecture diagram.
+- **Missing rows in navigation table** — edge auth, demo walkthrough, dev container, Jenkins agent image, repo sanity check.
+- **Missing reference** — Makefile targets weren't mentioned anywhere in the quick-start section.
+
+### Modified
+
+- `README.md`:
+  - Fixed test count `18 → 19`.
+  - Fixed License section to reference the actual `LICENSE` file.
+  - Added a **"What's in the box"** capabilities overview right under the elevator pitch — six paragraphs covering Application, Pipeline, GitOps + cluster, Security, Observability, Resilience, Developer experience. Lists every concrete component contributed across Builds 001–028.
+  - Added an **"API surface"** table (6 endpoints with method, path, response shape, auth, purpose) + headers note + test-count attribution.
+  - Added a **"Daily developer flow"** ASCII diagram showing the local-edit → pre-commit → push → GH-Actions + Jenkins → staging → production canary → release loop, plus a 7-step "to plug a new app into this pipeline" guide.
+  - Added Makefile usage block with the 9 most common targets (`install`, `dev`, `test`, `test-e2e`, `build`, `up`/`down`, `kind-up`, `bootstrap`, `check`).
+  - Added VS Code dev container note pointing at `.devcontainer/README.md`.
+  - Extended the "Where things live" navigation table with 5 new rows (demo walkthrough, edge auth, dev container, agent image, repo sanity check).
+  - Extended the Status table with **Tier 6** (Edge auth — 024), **Tier 7** (Polish + dev container — 025+026), **Tier 8** (Live-readiness — 027+028), **Tier 9** (this build — 029).
+
+### Verified
+
+- All 28 prior builds have CHANGELOG entries (`grep -c '^## Build ' CHANGELOG.md` = 28).
+- All 28 build commits present in git log on `claude/plan-next-steps-F1i5E`.
+- README's claims now match the codebase: test count, LICENSE existence, every status-table entry maps to an actual commit.
+
+### Closes
+- The "is the README current?" question. From this build forward, the README is the canonical entry point and matches reality.
+
+---
+
 ## Build 028 — OpenAPI 3.0 spec + README badges
 **Date:** 2026-05-09
 **Scope:** API contract + visual quality-of-life on the README.

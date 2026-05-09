@@ -105,3 +105,22 @@ branch-protection: ## Apply GitHub branch protection rules via gh API
 # Usage: make release VERSION=1.2.3
 release: ## Bump app/package.json, commit, tag (no push)
 	@./scripts/release.sh $(VERSION)
+
+# ── Benchmarks (dev only — never on push) ────────────────────────────────────
+.PHONY: bench bench-pipeline bench-app bench-update-baseline
+
+bench: bench-pipeline bench-app ## Run pipeline + app benchmarks (dev-only)
+
+# Usage:  make bench-pipeline ARGS=--no-docker
+#         make bench-pipeline ARGS="--compare benchmarks/pipeline-baseline.json"
+bench-pipeline: ## Time each pipeline step locally
+	./scripts/benchmark-pipeline.sh $(ARGS)
+
+# Usage:  make bench-app ARGS="--requests 1000 --concurrency 25"
+bench-app: ## Latency + throughput benchmark for every API endpoint
+	./scripts/benchmark-app.sh $(ARGS)
+
+bench-update-baseline: ## Re-capture both JSON baselines (run after a perf-improving change)
+	./scripts/benchmark-pipeline.sh --json --no-docker > benchmarks/pipeline-baseline.json
+	./scripts/benchmark-app.sh --requests 500 --concurrency 10 --port 4099 --json > benchmarks/app-baseline.json
+	@echo "  baselines updated; commit if the deltas are intentional"

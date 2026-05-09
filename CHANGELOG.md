@@ -12,6 +12,39 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 030 — Developer-only pipeline + app benchmarks
+**Date:** 2026-05-09
+**Scope:** Inner-loop performance signal. Neither benchmark runs on push.
+
+### Added
+
+- `scripts/benchmark-pipeline.sh` — times every CI-equivalent step locally (lint, build, unit + integration tests, kustomize renders, kubeconform, repo sanity check, optional Docker build). Skips steps gracefully when tools aren't on PATH. Output: human table or `--json`. `--compare baseline.json` prints per-step deltas. `--no-docker` skips the slowest step.
+- `scripts/benchmark-app.sh` — boots the app with `DB_FAKE=1 REDIS_FAKE=1` on a sandbox port, fires N requests at concurrency C against every API endpoint, prints p50/p95/p99/avg/req-per-sec/errors. Args: `--requests`, `--concurrency`, `--port`, `--json`. Uses `lsof -t -i :PORT` (not `pkill -f`) to clear the port — avoids killing unrelated processes.
+- `scripts/_bench-runner.mjs` — Node `:http` request loop (called by `benchmark-app.sh`). ESM module (`.mjs` extension) so it doesn't need a `"type": "module"` annotation in the root `package.json`.
+- `benchmarks/pipeline-baseline.json` — sample baseline of a clean run.
+- `benchmarks/app-baseline.json` — sample baseline of 500 reqs / 10 concurrency.
+- `docs/benchmarks.md` — quick-start, why these aren't on push, what they measure, what they don't measure (network, DB load, cold start), how to update the baseline.
+
+### Modified
+
+- `Makefile` — new targets: `bench` (both), `bench-pipeline`, `bench-app`, `bench-update-baseline`. All accept `ARGS=...` for forwarding flags.
+- `README.md` — added `make bench` to the Makefile cheat-sheet; added a "Dev benchmarks" row to the navigation table.
+
+### Verified
+
+- Ran `./scripts/benchmark-pipeline.sh --no-docker` end-to-end — all 5 measurable steps timed cleanly, total ~5.7 s on a warm cache, ~8.4 s cold.
+- Ran `./scripts/benchmark-app.sh --requests 500 --concurrency 10 --port 4099` end-to-end — every endpoint responded, no errors. Sample latencies: `/openapi.yaml` p99 = 5 ms; `/api/items` GET p99 = 28 ms; `/health/live` p99 = 24 ms. Throughput: 1200–2000 req/s per endpoint.
+
+### Closes
+- Inner-loop perf-signal gap. The full `tests/performance/load-test.js` k6 run still owns post-deploy regression detection against staging; this benchmark fills the local-iteration gap.
+
+### Judgment calls
+- **`.mjs` extension** for the runner instead of adding `"type": "module"` to the root `package.json`. Adding the type field would force every existing root-level `.js` (commitlint config, husky scripts) to also be ESM, which breaks them. `.mjs` keeps the change isolated.
+- **No Pushgateway integration.** Considered emitting per-step times to Prometheus, but: (a) numbers vary per developer machine, (b) the macro-level DORA pipeline metrics already cover the cluster perspective. Local benchmark stays local.
+- **Baselines committed but flagged as machine-specific** in `docs/benchmarks.md` — useful as a reference shape, not a regression gate. Each developer should regenerate locally.
+
+---
+
 ## Build 029 — README sync to actual capabilities + audit pass
 **Date:** 2026-05-09
 **Scope:** Make the README mirror what the repo actually does. No code changes — pure documentation alignment.

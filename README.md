@@ -111,6 +111,7 @@ make up / make down # docker-compose stack (Jenkins + Sonar + Postgres + Redis +
 make kind-up        # spin up local kind cluster
 make bootstrap      # apply Argo CD platform Apps to current cluster
 make check          # static validation (ESLint + Jest discovery + bash -n + YAML + kubeconform + gitleaks)
+make bench          # dev-only pipeline + app latency benchmarks (see docs/benchmarks.md)
 ```
 
 VS Code users: open the repo, click **Reopen in Container** when prompted — `.devcontainer/devcontainer.json` provisions every CLI (kubectl, kind, kubeseal, helm, kustomize, skaffold, trivy, cosign, syft, gh, node 20). See [`.devcontainer/README.md`](./.devcontainer/README.md).
@@ -282,6 +283,7 @@ Detailed walkthrough in [`docs/cluster-setup.md`](./docs/cluster-setup.md) and [
 | Dev container (VS Code) | [`.devcontainer/README.md`](./.devcontainer/README.md) |
 | Custom Jenkins agent image | [`docs/agent-image.md`](./docs/agent-image.md) |
 | Repo sanity check | [`scripts/check-repo.sh`](./scripts/check-repo.sh) (run via `make check`) |
+| Dev benchmarks (pipeline + app latency) | [`docs/benchmarks.md`](./docs/benchmarks.md) (run via `make bench`) |
 | How the pipeline works | [`Jenkinsfile`](./Jenkinsfile), [`docs/runbook.md`](./docs/runbook.md) |
 | How to deploy locally | [`docs/cluster-setup.md`](./docs/cluster-setup.md), [`docs/local-dev.md`](./docs/local-dev.md) |
 | How to run tests | [`docs/testing.md`](./docs/testing.md) |

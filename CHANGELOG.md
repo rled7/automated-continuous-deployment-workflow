@@ -12,6 +12,40 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 027 — Verified app boot + production deployment guide + checklist
+**Date:** 2026-05-09
+**Scope:** Hardening the "go-live" path. Booted the app end-to-end, fixed a real startup bug, codified the 5 outstanding production items.
+
+### Fixed
+
+- `app/src/lib/logger.js` — when `NODE_ENV` was unset (i.e. plain `node src/server.js`), the module defaulted to `'development'` and tried to load the `pino-pretty` transport, which is a devDependency not installed in the production image. Result: the server crashed at import time with `unable to determine transport target for "pino-pretty"`. Changed default to `'production'` so JSON logs are the safe fallback. `NODE_ENV=development` is now opt-in (and assumes pino-pretty is `npm install`ed locally).
+
+### Verified
+
+- Booted the app with `DB_FAKE=1 REDIS_FAKE=1 PORT=3001 node src/server.js`. Every endpoint responds correctly:
+  - `GET /health/live` → `200 {"status":"alive"}`
+  - `GET /health/ready` → `200 {"status":"ready","checks":{"database":"ok","redis":"ok"}}`
+  - `GET /api/items` → `200 []`
+  - `POST /api/items` valid → `201 {"id":1,"name":"smoke","created_at":"..."}`
+  - `POST /api/items` invalid → `400` with structured Zod issues + requestId
+  - `GET /metrics` → `200`, 78 `http_*` metrics emitted
+- Helmet, rate-limit, requestId, pino-http, prom-client middlewares all fire as intended (verified via response headers + JSON log lines).
+- Full Jest suite: **4 suites, 18 tests, all passing** in ~3 s.
+
+### Added
+
+- `docs/production-deployment.md` — 5-step walkthrough of every production-action item: real domain + LE prod issuer, custom registry + signed agent image, REPLACE_ME → SealedSecret swaps, branch-protection setup, Audit→Enforce promotion. Includes commands, ordering rationale, and a "non-required swaps" table (Velero/MinIO → S3, kind → managed k8s, etc.).
+- `scripts/production-checklist.sh` — automated checker for items 1-3 (greps for placeholders); item 4 reports based on `gh api` if available; item 5 reports current Kyverno policy mode. Exits non-zero if any auto-check fails. Currently reports 5 fails / 3 manual checks against the demo state — by design.
+
+### Closes
+- The "what still needs human action" section from Build 024's status report — now codified, automated where possible, and documented end-to-end.
+
+### Judgment calls
+- **Default `NODE_ENV` = `production`** (rather than `development`) — matches the Dockerfile's explicit `ENV NODE_ENV=production` and means an unconfigured `node src/server.js` lands on the safe path. Test/CI sets `NODE_ENV=test`; local dev needs `NODE_ENV=development` plus `pino-pretty` installed.
+- **Checklist exits non-zero when items remain.** Intentional: makes it CI-callable as a gate for "yes you're ready." Today it lights red because the repo is the demo, not a production deployment.
+
+---
+
 ## Build 026 — Polish: VS Code dev container + pre-commit gitleaks scan
 **Date:** 2026-05-07
 **Scope:** Onboarding ergonomics — drop the dev environment in 30 seconds; catch secrets before they leave the laptop.

@@ -53,6 +53,30 @@ The full stage list lives in [`Jenkinsfile`](./Jenkinsfile). Tech-stack rational
 
 ---
 
+## Run the app locally (no cluster, ~30 seconds)
+
+For just verifying the app boots without standing up a cluster:
+
+```bash
+cd app && npm install
+DB_FAKE=1 REDIS_FAKE=1 npm start
+# then in another terminal:
+curl http://localhost:3000/health/live           # → 200 {"status":"alive"}
+curl http://localhost:3000/health/ready          # → 200 with stub checks
+curl http://localhost:3000/api/items             # → 200 []
+curl -X POST -H 'Content-Type: application/json' \
+     -d '{"name":"hello"}' http://localhost:3000/api/items  # → 201
+curl -s http://localhost:3000/metrics | head     # → prom-client metrics
+```
+
+`DB_FAKE`/`REDIS_FAKE` route the data layer to in-memory stubs so you can run without Postgres or Redis. For the full local stack (real DB + Redis + Jenkins + SonarQube + registry) use `make up` (docker-compose).
+
+Run the test suite:
+
+```bash
+cd app && npm test       # 18 tests pass in ~3s
+```
+
 ## Quick start (local kind, ~5 minutes)
 
 ```bash
@@ -188,16 +212,21 @@ Detailed walkthrough in [`docs/cluster-setup.md`](./docs/cluster-setup.md) and [
 | Tier 4 — resilience | 022 | Chaos Mesh, Velero + MinIO, DR runbook, synthetic monitoring |
 | Tier 5 — DX | 023 | Pre-commit hooks, GH Actions PR checks, README rewrite |
 
-### What would still need to change for cloud production
+### Going to cloud production
 
-- Replace `app.127.0.0.1.nip.io` with a real domain.
-- Swap `selfsigned-issuer` for `letsencrypt-prod` (cluster issuer already defined; just change the annotation).
-- Replace MinIO with native object storage (S3 / GCS / Azure Blob).
-- Swap Sealed Secrets for External Secrets + Vault if you need cross-cluster secret sharing.
-- Replace `localhost:5000` registry with a real one (GHCR, ECR, GAR, Harbor).
-- Promote `verify-image-signatures` Kyverno policy from Audit to Enforce after first signed deploy soaks for 7 days.
-- Configure real Alertmanager receivers (replace `REPLACE_ME` placeholders in `argocd/bootstrap/apps/kube-prometheus-stack.yaml`).
-- Run `./scripts/setup-branch-protection.sh` against the real GitHub repo.
+Five concrete substitutions. Walkthrough with commands in [`docs/production-deployment.md`](./docs/production-deployment.md). Run `./scripts/production-checklist.sh` to verify status — exits non-zero until all five are done.
+
+1. **Real domain + Let's Encrypt prod issuer** — replace `*.127.0.0.1.nip.io` and `selfsigned-issuer` in both Ingress overlays.
+2. **Custom registry + signed agent image** — build `docker/jenkins-agent/` to a real registry, update the reference in `docker/jenkins/jenkins.yaml`.
+3. **Swap `REPLACE_ME` placeholders** — Alertmanager (Slack/PagerDuty/SMTP), Dex client secret, oauth2-proxy cookie/client secret. All via `scripts/seal-secret.sh`.
+4. **Run `./scripts/setup-branch-protection.sh`** — codifies branch protection on `main` and `develop`.
+5. **Promote `verify-image-signatures` Audit → Enforce** — only after ≥7 days of clean policyreports during soak.
+
+Optional but recommended swaps (one-line config changes each):
+- MinIO → native object storage (S3/GCS/Azure Blob) for Velero
+- Tempo single-binary → `tempo-distributed` chart for HA
+- kind → managed k8s (EKS/GKE/AKS/DO/Linode)
+- Sealed Secrets → External Secrets + Vault if you need cross-cluster sharing
 
 ---
 

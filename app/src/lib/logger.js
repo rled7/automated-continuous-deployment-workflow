@@ -1,6 +1,8 @@
 import pino from 'pino';
 
-const env = process.env.NODE_ENV || 'development';
+// Default to production-style JSON logs. Pretty-print is opt-in via NODE_ENV=development
+// AND requires pino-pretty (devDependency, not installed in the production image).
+const env = process.env.NODE_ENV || 'production';
 const usePretty = env === 'development';
 
 const logger = pino({

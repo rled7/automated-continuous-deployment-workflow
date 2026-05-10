@@ -17,7 +17,8 @@ const config = {
       displayName: 'unit',
       testEnvironment: 'node',
       transform: {},
-      testMatch: ['**/src/__tests__/unit/**/*.test.js'],
+      testMatch: ['<rootDir>/src/__tests__/unit/**/*.test.js'],
+      testPathIgnorePatterns: ['/node_modules/', '/dist/'],
       // Unit tests do NOT set DB_FAKE; health.test.js expects both DB and Redis
       // to be "ok" — with no env vars set, lib/db.js and lib/redis.js are in
       // "not configured" mode, but health.js catches rejections via allSettled
@@ -32,7 +33,8 @@ const config = {
       displayName: 'integration',
       testEnvironment: 'node',
       transform: {},
-      testMatch: ['**/src/__tests__/integration/**/*.test.js'],
+      testMatch: ['<rootDir>/src/__tests__/integration/**/*.test.js'],
+      testPathIgnorePatterns: ['/node_modules/', '/dist/'],
       // Integration setup sets DB_FAKE=1 and removes REDIS_URL before modules load.
       setupFiles: ['<rootDir>/src/__tests__/integration/setup.js'],
     },

@@ -12,6 +12,33 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 031 — Refactor pass: dead import, histogram name, magic numbers, jest dist filter
+**Date:** 2026-05-09
+**Scope:** Code quality polish. No behavior change. All 19 tests still pass.
+
+### Refactored
+
+- `app/src/server.js` — removed dead `import { createRequire } from 'module'` (imported, never called). Lifted six magic numbers into named constants at the top of the file: `READINESS_DRAIN_MS`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX`, `ITEM_NAME_MAX_LEN`, `ITEMS_LIST_LIMIT` (joining the existing `PORT` and `SHUTDOWN_TIMEOUT_MS`). The `SELECT ... LIMIT 100` SQL now binds `$1` to the constant rather than inlining. The shutdown handler comment is no longer hard-coded to "5s".
+- `app/src/lib/metrics.js` — renamed exported variable `httpRequestDurationMicroseconds` → `httpRequestDurationMs`. The Prometheus metric *name* was always `http_request_duration_ms` (correct); only the JS identifier carried a stale name from before Build 005 settled on milliseconds. Both `lib/metrics.js` and `middleware/metrics.js` updated; the served metric continues to be named `http_request_duration_ms` so dashboards and Prometheus rules require no changes.
+- `app/jest.config.js` — both `unit` and `integration` projects now anchor `testMatch` to `<rootDir>/src/...` and add `testPathIgnorePatterns: ['/node_modules/', '/dist/']`. Stale build output in `app/dist/` (gitignored, but produced by `npm run build`) was being picked up as a duplicate test root; this stops that happening.
+
+### Verified
+
+- `node --check` on every modified file.
+- Full test suite: **4 suites, 19 tests, 0 failures, ~1.4 s**.
+- Runtime smoke: server boots, every endpoint returns the expected status, `/metrics` still emits `http_request_duration_ms_count` with proper labels.
+
+### Closes
+- Build 005's documented but unfixed naming inconsistency.
+- The "magic numbers in server.js" code-smell flagged during the refactor audit.
+
+### Judgment calls
+- **No interface change** — only an internal JS identifier rename. The Prometheus metric name (the actual public contract for dashboards and alerts) stays exactly the same.
+- **Constants live at the top of `server.js`**, not in a separate `config.js`. The file is small enough that a separate config module would be over-engineering; the named constants make tunables visible at first glance.
+- **`dist/` ignored in Jest** rather than removed from `npm run build`. Build still produces `dist/` (it's the production artifact); Jest just ignores it during local test runs.
+
+---
+
 ## Build 030 — Developer-only pipeline + app benchmarks
 **Date:** 2026-05-09
 **Scope:** Inner-loop performance signal. Neither benchmark runs on push.

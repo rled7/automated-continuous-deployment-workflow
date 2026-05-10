@@ -1,4 +1,4 @@
-import { httpRequestDurationMicroseconds } from '../lib/metrics.js';
+import { httpRequestDurationMs } from '../lib/metrics.js';
 
 /**
  * Express middleware that records HTTP request duration in the histogram
@@ -11,7 +11,7 @@ const metricsMiddleware = (req, res, next) => {
   res.on('finish', () => {
     const duration = Date.now() - start;
     const route = (req.route && req.route.path) || req.path || 'unknown';
-    httpRequestDurationMicroseconds.observe(
+    httpRequestDurationMs.observe(
       {
         method: req.method,
         route,

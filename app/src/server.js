@@ -1,5 +1,4 @@
 import './lib/otel.js';
-import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { readFileSync } from 'fs';
 import express from 'express';
@@ -18,8 +17,15 @@ import errorHandler from './middleware/error.js';
 import healthRouter, { setShuttingDown } from './routes/health.js';
 
 export const app = express();
+
+// ── Tunables ────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-const SHUTDOWN_TIMEOUT_MS = 55_000;
+const SHUTDOWN_TIMEOUT_MS = 55_000;       // hard kill if drain stalls
+const READINESS_DRAIN_MS  = 5_000;        // window for k8s probes to observe 503
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RATE_LIMIT_MAX       = 100;         // requests per window per IP
+const ITEM_NAME_MAX_LEN    = 100;
+const ITEMS_LIST_LIMIT     = 100;
 
 // 1. Security headers + JSON body parser
 app.use(helmet());
@@ -41,8 +47,8 @@ app.use(metricsMiddleware);
 
 // 5. Rate limiting — skip health and metrics endpoints
 const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 100,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) =>
@@ -52,14 +58,15 @@ app.use(limiter);
 
 // 6. /api/items — persisted via Postgres
 const createItemSchema = z.object({
-  name: z.string().min(1).max(100),
+  name: z.string().min(1).max(ITEM_NAME_MAX_LEN),
 });
 
-// GET /api/items — returns the 100 most-recently created items
+// GET /api/items — returns the most-recently created items, capped at ITEMS_LIST_LIMIT
 app.get('/api/items', async (req, res, next) => {
   try {
     const result = await db.query(
-      'SELECT id, name, created_at FROM items ORDER BY created_at DESC LIMIT 100',
+      'SELECT id, name, created_at FROM items ORDER BY created_at DESC LIMIT $1',
+      [ITEMS_LIST_LIMIT],
     );
     res.json(result.rows);
   } catch (err) {
@@ -129,7 +136,7 @@ export function start(port = PORT) {
     // Flip the readiness flag so k8s stops routing new traffic
     setShuttingDown(true);
 
-    // Give in-flight readiness probes ~5s to observe the 503
+    // Give in-flight readiness probes the configured drain window to observe the 503
     setTimeout(async () => {
       const forceExit = setTimeout(() => {
         logger.error('Forced exit after shutdown timeout');
@@ -159,7 +166,7 @@ export function start(port = PORT) {
         logger.info('Process terminated cleanly');
         process.exit(0);
       });
-    }, 5_000);
+    }, READINESS_DRAIN_MS);
   };
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));

@@ -4,7 +4,7 @@ const register = new Registry();
 
 collectDefaultMetrics({ register });
 
-const httpRequestDurationMicroseconds = new Histogram({
+const httpRequestDurationMs = new Histogram({
   name: 'http_request_duration_ms',
   help: 'Duration of HTTP requests in milliseconds',
   labelNames: ['method', 'route', 'status_code'],
@@ -12,4 +12,4 @@ const httpRequestDurationMicroseconds = new Histogram({
   registers: [register],
 });
 
-export { register, httpRequestDurationMicroseconds };
+export { register, httpRequestDurationMs };

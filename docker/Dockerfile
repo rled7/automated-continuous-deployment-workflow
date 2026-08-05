@@ -4,7 +4,7 @@
 # the image is built with `docker buildx build` (BuildKit is the default backend).
 # For multi-arch builds (linux/amd64,linux/arm64) each platform gets its own
 # cache namespace automatically via the platform-specific build context.
-FROM node:20-alpine AS deps
+FROM node:25-alpine AS deps
 WORKDIR /app
 
 # Install only production dependencies first (layer cache optimization)
@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --ignore-scripts
 
 # ─── Stage 2: Build ───────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:25-alpine AS builder
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
@@ -27,7 +27,7 @@ COPY app/ .
 RUN npm run build
 
 # ─── Stage 3: Production Image ────────────────────────────────────────────────
-FROM node:20-alpine AS runner
+FROM node:25-alpine AS runner
 WORKDIR /app
 
 # Security: non-root user

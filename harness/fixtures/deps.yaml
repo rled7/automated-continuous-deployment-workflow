@@ -1,0 +1,41 @@
+# Throwaway Postgres and Redis for the pod and cluster-real stages. Names and
+# labels match what the staging overlay expects: REDIS_URL points at
+# redis-staging, and the allow-app-egress-db-redis NetworkPolicy only permits
+# traffic to pods labelled app=app-db and app=redis.
+# podman kube play resolves pods by name; Kubernetes uses the Services.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-db
+  labels:
+    app: app-db
+spec:
+  containers:
+    - name: postgres
+      image: mirror.gcr.io/library/postgres:16-alpine
+      env:
+        - name: POSTGRES_USER
+          value: appuser
+        - name: POSTGRES_PASSWORD
+          value: verify-only-password
+        - name: POSTGRES_DB
+          value: appdb
+      ports:
+        - containerPort: 5432
+      readinessProbe:
+        exec:
+          command: ["pg_isready", "-U", "appuser", "-d", "appdb"]
+        periodSeconds: 2
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: redis-staging
+  labels:
+    app: redis
+spec:
+  containers:
+    - name: redis
+      image: mirror.gcr.io/library/redis:7-alpine
+      ports:
+        - containerPort: 6379

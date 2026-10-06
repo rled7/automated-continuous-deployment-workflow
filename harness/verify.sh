@@ -11,6 +11,9 @@
 # Exit code: 0 if every stage passed or was skipped, 1 otherwise.
 
 source "$(dirname "$0")/lib/common.sh"
+# Fix the image tag for the whole run, so a commit made mid-run doesn't send
+# later stages looking for a tag the image stage never built.
+export DEPLOY_IMAGE
 
 DEFAULT_STAGES=(static app image pod cluster-sim terraform)
 # Opt-in: needs a host where kind can run (your machine, GitHub Actions).

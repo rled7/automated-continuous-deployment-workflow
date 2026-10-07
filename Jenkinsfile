@@ -519,7 +519,7 @@ EOF
                 script {
                     // Save current image for potential rollback
                     env.PREVIOUS_IMAGE = sh(
-                        script: "kubectl get deployment ${APP_NAME} -n production -o jsonpath='{.spec.template.spec.containers[0].image}' || echo 'none'",
+                        script: "kubectl get ${workloadRef('production')} -n production -o jsonpath='{.spec.template.spec.containers[0].image}' || echo 'none'",
                         returnStdout: true
                     ).trim()
 
@@ -654,38 +654,75 @@ EOF
 
 // ─── SHARED FUNCTIONS ─────────────────────────────────────────────────────────
 
+// Production runs an Argo Rollout (k8s/overlays/production replaces the base
+// Deployment with it); every other namespace runs the plain Deployment.
+def workloadRef(String namespace) {
+    return namespace == 'production' ? "rollout/${APP_NAME}" : "deployment/${APP_NAME}"
+}
+
+// Shell snippet that blocks until the namespace's workload has rolled out.
+// Rollouts take longer than the 5 min Deployment budget: the canary steps
+// alone pause 4 min plus two analysis runs.
+def waitForWorkload(String namespace) {
+    if (namespace == 'production') {
+        return "scripts/wait-for-rollout.sh ${namespace} ${APP_NAME} 900"
+    }
+    return "kubectl rollout status deployment/${APP_NAME} --namespace=${namespace} --timeout=300s"
+}
+
 def deployToKubernetes(String namespace, String image) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
         sh """
             export KUBECONFIG=\${KUBECONFIG}
 
             # Set the image in the Kustomize overlay and apply
-            cd k8s/overlays/${namespace}
-            kustomize edit set image my-app=${image}
-            kubectl apply -k . --namespace=${namespace}
+            (
+              cd k8s/overlays/${namespace}
+              kustomize edit set image my-app=${image}
+              kubectl apply -k . --namespace=${namespace}
+            )
 
-            # Wait for rollout to complete (timeout 5 min)
-            kubectl rollout status deployment/${APP_NAME} \
-              --namespace=${namespace} \
-              --timeout=300s
+            ${waitForWorkload(namespace)}
 
             echo "✅ Deployed to ${namespace}"
         """
+        if (namespace == 'production') {
+            // Earlier versions of the production overlay failed to delete the
+            // base Deployment, so clusters deployed before the fix run it next
+            // to the Rollout. `kubectl apply` never prunes it; remove it once
+            // the Rollout is healthy and serving.
+            sh """
+                export KUBECONFIG=\${KUBECONFIG}
+                kubectl delete deployment/${APP_NAME} --namespace=${namespace} --ignore-not-found
+            """
+        }
     }
 }
 
 def rollback(String namespace, String previousImage) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-        sh """
-            export KUBECONFIG=\${KUBECONFIG}
-            kubectl set image deployment/${APP_NAME} \
-              ${APP_NAME}=${previousImage} \
-              --namespace=${namespace}
-            kubectl rollout status deployment/${APP_NAME} \
-              --namespace=${namespace} \
-              --timeout=180s
-            echo "🔁 Rollback complete → ${previousImage}"
-        """
+        if (namespace == 'production') {
+            // `kubectl set image` only supports built-in workloads, so patch the
+            // Rollout's pod template; Argo Rollouts then rolls back to it.
+            sh """
+                export KUBECONFIG=\${KUBECONFIG}
+                kubectl patch rollout/${APP_NAME} --namespace=${namespace} --type=json \
+                  -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": "${previousImage}"}]'
+                ${waitForWorkload(namespace)}
+                echo "🔁 Rollback complete → ${previousImage}"
+            """
+        } else {
+            sh """
+                export KUBECONFIG=\${KUBECONFIG}
+                kubectl set image deployment/${APP_NAME} \
+                  ${APP_NAME}=${previousImage} \
+                  --namespace=${namespace}
+                kubectl rollout status deployment/${APP_NAME} \
+                  --namespace=${namespace} \
+                  --timeout=180s
+                echo "🔁 Rollback complete → ${previousImage}"
+            """
+        }
     }
 }
 

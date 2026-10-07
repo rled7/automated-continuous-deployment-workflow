@@ -1,8 +1,9 @@
 {
   "name": "smoke-tests",
   "private": true,
+  "type": "module",
   "scripts": {
-    "test:smoke": "jest smoke/smoke.test.js"
+    "test:smoke": "NODE_OPTIONS=--experimental-vm-modules jest smoke/smoke.test.js"
   },
   "devDependencies": {
     "jest": "^30.3.0",

@@ -29,3 +29,12 @@ patches:
     target:
       kind: HorizontalPodAutoscaler
       name: my-app
+
+# require-labels (Kyverno, Enforce) needs app, env and version on every pod
+# template. env is fixed per overlay; version is the image tag, added at deploy
+# time by deployToKubernetes() in the Jenkinsfile. Selectors are left alone:
+# they are immutable on workloads that already exist.
+labels:
+  - pairs:
+      env: staging
+    includeTemplates: true

@@ -670,6 +670,12 @@ def waitForWorkload(String namespace) {
     return "kubectl rollout status deployment/${APP_NAME} --namespace=${namespace} --timeout=300s"
 }
 
+// The tag part of an image reference (registry:5000/my-app:42-abc1234 →
+// 42-abc1234), used as the pod template's version label.
+def imageTag(String image) {
+    return image.substring(image.lastIndexOf(':') + 1)
+}
+
 def deployToKubernetes(String namespace, String image) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
         sh """
@@ -679,6 +685,8 @@ def deployToKubernetes(String namespace, String image) {
             (
               cd k8s/overlays/${namespace}
               kustomize edit set image my-app=${image}
+              # require-labels (Kyverno) needs a version label on the pod template
+              kustomize edit add label version:${imageTag(image)} --without-selector --include-templates
               kubectl apply -k . --namespace=${namespace}
             )
 

@@ -85,15 +85,19 @@ wait_http() {
 # is a commit-pinned tag.
 DEPLOY_IMAGE="${DEPLOY_IMAGE:-my-app:verify-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo local)}"
 
-# render_overlay NAME — renders k8s/overlays/NAME the way the pipeline deploys
-# it (image set to $DEPLOY_IMAGE) into the results dir and prints the path.
+# render_overlay NAME — renders k8s/overlays/NAME the way deployToKubernetes()
+# deploys it (image set to $DEPLOY_IMAGE, version label from its tag) into the
+# results dir and prints the path.
 # Works on a temp copy so the repo's kustomization.yaml is never modified.
 render_overlay() {
   local out="$RESULTS_DIR/rendered/$1.yaml" tmp rc
   mkdir -p "$RESULTS_DIR/rendered"
   tmp=$(mktemp -d)
   cp -R "$REPO_ROOT/k8s" "$tmp/k8s"
-  (cd "$tmp/k8s/overlays/$1" && kustomize edit set image "my-app=$DEPLOY_IMAGE" && kustomize build . > "$out")
+  (cd "$tmp/k8s/overlays/$1" &&
+    kustomize edit set image "my-app=$DEPLOY_IMAGE" &&
+    kustomize edit add label "version:${DEPLOY_IMAGE##*:}" --without-selector --include-templates &&
+    kustomize build . > "$out")
   rc=$?
   rm -rf "$tmp"
   [ $rc -eq 0 ] && echo "$out"

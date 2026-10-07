@@ -49,9 +49,19 @@ jobs:
               harness/.results/results.json
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Logs of failed stages
+        if: failure()
+        run: |
+          for stage in $(jq -r '.stages[] | select(.status=="fail") | .stage' harness/.results/results.json); do
+            echo "::group::$stage"
+            cat "harness/.results/logs/$stage.log"
+            echo "::endgroup::"
+          done
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: harness-results
           path: harness/.results/
+          include-hidden-files: true  # .results is a dot-directory
           retention-days: 14

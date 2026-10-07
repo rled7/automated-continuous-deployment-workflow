@@ -21,6 +21,12 @@ pf_pid=""
 teardown() {
   [ -n "$pf_pid" ] && kill "$pf_pid" 2>/dev/null
   kubectl -n "$NS" logs deploy/my-app --all-containers --tail=200 > "$RESULTS_DIR/logs/cluster-real-app.log" 2>&1
+  if [ "$STEP_FAILURES" -gt 0 ]; then
+    log "cluster state at failure:"
+    kubectl -n "$NS" get pods -o wide >&2
+    kubectl -n "$NS" get events --sort-by=.lastTimestamp >&2
+    tail -n 40 "$RESULTS_DIR/logs/cluster-real-app.log" >&2
+  fi
   [ "${KEEP:-0}" = 1 ] && { log "KEEP=1: kind cluster $CLUSTER left running (KUBECONFIG=$KUBECONFIG)"; return; }
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
 }
@@ -32,7 +38,8 @@ step "load app image" kind load docker-image "$DEPLOY_IMAGE" --name "$CLUSTER" |
 
 rendered=$(render_overlay "$NS") || exit 1
 kubectl create namespace "$NS" >/dev/null
-step "start Postgres + Redis" kubectl -n "$NS" apply -f "$HARNESS_DIR/fixtures/deps.yaml" -f "$HARNESS_DIR/fixtures/deps-services.yaml"
+step "start Postgres + Redis" kubectl -n "$NS" apply -f "$HARNESS_DIR/fixtures/deps.yaml" \
+  -f "$HARNESS_DIR/fixtures/deps-services.yaml" -f "$HARNESS_DIR/fixtures/deps-netpol.yaml"
 # Secrets are SealedSecrets in real clusters; use the test stand-in.
 kubectl -n "$NS" apply -f "$HARNESS_DIR/fixtures/app-secret.yaml" >/dev/null
 step "Postgres ready" kubectl -n "$NS" wait --for=condition=Ready pod/app-db --timeout=180s || finish_stage

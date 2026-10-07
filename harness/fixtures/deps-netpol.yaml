@@ -1,0 +1,44 @@
+# Kubernetes-only: the staging overlay's default-deny-all policy also covers
+# the throwaway Postgres/Redis, because the harness runs them in the app's
+# namespace. Let in exactly what a real database would have to allow: the app
+# and the migration pod to Postgres, the app to Redis.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: harness-allow-db-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: app-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: my-app
+        - podSelector:
+            matchLabels:
+              app: my-app-migrate
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: harness-allow-redis-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: my-app
+      ports:
+        - protocol: TCP
+          port: 6379

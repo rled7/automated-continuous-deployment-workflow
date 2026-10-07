@@ -18,7 +18,9 @@ APP_PLAY="$WORK/app.yaml"
 
 teardown() {
   podman logs my-app-pod-my-app > "$RESULTS_DIR/logs/pod-app-container.log" 2>&1 || true
+  [ "$STEP_FAILURES" -gt 0 ] && { log "app container log (tail):"; tail -n 40 "$RESULTS_DIR/logs/pod-app-container.log" >&2; }
   if [ "${KEEP:-0}" = 1 ]; then log "KEEP=1: leaving pods running"; return; fi
+  podman rm -f verify-client >/dev/null 2>&1
   podman kube down "$APP_PLAY" >/dev/null 2>&1
   podman kube down "$DEPS" >/dev/null 2>&1
   rm -rf "$WORK"
@@ -82,6 +84,26 @@ ctr=my-app-pod-my-app
 app_ip=$(podman inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ctr")
 log "app container $ctr at $app_ip"
 
+# Probes and smoke tests run from a client container on the same network, the
+# way traffic reaches a pod: under rootless podman (GitHub runners) container
+# IPs aren't reachable from the host.
+podman rm -f verify-client >/dev/null 2>&1
+podman run -d --name verify-client --network "$NET" -v "$REPO_ROOT/tests:/tests" -w /tests \
+  "$IMAGE_MIRROR/node:20-alpine" sleep 3600 >/dev/null || { log "could not start client container"; exit 1; }
+
+# wait_http_in_net URL TIMEOUT_SECS — like wait_http, from inside the network.
+wait_http_in_net() {
+  local url=$1 got deadline=$(( $(date +%s) + $2 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    got=$(podman exec verify-client node -e \
+      'fetch(process.argv[1], {signal: AbortSignal.timeout(3000)}).then(r => console.log(r.status), () => console.log(0))' "$url")
+    [ "$got" = 200 ] && return 0
+    sleep 2
+  done
+  log "timed out waiting for $url (last status: ${got:-none})"
+  return 1
+}
+
 security_context_applied() {
   local ro user
   ro=$(podman inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$ctr")
@@ -92,9 +114,8 @@ security_context_applied() {
 step "securityContext applied (read-only rootfs, uid 1000)" security_context_applied
 
 # startupProbe allows 30 x 10s; readiness should follow within a minute.
-step "startupProbe /health/live" wait_http "http://$app_ip:3000/health/live" 300
-step "readinessProbe /health/ready" wait_http "http://$app_ip:3000/health/ready" 60 || \
-  curl -s -m 3 "http://$app_ip:3000/health/ready" >&2
+step "startupProbe /health/live" wait_http_in_net "http://$app_ip:3000/health/live" 300
+step "readinessProbe /health/ready" wait_http_in_net "http://$app_ip:3000/health/ready" 60
 
 still_running() { [ "$(podman inspect -f '{{.State.Status}}' "$ctr")" = running ]; }
 step "container still running" still_running
@@ -107,7 +128,6 @@ if ! step "smoke test deps (npm ci, as Jenkins)" install_smoke_deps; then
 fi
 
 # Same npm script runSmokeTests() calls.
-run_smoke() { (cd "$REPO_ROOT/tests" && BASE_URL="http://$app_ip:3000" npm run test:smoke); }
-step "smoke tests" run_smoke
+step "smoke tests" podman exec -e "BASE_URL=http://$app_ip:3000" verify-client npm run test:smoke
 
 finish_stage

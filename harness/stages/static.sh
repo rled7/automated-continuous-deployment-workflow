@@ -25,8 +25,13 @@ done
 step "sanity (cross-object)" python3 "$HARNESS_DIR/checks/manifest_sanity.py" "${rendered[@]}"
 
 # Kyverno: the repo's own admission policies, evaluated offline.
+# verify-image-signatures needs the registry and a cosign key, so it can't be
+# evaluated offline; the CLI reports it as an error and exits non-zero.
 policies=()
-for p in "$REPO_ROOT"/policies/kyverno/*.yaml; do policies+=("$p"); done
+for p in "$REPO_ROOT"/policies/kyverno/*.yaml; do
+  [ "$(basename "$p")" = verify-image-signatures.yaml ] && continue
+  policies+=("$p")
+done
 for f in "${rendered[@]}"; do
   overlay=$(basename "$f" .yaml)
   # The migration pod runMigrations() starts in this namespace.

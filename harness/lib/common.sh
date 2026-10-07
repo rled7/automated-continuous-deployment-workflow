@@ -98,3 +98,34 @@ render_overlay() {
   rm -rf "$tmp"
   [ $rc -eq 0 ] && echo "$out"
 }
+
+# migrate_pod_yaml NAMESPACE IMAGE NAME — the migration pod runMigrations() in
+# the Jenkinsfile creates. Built offline the way `kubectl run --overrides` builds
+# it (the pod kubectl run would generate, JSON-merge-patched with the overrides
+# file), since kubectl itself needs a live API server for that. The
+# cluster-real stage runs the real kubectl command.
+migrate_pod_yaml() {
+  python3 - "$1" "$2" "$3" "$REPO_ROOT/k8s/migrations/migrate-pod-overrides.json" <<'PY'
+import json, sys, yaml
+ns, image, name, overrides_path = sys.argv[1:]
+overrides = json.loads(open(overrides_path).read().replace("__NAME__", name).replace("__IMAGE__", image))
+
+def merge(target, patch):  # RFC 7396 JSON merge patch, as kubectl --override-type=merge
+    if not isinstance(patch, dict):
+        return patch
+    target = dict(target) if isinstance(target, dict) else {}
+    for k, v in patch.items():
+        if v is None:
+            target.pop(k, None)
+        else:
+            target[k] = merge(target.get(k), v)
+    return target
+
+pod = {
+    "apiVersion": "v1", "kind": "Pod",
+    "metadata": {"name": name, "namespace": ns, "labels": {"app": "my-app-migrate"}},
+    "spec": {"containers": [{"name": name, "image": image}], "restartPolicy": "Never"},
+}
+print(yaml.safe_dump(merge(pod, overrides), sort_keys=False))
+PY
+}

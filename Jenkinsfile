@@ -726,9 +726,13 @@ def getEnvironment() {
 // Design notes:
 //   - Uses `kubectl run --rm --attach` (not a Job manifest) for simplicity;
 //     the pod is deleted automatically after completion.
-//   - The app image already contains knex + knexfile.js (copied by Dockerfile).
-//   - serviceaccount=my-app must have `get/list/watch pods` if you use --attach;
-//     in practice `kubectl run --rm` needs the same RBAC as kubectl run.
+//   - The app image contains knex, knexfile.js and migrations/ (Dockerfile).
+//   - The pod spec lives in k8s/migrations/migrate-pod-overrides.json: it gets
+//     the same ConfigMap and DB secret as the app and satisfies the Kyverno Pod
+//     policies. kubectl >= 1.24 has no --serviceaccount flag, and a bare
+//     `kubectl run` pod has no DB settings at all. See k8s/migrations/README.md.
+//   - The jenkins credentials in KUBECONFIG need create/get/delete on pods and
+//     pods/attach in the target namespace.
 //   - Expand-contract pattern assumed: migrations are additive (new columns
 //     nullable or with defaults, no DROP/RENAME) so old pods keep running
 //     during the deployment rollout window.  Destructive cleanup migrations
@@ -739,12 +743,14 @@ def runMigrations(String namespace, String image) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
         sh """
             export KUBECONFIG=\${KUBECONFIG}
-            kubectl run my-app-migrate-${BUILD_NUMBER} \
+            POD=my-app-migrate-${BUILD_NUMBER}
+            OVERRIDES=\$(sed -e "s|__NAME__|\$POD|" -e "s|__IMAGE__|${image}|" k8s/migrations/migrate-pod-overrides.json)
+            kubectl run \$POD \
               --namespace=${namespace} \
               --image=${image} \
+              --labels=app=my-app-migrate \
               --rm --restart=Never --attach=true \
-              --serviceaccount=my-app \
-              -- node node_modules/.bin/knex migrate:latest --knexfile=knexfile.js
+              --overrides="\$OVERRIDES"
         """
     }
 }

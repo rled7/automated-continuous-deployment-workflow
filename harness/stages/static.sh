@@ -4,7 +4,7 @@
 source "$(dirname "$0")/../lib/common.sh"
 source "$HARNESS_DIR/lib/tools.sh"
 
-need_tools kustomize kubeconform kyverno || exit 1
+need_tools kustomize kubectl kubeconform kyverno || exit 1
 
 # CRD schemas (Argo Rollouts, SealedSecrets, ...) come from the community catalog.
 CRD_SCHEMAS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
@@ -29,6 +29,10 @@ policies=()
 for p in "$REPO_ROOT"/policies/kyverno/*.yaml; do policies+=("$p"); done
 for f in "${rendered[@]}"; do
   overlay=$(basename "$f" .yaml)
+  # The migration pod runMigrations() starts in this namespace.
+  migrate_pod_yaml "$overlay" "$DEPLOY_IMAGE" my-app-migrate-verify > "$RESULTS_DIR/rendered/$overlay-migrate-pod.yaml"
+  step "kyverno $overlay migration pod" kyverno apply "${policies[@]}" \
+    --resource "$RESULTS_DIR/rendered/$overlay-migrate-pod.yaml" --audit-warn=false
   step "kyverno $overlay" kyverno apply "${policies[@]}" --resource "$f" --audit-warn=false
 done
 

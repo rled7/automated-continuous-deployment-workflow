@@ -37,17 +37,21 @@ step "start Postgres + Redis" kubectl -n "$NS" apply -f "$HARNESS_DIR/fixtures/d
 kubectl -n "$NS" apply -f "$HARNESS_DIR/fixtures/app-secret.yaml" >/dev/null
 step "Postgres ready" kubectl -n "$NS" wait --for=condition=Ready pod/app-db --timeout=180s || finish_stage
 
-# runMigrations() runs before deployToKubernetes(), so the my-app
-# ServiceAccount it names doesn't exist on a first deploy; the overlay's
-# ServiceAccount is applied first here so only the command itself is tested.
-kubectl -n "$NS" apply -f <(python3 -c 'import sys,yaml; print(yaml.safe_dump_all([d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"]=="ServiceAccount"]))' "$rendered") >/dev/null
-step "migrations (runMigrations() from the Jenkinsfile)" kubectl run my-app-migrate \
-  --namespace="$NS" --image="$DEPLOY_IMAGE" --rm --restart=Never --attach=true \
-  --serviceaccount=my-app \
-  -- node node_modules/.bin/knex migrate:latest --knexfile=knexfile.js
+# runMigrations() from the Jenkinsfile, same command and flags.
+migrate() {
+  local pod=my-app-migrate-verify overrides
+  overrides=$(sed -e "s|__NAME__|$pod|" -e "s|__IMAGE__|$DEPLOY_IMAGE|" "$REPO_ROOT/k8s/migrations/migrate-pod-overrides.json")
+  kubectl run "$pod" --namespace="$NS" --image="$DEPLOY_IMAGE" --labels=app=my-app-migrate \
+    --rm --restart=Never --attach=true --overrides="$overrides"
+}
+# The pod reads the overlay's ConfigMap, and its NetworkPolicy must be in place
+# for it to reach Postgres, so apply those before migrating — as on any deploy
+# after the first.
+kubectl -n "$NS" apply -f <(python3 -c 'import sys,yaml; print(yaml.safe_dump_all([d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] in ("ConfigMap","NetworkPolicy")]))' "$rendered") >/dev/null
+step "migrations (runMigrations() from the Jenkinsfile)" migrate
 if [ $? -ne 0 ]; then
   log "falling back to running migrations from app/ source through a port-forward"
-  kubectl -n "$NS" delete pod my-app-migrate --ignore-not-found >/dev/null 2>&1
+  kubectl -n "$NS" delete pod my-app-migrate-verify --ignore-not-found >/dev/null 2>&1
   [ -d "$REPO_ROOT/app/node_modules" ] || (cd "$REPO_ROOT/app" && npm ci --no-audit --no-fund >/dev/null)
   kubectl -n "$NS" port-forward svc/app-db 15432:5432 >/dev/null 2>&1 & db_pf=$!
   sleep 3

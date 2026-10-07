@@ -1,0 +1,33 @@
+{
+  "apiVersion": "v1",
+  "spec": {
+    "automountServiceAccountToken": false,
+    "securityContext": {
+      "runAsNonRoot": true,
+      "runAsUser": 1000
+    },
+    "containers": [
+      {
+        "name": "__NAME__",
+        "image": "__IMAGE__",
+        "command": ["node", "node_modules/knex/bin/cli.js", "migrate:latest", "--knexfile=knexfile.js", "--env=production"],
+        "envFrom": [
+          { "configMapRef": { "name": "my-app-config" } }
+        ],
+        "env": [
+          { "name": "DB_HOST", "valueFrom": { "secretKeyRef": { "name": "my-app-secrets", "key": "db-host" } } },
+          { "name": "DB_PASSWORD", "valueFrom": { "secretKeyRef": { "name": "my-app-secrets", "key": "db-password" } } }
+        ],
+        "resources": {
+          "requests": { "cpu": "100m", "memory": "128Mi" },
+          "limits": { "cpu": "500m", "memory": "256Mi" }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "readOnlyRootFilesystem": true,
+          "capabilities": { "drop": ["ALL"] }
+        }
+      }
+    ]
+  }
+}

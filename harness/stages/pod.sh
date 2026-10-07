@@ -44,10 +44,27 @@ docs += [d for d in yaml.safe_load_all(open(sys.argv[2])) if d]
 print(yaml.safe_dump_all(docs, sort_keys=False))
 PY
 
-# Same command as runMigrations() in the Jenkinsfile: `kubectl run` with only
-# the image (no env, no ConfigMap/Secret), so this reproduces the pipeline.
-step "migrations (as Jenkins runs them)" podman run --rm --network "$NET" "$DEPLOY_IMAGE" \
-  node node_modules/.bin/knex migrate:latest --knexfile=knexfile.js
+# The pod runMigrations() in the Jenkinsfile creates, with the staging
+# ConfigMap and the stand-in secret.
+MIGRATE_PLAY="$WORK/migrate.yaml"
+{
+  python3 - "$APP_PLAY" <<'PY'
+import sys, yaml
+print(yaml.safe_dump_all([d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] != "Deployment"], sort_keys=False))
+PY
+  echo ---
+  migrate_pod_yaml staging "$DEPLOY_IMAGE" my-app-migrate-verify
+} > "$MIGRATE_PLAY"
+run_migrations() {
+  local ctr=my-app-migrate-verify-my-app-migrate-verify rc
+  podman kube down "$MIGRATE_PLAY" >/dev/null 2>&1
+  podman kube play --network "$NET" "$MIGRATE_PLAY" >/dev/null || return 1
+  rc=$(podman wait "$ctr")
+  podman logs "$ctr" >&2
+  podman kube down "$MIGRATE_PLAY" >/dev/null 2>&1
+  return "$rc"
+}
+step "migrations (pod from runMigrations())" run_migrations
 if [ $? -ne 0 ]; then
   # Keep going with migrations from source so the later checks still say something.
   log "falling back to running migrations from app/ source"

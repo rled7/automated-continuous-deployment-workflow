@@ -38,6 +38,9 @@ RUN addgroup --system --gid 1001 appgroup && \
 COPY --from=deps    /tmp/prod_modules     ./node_modules
 COPY --from=builder /app/dist             ./dist
 COPY --from=builder /app/package.json     ./package.json
+# Migrations run from this image (runMigrations() in the Jenkinsfile)
+COPY --from=builder /app/knexfile.js      ./knexfile.js
+COPY --from=builder /app/migrations       ./migrations
 
 # Health check — used by Kubernetes liveness/readiness probes
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

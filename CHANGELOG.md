@@ -2,13 +2,73 @@
 
 All notable file-level changes to this repo, tracked per build. Newest first.
 
-> **All 6 production-readiness phases (A–F) complete as of Build 018.**
-> - Phase A: bootstrap (Build 014)
-> - Phase B: agent image (Build 013)
-> - Phase C: pipeline holes (Build 015)
-> - Phase D: cluster security (Build 016)
-> - Phase E: app data layer (Build 017)
-> - Phase F: operations (Build 018)
+> **Production-readiness phases**
+> - Phase A: bootstrap (Build 014) — done
+> - Phase B: agent image (Build 013) — done
+> - Phase C: pipeline holes (Build 015) — done
+> - Phase D: cluster security (Build 016) — done
+> - Phase E: app data layer (Build 017) — done
+> - Phase F: operations (Build 018) — done
+> - **Phase G: verification (Builds 023–024) — in progress.** The local harness exercised the pipeline end to end for the first time and found 9 defects in phases C–F that blocked deploys, testing or rollback, plus 2 in Build 023's own changes; all are fixed in Builds 023–024. Remaining:
+>   - [x] Harness for manifests, app, image, pod, simulated cluster, Terraform (Build 023)
+>   - [x] Staging deploy on a real cluster in CI (Build 023)
+>   - [ ] Production Rollout path on a real cluster: deploy, failed canary, rollback (`cluster-prod`, Build 024; first CI run pending)
+>   - [ ] First production deploy with the Rollout-only overlay, watched (removes the stray Deployment)
+>   - [ ] Whole Jenkinsfile run end to end (Jenkins controller + agent image in kind)
+>   - [ ] Terraform stage pointed at the real infrastructure modules
+>   - [ ] Promote `require-pod-probes` to Enforce (now that it accepts valid probes)
+
+---
+
+## Build 024 — Production Rollout path in the harness; Pod Security fixes; harness ergonomics
+**Date:** 2026-10-08
+**Scope:** Exercise the Jenkinsfile's production path (Argo Rollouts) on a real cluster, which found that production could not run any Rollout pods; check Pod Security admission in the harness; failure excerpts, a cloud-session hook and a lint fix.
+
+### Fixed
+
+- `k8s/overlays/production/rollout-patch.yaml` — The Rollout's pod template had no `seccompProfile` (and not the `my-app` ServiceAccount the base Deployment uses). The production namespace enforces Pod Security `restricted`, so the API server rejected every pod the Rollout tried to create: production was served only by the stray Deployment that Build 023 removes. Added `serviceAccountName: my-app` and a `RuntimeDefault` seccomp profile, matching `k8s/base/deployment.yaml`.
+- `k8s/migrations/migrate-pod-overrides.json` — The migration pod (Build 023) had no `seccompProfile` either and would have been rejected in both namespaces. Added one; README updated.
+- `Jenkinsfile` — `rollback('production')` now restores the Rollout's `version` label along with its image. With only the image patched the template did not match the stable ReplicaSet, so Argo treated the rollback as a new release and ran the canary steps again instead of switching straight back.
+- `app/package.json` — The lint script's unquoted `src/**/*.js` was expanded by `sh` (no globstar) to `src/*/*.js`, so ESLint never checked `src/server.js` or the tests. Quoted the glob; removed the two unused imports it then reported (`app/src/server.js`, `app/src/__tests__/unit/error.test.js`).
+
+### Added
+
+- `harness/stages/cluster-prod.sh` — Opt-in stage: the Jenkinsfile's production path on kind with the Argo Rollouts controller (v1.7.2). Starts from a pre-fix cluster with the stray Deployment, deploys (migrations, apply, `scripts/wait-for-rollout.sh`), removes the stray Deployment, runs the smoke tests; then applies a release whose canary fails (no Prometheus in the harness, so the analysis errors and Argo aborts), checks that `wait-for-rollout.sh` reports it as Degraded, rolls back the way `rollback()` does and checks the previous image serves again.
+- `harness/lib/kind.sh` — Helpers shared by `cluster-real` and `cluster-prod`: cluster setup, Namespace-first apply, throwaway dependencies, the `runMigrations()` command, smoke tests through the Service, state dumps on failure.
+- `.claude/hooks/session-start.sh`, `.claude/settings.json` — SessionStart hook for Claude Code cloud sessions: installs the npm dependencies, podman and the pinned harness tools, starts Docker, puts `harness/.bin` on PATH. `.gitignore` now ignores `.claude/` except these.
+
+### Changed
+
+- `harness/stages/cluster-sim.sh` — Submits every workload's pod template (including the Rollout's, which KWOK never turns into pods) and the migration pod as server-side dry-run Pods, so Pod Security admission judges them. This is the check that found the two seccomp defects above.
+- `harness/stages/cluster-real.sh` — Rebuilt on `harness/lib/kind.sh`; applies the Namespace and its Pod Security labels before anything else, as in a long-lived cluster (creating the namespace bare is how it missed the migration pod defect).
+- `harness/fixtures/deps.yaml` — Throwaway Postgres and Redis meet Pod Security `restricted` (non-root, seccomp, no capabilities); Redis is named after the overlay's `REDIS_URL` host.
+- `harness/lib/common.sh`, `harness/verify.sh` — Failed steps record the last 30 lines of their output in `results.json` (`output_tail`); the terminal shows the end of it under each failed step.
+- `.github/workflows/verify.yml` — Runs `cluster-prod` after `cluster-real`.
+- `README.md` — New "Verify Changes Locally" section; project structure, reliability features and rollback instructions updated for the production Rollout. `harness/README.md` updated for the new stage, Pod Security checks, failure excerpts and the session hook.
+
+---
+
+## Build 023 — Local verification harness; 7 deploy-blocking fixes
+**Date:** 2026-10-07
+**Scope:** A harness that checks changes without cloud accounts or a long-lived cluster, a CI workflow that runs it, and the seven defects its first run found.
+
+### Added
+
+- `harness/verify.sh` and `harness/stages/` — Stages `static` (overlays rendered as Jenkins deploys them, kubeconform with CRD schemas, cross-object sanity checks, Kyverno policies), `app` (install, lint, unit tests), `image` (build, runtime dependencies present, non-root), `pod` (staging Deployment under `podman kube play` with Postgres/Redis, migrations, probes, smoke tests), `cluster-sim` (every overlay on a KWOK cluster), `terraform` (fmt, validate, `terraform test`, apply, drift, destroy against the Floci AWS emulator) and opt-in `cluster-real` (staging on kind as the Jenkinsfile deploys it). Results in `harness/.results/results.json`; tools pinned in `harness/lib/tools.sh`.
+- `harness/checks/manifest_sanity.py`, `harness/fixtures/`, `harness/terraform/example/` — Cross-object checks, throwaway dependencies and an example Terraform module with a `terraform test` file.
+- `.github/workflows/verify.yml` — Runs every stage on pull requests and on demand; summary table, failed-stage logs and results artifact.
+- `k8s/migrations/` — Pod spec and README for `runMigrations()`.
+- `scripts/wait-for-rollout.sh` — Waits for an Argo Rollout without the kubectl plugin.
+
+### Fixed
+
+- `app/package.json` — `--testPathPattern` → `--testPathPatterns` (Jest 30); unit and integration tests had not been running.
+- `k8s/base/deployment.yaml`, `k8s/overlays/production/rollout-patch.yaml` — Map the SealedSecret keys `db-host`/`db-password` to `DB_HOST`/`DB_PASSWORD`; the app never saw them and `/health/ready` returned 503.
+- `docker/Dockerfile`, `Jenkinsfile`, `k8s/base/network-policy.yaml` — `runMigrations()` could not succeed (`kubectl run --serviceaccount` removed in kubectl 1.24; no `knexfile.js`/`migrations/` in the image; no DB settings in the pod). The image ships the migrations, the pod spec gives it the app's config, and `allow-migrate-egress-db` lets it reach Postgres.
+- `tests/package.json`, `tests/package-lock.json` — Smoke tests could not install (`npm ci` without a lockfile) or load (ESM without `"type": "module"`).
+- `k8s/overlays/production/` — `$patch: delete` was nested under `metadata`, so production ran the base Deployment next to the Rollout and the HPA scaled the Deployment. Fixed the patch and the HPA target; the Jenkinsfile's production steps now read, wait on and roll back the Rollout and delete the stray Deployment.
+- `policies/kyverno/require-pod-probes.yaml` — `?(httpGet)` is not Kyverno anchor syntax, so every workload failed; now checks for both probe keys.
+- `policies/kyverno/require-labels.yaml`, overlays, `Jenkinsfile` — The Enforce policy required `env`/`version` labels the pod templates did not have; overlays add `env`, deploys add `version=<image tag>`, and the policy checks the pod template as documented.
 
 ---
 

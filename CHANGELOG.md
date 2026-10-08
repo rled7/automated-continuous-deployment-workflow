@@ -9,14 +9,36 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 > - Phase D: cluster security (Build 016) — done
 > - Phase E: app data layer (Build 017) — done
 > - Phase F: operations (Build 018) — done
-> - **Phase G: verification (Builds 023–024) — in progress.** The local harness exercised the pipeline end to end for the first time and found 10 defects in phases C–F that blocked deploys, testing or rollback, plus 3 in its own changes; all are fixed in Builds 023–024. Remaining:
+> - **Phase G: verification (Builds 023–025) — in progress.** The local harness exercised the pipeline end to end for the first time and found 18 defects in phases C–F that blocked deploys, testing, rollback or Jenkins itself, plus 3 in its own changes; all are fixed in Builds 023–025. Remaining:
 >   - [x] Harness for manifests, app, image, pod, simulated cluster, Terraform (Build 023)
 >   - [x] Staging deploy on a real cluster in CI (Build 023)
 >   - [x] Production Rollout path on a real cluster: deploy, failed canary, rollback (`cluster-prod`, Build 024; passing in CI)
 >   - [ ] First production deploy with the Rollout-only overlay, watched (removes the stray Deployment)
 >   - [ ] Whole Jenkinsfile run end to end (Jenkins controller + agent image in kind)
+>     - [x] Jenkins starts from `docker/jenkins` with `jenkins.yaml`; credentials, agent label and declarative validation checked (`jenkins` stage, Build 025)
+>     - [ ] Pipeline runs on kind: agent pods from the `cicd-agent` template, stand-ins for SonarQube, the registry and Slack
 >   - [ ] Terraform stage pointed at the real infrastructure modules
 >   - [ ] Promote `require-pod-probes` to Enforce (now that it accepts valid probes)
+
+---
+
+## Build 025 — Jenkins starts with its configuration; `jenkins` harness stage
+**Date:** 2026-10-08
+**Scope:** First step of running the Jenkinsfile end to end: boot the real Jenkins controller with the repo's plugins and `jenkins.yaml`, which showed it could never start with that configuration.
+
+### Fixed
+
+- `docker/jenkins/Dockerfile` (new), `docker/docker-compose.yml` — The stock `jenkins/jenkins` image does not install plugins from a mounted `plugins.txt`, so Jenkins ran with no plugins and, without configuration-as-code, silently ignored `jenkins.yaml`. Plugins are now installed at build time and compose builds the image. Compose also passed none of the variables `jenkins.yaml` substitutes; it now reads `../.env`.
+- `docker/jenkins/jenkins.yaml` — With the plugins installed, JCasC refused to start Jenkins on four errors: the `kubeconfig` file credential had no content (now read from `/run/secrets/kubeconfig`, which compose mounts from `$KUBECONFIG` or `kubeconfig.placeholder`); the NodeJS tool used a `version:` attribute the plugin lacks (now an installer); the `my-app` job used Job DSL's `github {}` shorthand with `credentialsId`/`traits`, which only the `branchSource { source { github {} } }` syntax supports; and `periodic(5)` is a freestyle trigger (multibranch jobs take `periodicFolderTrigger`).
+- `docker/jenkins/jenkins.yaml`, `Jenkinsfile`, `.env.example`, `README.md` — `docker-registry-url` (read in the Jenkinsfile's top-level `environment` block, so every build failed before its first stage) and `github-credentials` (the job's branch source and the Release stage) were never defined. Both now come from `.env`. `github-credentials` is username + PAT, as the README documented and the branch source needs; the Release stage read it as secret text and now reads the token as its password. The README's credentials section reflects that all six are created from `.env`.
+
+### Added
+
+- `harness/stages/jenkins.sh` — Builds `docker/jenkins/Dockerfile`, starts it with `jenkins.yaml` and placeholder secrets, and checks from inside the running Jenkins that it boots (printing the JCasC error if not), the jobs exist, every credential and agent label the Jenkinsfile uses is defined, and the declarative validator accepts the Jenkinsfile. Runs by default and in the `verify` workflow.
+
+### Changed
+
+- `harness/lib/common.sh` — `docker_build` adds the sandbox CA (PEM for npm, Java truststore for JVM tools) to the build stages of any Dockerfile; the `image` stage uses it. `pull_official` also pulls namespaced images (`jenkins/jenkins`) through the mirror.
 
 ---
 

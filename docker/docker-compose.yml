@@ -4,7 +4,10 @@ services:
 
   # ── Jenkins ─────────────────────────────────────────────────────────────────
   jenkins:
-    image: jenkins/jenkins:lts-jdk17
+    # Built from jenkins/Dockerfile so the plugins in plugins.txt are installed;
+    # the stock image ignores a mounted plugins.txt.
+    build: ./jenkins
+    image: jenkins-cicd:local
     container_name: jenkins
     restart: unless-stopped
     privileged: true
@@ -15,8 +18,13 @@ services:
     volumes:
       - jenkins_home:/var/jenkins_home
       - /var/run/docker.sock:/var/run/docker.sock   # Docker-in-Docker
-      - ./jenkins/plugins.txt:/usr/share/jenkins/ref/plugins.txt
       - ./jenkins/jenkins.yaml:/var/jenkins_home/casc_configs/jenkins.yaml
+      # The kubeconfig credential in jenkins.yaml reads this file.
+      - ${KUBECONFIG:-./jenkins/kubeconfig.placeholder}:/run/secrets/kubeconfig:ro
+    # Credentials and settings jenkins.yaml substitutes (${DOCKER_USER}, ...).
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
       - CASC_JENKINS_CONFIG=/var/jenkins_home/casc_configs

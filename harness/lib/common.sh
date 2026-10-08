@@ -58,12 +58,18 @@ finish_stage() { [ "$STEP_FAILURES" -eq 0 ]; exit $?; }
 # skip_stage REASON — marks the whole stage as skipped (exit code 3).
 skip_stage() { log "SKIP: $*"; echo "$*" > "${STAGE_SKIP_FILE:-/dev/null}"; exit 3; }
 
-# pull_official IMAGE:TAG — pulls an official Docker Hub image via the mirror
-# and tags it under its normal short name so Dockerfiles resolve it locally.
+# pull_official IMAGE:TAG — pulls a Docker Hub image through the mirror
+# (official images like node:20-alpine and namespaced ones like
+# jenkins/jenkins) and tags it under its normal name so Dockerfiles resolve it
+# locally.
 pull_official() {
-  local img=$1
+  local img=$1 src
   docker image inspect "$img" >/dev/null 2>&1 && return 0
-  docker pull -q "$IMAGE_MIRROR/$img" >/dev/null && docker tag "$IMAGE_MIRROR/$img" "$img"
+  case "$img" in
+    */*) src="${IMAGE_MIRROR%/library}/$img" ;;
+    *)   src="$IMAGE_MIRROR/$img" ;;
+  esac
+  docker pull -q "$src" >/dev/null && docker tag "$src" "$img"
 }
 
 # ensure_docker — succeeds if a Docker daemon is reachable. In throwaway
@@ -144,4 +150,37 @@ pod = {
 }
 print(yaml.safe_dump(merge(pod, overrides), sort_keys=False))
 PY
+}
+
+# Sandboxes that intercept HTTPS (e.g. Claude Code cloud sessions) need their
+# CA inside image builds, or npm and Java downloads fail. HARNESS_CA_BUNDLE (a
+# PEM file) and HARNESS_JAVA_TRUSTSTORE (a JKS) are auto-detected in Claude
+# Code cloud sessions and empty elsewhere.
+if [ -f /root/.ccr/ca-bundle.crt ]; then
+  HARNESS_CA_BUNDLE="${HARNESS_CA_BUNDLE:-/root/.ccr/ca-bundle.crt}"
+  HARNESS_JAVA_TRUSTSTORE="${HARNESS_JAVA_TRUSTSTORE:-$([ -f /etc/ssl/certs/java/cacerts ] && echo /etc/ssl/certs/java/cacerts)}"
+fi
+
+# docker_build DOCKERFILE CONTEXT [docker build args...] — builds an image like
+# `docker buildx build --load`, adding the sandbox trust above to every build
+# stage except the last, so it never reaches the final image.
+docker_build() {
+  local dockerfile=$1 context=$2; shift 2
+  local args=() trust
+  if [ -n "${HARNESS_CA_BUNDLE:-}${HARNESS_JAVA_TRUSTSTORE:-}" ]; then
+    trust=$(mktemp -d)
+    [ -n "${HARNESS_CA_BUNDLE:-}" ] && cp "$HARNESS_CA_BUNDLE" "$trust/ca.crt"
+    [ -n "${HARNESS_JAVA_TRUSTSTORE:-}" ] && cp "$HARNESS_JAVA_TRUSTSTORE" "$trust/cacerts"
+    log "adding sandbox CA to the build stages of $(basename "$dockerfile")"
+    awk -v last="$(grep -c '^FROM' "$dockerfile")" -v pem="${HARNESS_CA_BUNDLE:+1}" -v jks="${HARNESS_JAVA_TRUSTSTORE:+1}" '
+      { print }
+      /^FROM/ && ++n < last {
+        print "COPY --from=harness-trust . /tmp/harness-trust/"
+        if (pem) print "ENV NODE_EXTRA_CA_CERTS=/tmp/harness-trust/ca.crt npm_config_cafile=/tmp/harness-trust/ca.crt"
+        if (jks) print "ENV JAVA_OPTS=-Djavax.net.ssl.trustStore=/tmp/harness-trust/cacerts"
+      }' "$dockerfile" > "$trust/Dockerfile"
+    dockerfile="$trust/Dockerfile"
+    args+=(--build-context "harness-trust=$trust")
+  fi
+  DOCKER_BUILDKIT=1 docker buildx build --load -q -f "$dockerfile" "${args[@]}" "$@" "$context"
 }

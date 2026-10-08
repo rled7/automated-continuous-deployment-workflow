@@ -1,7 +1,7 @@
 name: verify
 
 # Runs the local verification harness (harness/verify.sh), including the
-# cluster-real stage, which needs a host where kind works.
+# cluster-real and cluster-prod stages, which need a host where kind works.
 on:
   pull_request:
   workflow_dispatch:
@@ -36,7 +36,7 @@ jobs:
 
       - name: Run harness
         env:
-          STAGES: ${{ inputs.stages || 'static app image pod cluster-sim terraform cluster-real' }}
+          STAGES: ${{ inputs.stages || 'static app image pod cluster-sim terraform cluster-real cluster-prod' }}
         run: harness/verify.sh $STAGES
 
       - name: Summary

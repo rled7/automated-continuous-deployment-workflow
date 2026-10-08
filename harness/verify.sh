@@ -18,7 +18,7 @@ export DEPLOY_IMAGE
 
 DEFAULT_STAGES=(static app image pod cluster-sim terraform)
 # Opt-in: needs a host where kind can run (your machine, GitHub Actions).
-OPTIONAL_STAGES=(cluster-real)
+OPTIONAL_STAGES=(cluster-real cluster-prod)
 
 describe() {
   case $1 in
@@ -29,6 +29,7 @@ describe() {
     cluster-sim)  echo "Apply every overlay to a KWOK simulated cluster (real API server, fake nodes)" ;;
     terraform)    echo "fmt/validate/test/apply/drift/destroy each Terraform dir against Floci (local AWS)" ;;
     cluster-real) echo "Deploy staging to a real kind cluster and run smoke tests" ;;
+    cluster-prod) echo "Production path on kind + Argo Rollouts: deploy, stray Deployment cleanup, failed canary, rollback" ;;
   esac
 }
 

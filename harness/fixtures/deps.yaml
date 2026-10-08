@@ -3,6 +3,8 @@
 # redis-staging, and the allow-app-egress-db-redis NetworkPolicy only permits
 # traffic to pods labelled app=app-db and app=redis.
 # podman kube play resolves pods by name; Kubernetes uses the Services.
+# Both pods meet Pod Security "restricted", which staging and production
+# enforce, so they are admitted like any other pod in those namespaces.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -10,6 +12,12 @@ metadata:
   labels:
     app: app-db
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 70        # postgres user in the alpine image
+    runAsGroup: 70
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: postgres
       image: mirror.gcr.io/library/postgres:16-alpine
@@ -22,6 +30,10 @@ spec:
           value: appdb
       ports:
         - containerPort: 5432
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
       readinessProbe:
         exec:
           command: ["pg_isready", "-U", "appuser", "-d", "appdb"]
@@ -34,8 +46,18 @@ metadata:
   labels:
     app: redis
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999       # redis user in the alpine image
+    runAsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: redis
       image: mirror.gcr.io/library/redis:7-alpine
       ports:
         - containerPort: 6379
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]

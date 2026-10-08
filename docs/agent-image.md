@@ -9,6 +9,9 @@ This directory builds a custom agent image that bundles every required CLI, and 
 | Tool | Used by Jenkinsfile stage |
 |---|---|
 | `node`, `npm` | Build, Test, Lint |
+| `docker` + `buildx` (CLI only) | Docker Build & Push, Release |
+| `sonar-scanner` | Code Quality & Security → SonarQube Analysis |
+| `grype` | Scan SBOM |
 | `kubectl` | Validate Manifests, Deploy → Staging, Deploy → Production, Deploy → PR Preview |
 | `kustomize` | Validate Manifests, Deploy stages |
 | `kubeconform` | Validate Manifests |
@@ -20,7 +23,11 @@ This directory builds a custom agent image that bundles every required CLI, and 
 | `k6` | Performance Tests |
 | `gh` | Release |
 
-Tool versions are pinned via `ENV` lines at the top of `Dockerfile`. Bump them in their own commits so Renovate / Dependabot can track them.
+Tool versions are pinned via `ENV` lines at the top of `Dockerfile`. Bump them in their own commits so Renovate / Dependabot can track them. Trivy is the exception: its GitHub release tarballs are no longer downloadable, so the binary is copied from the official `aquasec/trivy` image, pinned in the `FROM ... AS trivy` line.
+
+The base image is pinned to a Debian release (`latest-trixie-jdk17`), because package names change between releases: on trixie `docker.io` is only the daemon and the CLI is `docker-cli`.
+
+`harness/verify.sh jenkins` builds this image and checks it has every command the pipeline calls.
 
 ## Build
 
@@ -50,7 +57,7 @@ docker push ghcr.io/<ORG>/jenkins-cicd-agent:<TAG>
 ## Caveats
 
 - **Image is amd64-only.** If you run Jenkins controllers on arm64 (Graviton, Ampere), build a multi-arch image with `docker buildx build --platform linux/amd64,linux/arm64`.
-- **Docker socket mounting** is the default in the pod template (so `docker build`/`docker push` in the Jenkinsfile work). For tighter security in production, switch to `kaniko` or `buildah` and remove the docker socket mount.
+- **Docker runs in a `dind` sidecar** of the agent pod (`docker:27-dind`, privileged, listening only on `127.0.0.1:2375`; the `cicd` container reaches it through `DOCKER_HOST`). Kubernetes nodes run containerd and have no `/var/run/docker.sock`, so the old socket mount kept every agent pod from starting. The `jenkins` namespace must allow privileged pods. For tighter security, switch the build steps to rootless BuildKit or `kaniko` and drop the sidecar.
 - **Image size** is large (~1.5 GB). That's the cost of bundling Java + JDK + Node + a dozen CLIs. Acceptable for build agents; not what you'd ship to production.
 - **No JDK17 separately for OWASP Dependency Check** — it uses the JDK already in the base image.
 - **Pinned versions can drift.** Set up a weekly Renovate rule for `docker/jenkins-agent/Dockerfile` to track upstream releases.

@@ -2,9 +2,12 @@ pipeline {
     // Build 013: agents come from the custom Jenkins agent image (docs/agent-image.md).
     // The image bundles node, kubectl, kustomize, kubeconform, gitleaks, syft, cosign,
     // trivy, dependency-check.sh, k6, and gh — so no `tools {}` block is needed.
+    // inheritFrom selects the cicd-agent pod template in jenkins.yaml (with
+    // the cicd container). `label` alone makes the plugin generate a pod
+    // with only the jnlp container, so no stage could run in `cicd`.
     agent {
         kubernetes {
-            label 'cicd-agent'
+            inheritFrom 'cicd-agent'
             defaultContainer 'cicd'
         }
     }
@@ -264,12 +267,12 @@ pipeline {
         // Agent requirements for buildx multi-arch:
         //   - Docker daemon with the docker-container buildx driver (default on
         //     Docker ≥ 23 when BuildKit is enabled).
-        //   - binfmt_misc QEMU emulation for cross-arch builds. On kind clusters
-        //     this is available by default. On cloud VM agents without QEMU, run
-        //     once during agent bootstrap:
+        //   - binfmt_misc QEMU emulation for cross-arch builds, registered in
+        //     the node's kernel (the dind sidecar shares it). On nodes without
+        //     it, run once per node:
         //       docker run --privileged --rm tonistiigi/binfmt --install all
-        //   - The agent's docker socket must be accessible (already assumed by
-        //     earlier builds).
+        //   - A Docker daemon: the dind sidecar of the cicd-agent pod template
+        //     (docker/jenkins/jenkins.yaml), reached through DOCKER_HOST.
         stage('Docker Build & Push') {
             steps {
                 script {

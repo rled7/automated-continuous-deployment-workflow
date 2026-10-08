@@ -29,10 +29,11 @@ harness/verify.sh cluster-real cluster-prod   # the opt-in real-cluster stages
 | `image` | `docker/Dockerfile` builds, runtime dependencies are really in the image, runs as non-root | Docker |
 | `pod` | The rendered staging Deployment runs under `podman kube play` with its ConfigMap, Secret, read-only root filesystem and uid; migrations as `runMigrations()` runs them; startup/readiness probes; smoke tests | Docker, podman |
 | `cluster-sim` | Every overlay is accepted by a real Kubernetes API server (KWOK: simulated nodes); every workload's pod template and the migration pod pass Pod Security admission ("restricted"); Deployments roll out; HPA targets exist | — |
-| `jenkins` | Jenkins built from `docker/jenkins/Dockerfile` (your `plugins.txt`) starts with `jenkins.yaml` applied; the jobs it defines exist; every credential and agent label the Jenkinsfile uses is defined; Jenkins' own declarative validator accepts the Jenkinsfile (~30 s after the first build) | Docker |
+| `jenkins` | Jenkins built from `docker/jenkins/Dockerfile` (your `plugins.txt`) starts with `jenkins.yaml` applied; the jobs it defines exist; every credential the Jenkinsfile uses and the pod template it inherits from are defined; Jenkins' own declarative validator accepts the Jenkinsfile. The agent image (`docker/jenkins-agent/Dockerfile`) builds and has every command the pipeline calls (~2 min after the first build) | Docker |
 | `terraform` | Each module in `TF_DIRS`: fmt, validate, `terraform test`, apply, no drift, destroy — against [Floci](https://github.com/floci-io/floci) (local AWS) | Docker |
 | `cluster-real` (opt-in) | Staging deployed to a real kind cluster exactly as the Jenkinsfile does it, with Pod Security and NetworkPolicies enforced; smoke tests through the Service | Docker, a host where kind works |
 | `cluster-prod` (opt-in) | The Jenkinsfile's production path on kind with the Argo Rollouts controller: starting from a pre-fix cluster (stray Deployment), deploy and wait with `scripts/wait-for-rollout.sh`, remove the stray Deployment, smoke tests; then a release whose canary fails must be reported, rolled back with `rollback()`, and serve the previous image again (~5 min) | Docker, a host where kind works |
+| `pipeline` (opt-in) | The Jenkinsfile itself, run by Jenkins: the controller (`docker/jenkins`, `jenkins.yaml`) runs inside kind, launches `cicd-agent` pods from the agent image, and builds this working tree as `$PIPELINE_BRANCH` (default `develop`) from a git server in the cluster. Each Jenkins stage is recorded as a step (pass, fail with its output, or skip); the console log is in `logs/pipeline-console.log`. Stand-ins: a local registry, placeholder secrets, an in-cluster kubeconfig | Docker, a host where kind works |
 
 Steps keep going after a failure so one run reports everything it can. Where
 a pipeline step fails (for example migrations), the stage records the failure
@@ -72,9 +73,10 @@ a real sandbox account for the final check.
 - **Your machine**: everything, including `cluster-real` and `cluster-prod`.
 - **GitHub Actions**: `.github/workflows/verify.yml` runs all stages,
   including both real-cluster stages, on every PR and on demand, prints the
-  logs of failed stages, and uploads `harness/.results` as an artifact.
-- **Claude Code cloud sessions**: everything except `cluster-real` and
-  `cluster-prod` (the sandbox does not allow the negative OOM scores Kubernetes
+  logs of failed stages, and uploads `harness/.results` as an artifact. The
+  `pipeline` stage runs in its own job alongside.
+- **Claude Code cloud sessions**: everything except `cluster-real`,
+  `cluster-prod` and `pipeline` (the sandbox does not allow the negative OOM scores Kubernetes
   gives its pods, so kind and k3s pods never start). The SessionStart hook
   (`.claude/hooks/session-start.sh`) installs the npm dependencies, podman and
   the pinned tools and starts Docker, so the harness runs straight away. HTTPS

@@ -69,6 +69,36 @@ jenkins:
                     args:
                       - infinity
                     tty: true
+                    env:
+                      # docker and buildx talk to the dind sidecar.
+                      - name: DOCKER_HOST
+                        value: "tcp://localhost:2375"
+                    resources:
+                      requests:
+                        cpu: "500m"
+                        memory: "1Gi"
+                      limits:
+                        cpu: "2"
+                        memory: "4Gi"
+                  # Docker for the Docker Build & Push and Release stages.
+                  # Kubernetes nodes run containerd and have no
+                  # /var/run/docker.sock to mount, so each agent pod runs its
+                  # own daemon. It must be privileged; it listens only inside
+                  # the pod.
+                  - name: dind
+                    image: "docker:27-dind"
+                    # `dockerd` first, or the image's entrypoint adds its own
+                    # --host=tcp://0.0.0.0:2375 (open to the whole cluster),
+                    # which also collides with this one.
+                    args:
+                      - "dockerd"
+                      - "--host=tcp://127.0.0.1:2375"
+                      - "--tls=false"
+                    env:
+                      - name: DOCKER_TLS_CERTDIR
+                        value: ""
+                    securityContext:
+                      privileged: true
                     resources:
                       requests:
                         cpu: "500m"
@@ -77,13 +107,11 @@ jenkins:
                         cpu: "2"
                         memory: "4Gi"
                     volumeMounts:
-                      - name: docker-sock
-                        mountPath: /var/run/docker.sock
+                      - name: docker-data
+                        mountPath: /var/lib/docker
                 volumes:
-                  - name: docker-sock
-                    hostPath:
-                      path: /var/run/docker.sock
-                      type: Socket
+                  - name: docker-data
+                    emptyDir: {}
 
 # Every credential the Jenkinsfile and the jobs below use, filled from the
 # environment (.env, passed in by docker/docker-compose.yml). A credential the

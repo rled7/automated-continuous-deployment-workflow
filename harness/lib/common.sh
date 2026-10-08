@@ -162,23 +162,33 @@ if [ -f /root/.ccr/ca-bundle.crt ]; then
 fi
 
 # docker_build DOCKERFILE CONTEXT [docker build args...] — builds an image like
-# `docker buildx build --load`, adding the sandbox trust above to every build
-# stage except the last, so it never reaches the final image.
+# `docker buildx build --load`. With the sandbox trust above, every shell-form
+# RUN gets it as a bind mount plus the variables curl, npm and Java read, so
+# it works in single-stage images too and never lands in a layer.
 docker_build() {
   local dockerfile=$1 context=$2; shift 2
-  local args=() trust
+  local args=() trust env=""
   if [ -n "${HARNESS_CA_BUNDLE:-}${HARNESS_JAVA_TRUSTSTORE:-}" ]; then
     trust=$(mktemp -d)
-    [ -n "${HARNESS_CA_BUNDLE:-}" ] && cp "$HARNESS_CA_BUNDLE" "$trust/ca.crt"
-    [ -n "${HARNESS_JAVA_TRUSTSTORE:-}" ] && cp "$HARNESS_JAVA_TRUSTSTORE" "$trust/cacerts"
-    log "adding sandbox CA to the build stages of $(basename "$dockerfile")"
-    awk -v last="$(grep -c '^FROM' "$dockerfile")" -v pem="${HARNESS_CA_BUNDLE:+1}" -v jks="${HARNESS_JAVA_TRUSTSTORE:+1}" '
-      { print }
-      /^FROM/ && ++n < last {
-        print "COPY --from=harness-trust . /tmp/harness-trust/"
-        if (pem) print "ENV NODE_EXTRA_CA_CERTS=/tmp/harness-trust/ca.crt npm_config_cafile=/tmp/harness-trust/ca.crt"
-        if (jks) print "ENV JAVA_OPTS=-Djavax.net.ssl.trustStore=/tmp/harness-trust/cacerts"
-      }' "$dockerfile" > "$trust/Dockerfile"
+    if [ -n "${HARNESS_CA_BUNDLE:-}" ]; then
+      cp "$HARNESS_CA_BUNDLE" "$trust/ca.crt"
+      env="export SSL_CERT_FILE=/tmp/harness-trust/ca.crt CURL_CA_BUNDLE=/tmp/harness-trust/ca.crt NODE_EXTRA_CA_CERTS=/tmp/harness-trust/ca.crt npm_config_cafile=/tmp/harness-trust/ca.crt;"
+    fi
+    if [ -n "${HARNESS_JAVA_TRUSTSTORE:-}" ]; then
+      cp "$HARNESS_JAVA_TRUSTSTORE" "$trust/cacerts"
+      env="$env export JAVA_OPTS=-Djavax.net.ssl.trustStore=/tmp/harness-trust/cacerts;"
+    fi
+    log "adding sandbox CA to the RUN steps of $(basename "$dockerfile")"
+    # RUN [--flag...] cmd  →  RUN --mount=<trust> [--flag...] export ...; cmd
+    # (exec-form RUN ["..."] is left alone).
+    awk -v env="$env" '
+      /^RUN / && !/^RUN +\[/ {
+        rest = substr($0, 5); flags = ""
+        while (match(rest, /^ *--[^ ]+/)) { flags = flags substr(rest, 1, RLENGTH); rest = substr(rest, RLENGTH + 1) }
+        print "RUN --mount=type=bind,from=harness-trust,target=/tmp/harness-trust " flags " " env rest
+        next
+      }
+      { print }' "$dockerfile" > "$trust/Dockerfile"
     dockerfile="$trust/Dockerfile"
     args+=(--build-context "harness-trust=$trust")
   fi

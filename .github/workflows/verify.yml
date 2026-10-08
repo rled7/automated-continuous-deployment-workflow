@@ -1,15 +1,21 @@
 name: verify
 
 # Runs the local verification harness (harness/verify.sh), including the
-# cluster-real and cluster-prod stages, which need a host where kind works.
+# stages that need a host where kind works: cluster-real and cluster-prod in
+# the verify job, and pipeline (the Jenkinsfile run by Jenkins in kind) in its
+# own job alongside it.
 on:
   pull_request:
   workflow_dispatch:
     inputs:
       stages:
-        description: "Stages to run (space-separated; empty = all)"
+        description: "Stages for the verify job (space-separated; empty = all but pipeline)"
         required: false
         default: ""
+      pipeline_branch:
+        description: "Branch name the pipeline job builds the commit as (develop or main)"
+        required: false
+        default: "develop"
 
 permissions:
   contents: read
@@ -64,4 +70,37 @@ jobs:
           name: harness-results
           path: harness/.results/
           include-hidden-files: true  # .results is a dot-directory
+          retention-days: 14
+
+  pipeline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      PIPELINE_BRANCH: ${{ inputs.pipeline_branch || 'develop' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the Jenkinsfile in Jenkins on kind
+        run: harness/verify.sh pipeline
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Jenkinsfile on $PIPELINE_BRANCH"
+            echo '| Step | Result | Time |'
+            echo '|---|---|---|'
+            jq -r '.stages[].steps[] | "| \(.name) | \(.status) | \(.seconds)s |"' harness/.results/results.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stage log
+        if: failure()
+        run: cat harness/.results/logs/pipeline.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pipeline-results
+          path: harness/.results/
+          include-hidden-files: true
           retention-days: 14

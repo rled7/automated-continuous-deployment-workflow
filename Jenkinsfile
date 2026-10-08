@@ -2,9 +2,12 @@ pipeline {
     // Build 013: agents come from the custom Jenkins agent image (docs/agent-image.md).
     // The image bundles node, kubectl, kustomize, kubeconform, gitleaks, syft, cosign,
     // trivy, dependency-check.sh, k6, and gh — so no `tools {}` block is needed.
+    // inheritFrom selects the cicd-agent pod template in jenkins.yaml (with
+    // the cicd container). `label` alone makes the plugin generate a pod
+    // with only the jnlp container, so no stage could run in `cicd`.
     agent {
         kubernetes {
-            label 'cicd-agent'
+            inheritFrom 'cicd-agent'
             defaultContainer 'cicd'
         }
     }

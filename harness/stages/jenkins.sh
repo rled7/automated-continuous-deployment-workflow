@@ -3,7 +3,7 @@
 # docker/jenkins/Dockerfile (plugins.txt baked in) with jenkins.yaml (JCasC)
 # and placeholder secrets — then check it against the Jenkinsfile from inside
 # the running Jenkins: it starts, the jobs exist, every credential and agent
-# label the pipeline uses is defined, and Jenkins' own declarative validator
+# template the pipeline uses is defined, and Jenkins' own declarative validator
 # accepts the Jenkinsfile. Then it builds the agent image
 # (docker/jenkins-agent/Dockerfile) and checks it has every command the
 # pipeline calls. KEEP=1 leaves Jenkins running on localhost:18080
@@ -90,15 +90,23 @@ println(CredentialsProvider.lookupCredentials(com.cloudbees.plugins.credentials.
 }
 step "every credential the Jenkinsfile uses is defined" credentials_defined
 
-agent_labels_defined() {
-  local wanted have missing=0
-  wanted=$(grep -vE '^\s*//' "$REPO_ROOT/Jenkinsfile" | grep -oE "label +'[^']+'" | sed -E "s/.*'([^']+)'.*/\1/" | sort -u)
-  have=$(groovy 'println(jenkins.model.Jenkins.instance.clouds.collectMany { c -> c.respondsTo("getTemplates") ? c.templates*.label : [] }.join(" "))')
-  echo "agent labels in clouds: $have"
-  for l in $wanted; do grep -qw "$l" <<<"$have" || { echo "MISSING agent label $l"; missing=1; }; done
+# The Kubernetes agent must name a pod template from jenkins.yaml with
+# inheritFrom: with only `label`, the plugin generates a pod of its own that
+# lacks the template's containers.
+agent_templates_defined() {
+  local jf wanted have missing=0
+  jf=$(grep -vE '^\s*//' "$REPO_ROOT/Jenkinsfile")
+  if grep -qE "^\s*label +'" <<<"$jf"; then
+    echo "the Jenkinsfile's kubernetes agent uses label; use inheritFrom '<template name>'"; missing=1
+  fi
+  wanted=$(grep -oE "inheritFrom +'[^']+'" <<<"$jf" | sed -E "s/.*'([^']+)'.*/\1/" | sort -u)
+  [ -n "$wanted" ] || { echo "no inheritFrom in the Jenkinsfile"; return 1; }
+  have=$(groovy 'println(jenkins.model.Jenkins.instance.clouds.collectMany { c -> c.respondsTo("getTemplates") ? c.templates*.name : [] }.join(" "))')
+  echo "pod templates in clouds: $have"
+  for t in $wanted; do grep -qw "$t" <<<"$have" || { echo "MISSING pod template $t"; missing=1; }; done
   return $missing
 }
-step "agent labels the Jenkinsfile uses are defined" agent_labels_defined
+step "the pod template the Jenkinsfile inherits from is defined" agent_templates_defined
 
 # The declarative linter Jenkins exposes (what `jenkins-cli declarative-linter`
 # calls).

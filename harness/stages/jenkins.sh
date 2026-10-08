@@ -4,13 +4,16 @@
 # and placeholder secrets — then check it against the Jenkinsfile from inside
 # the running Jenkins: it starts, the jobs exist, every credential and agent
 # label the pipeline uses is defined, and Jenkins' own declarative validator
-# accepts the Jenkinsfile. KEEP=1 leaves it running on localhost:18080
+# accepts the Jenkinsfile. Then it builds the agent image
+# (docker/jenkins-agent/Dockerfile) and checks it has every command the
+# pipeline calls. KEEP=1 leaves Jenkins running on localhost:18080
 # (admin / verify).
 source "$(dirname "$0")/../lib/common.sh"
 
 PORT="${JENKINS_PORT:-18080}"
-URL="http://127.0.0.1:$PORT"
-AUTH="admin:verify"
+JENKINS_URL="http://127.0.0.1:$PORT"
+JENKINS_AUTH="admin:verify"
+source "$HARNESS_DIR/lib/jenkins.sh"
 IMAGE="harness-jenkins:local"
 CTR=harness-jenkins
 
@@ -18,9 +21,9 @@ ensure_docker || exit 1
 
 teardown() {
   docker logs "$CTR" > "$RESULTS_DIR/logs/jenkins-controller.log" 2>&1
-  [ "${KEEP:-0}" = 1 ] && { log "KEEP=1: Jenkins left running at $URL ($AUTH)"; return; }
+  rm -f "$JENKINS_COOKIES"
+  [ "${KEEP:-0}" = 1 ] && { log "KEEP=1: Jenkins left running at $JENKINS_URL ($JENKINS_AUTH)"; return; }
   docker rm -f "$CTR" >/dev/null 2>&1
-  rm -f "${COOKIES:-}"
 }
 trap teardown EXIT
 
@@ -64,17 +67,6 @@ booted() {
 }
 step "Jenkins boots with jenkins.yaml applied" booted || finish_stage
 
-# POSTs to Jenkins need a CSRF crumb, tied to the session cookie it came with.
-COOKIES=$(mktemp)
-jenkins_post() {
-  local path=$1 crumb; shift
-  crumb=$(curl -sf -u "$AUTH" -c "$COOKIES" "$URL/crumbIssuer/api/json" | jq -r '.crumbRequestField + ":" + .crumb') || return 1
-  curl -sf -u "$AUTH" -b "$COOKIES" -H "$crumb" -X POST "$@" "$URL$path"
-}
-
-# Groovy run by Jenkins' script console, as admin.
-groovy() { jenkins_post /scriptText --data-urlencode "script=$1"; }
-
 jobs_exist() {
   local jobs; jobs=$(groovy 'println(jenkins.model.Jenkins.instance.allItems*.fullName.join(" "))')
   echo "jobs: $jobs"
@@ -117,5 +109,28 @@ validate_jenkinsfile() {
   grep -q "Jenkinsfile successfully validated" <<<"$out"
 }
 step "Jenkinsfile passes Jenkins' declarative validation" validate_jenkinsfile
+
+# The agent image every stage runs in (the cicd container of the pod template).
+AGENT_IMAGE="harness-agent:local"
+for img in $(awk '/^FROM/{print $2}' "$REPO_ROOT/docker/jenkins-agent/Dockerfile"); do
+  step "pull $img" pull_official "$img"
+done
+step "build docker/jenkins-agent/Dockerfile" \
+  docker_build "$REPO_ROOT/docker/jenkins-agent/Dockerfile" "$REPO_ROOT/docker/jenkins-agent" -t "$AGENT_IMAGE" || finish_stage
+
+# Every command the Jenkinsfile and the scripts it runs call on the agent.
+AGENT_COMMANDS="git curl node npm npx sonar-scanner dependency-check.sh gitleaks kubectl kustomize
+  kubeconform docker trivy syft cosign grype k6 gh"
+agent_has_commands() {
+  docker run --rm --entrypoint bash "$AGENT_IMAGE" -c '
+    missing=0
+    for c in '"$(echo $AGENT_COMMANDS)"'; do
+      if command -v "$c" >/dev/null; then echo "ok      $c"; else echo "MISSING $c"; missing=1; fi
+    done
+    # The Docker Build & Push stage runs docker buildx.
+    if docker buildx version >/dev/null 2>&1; then echo "ok      docker buildx"; else echo "MISSING docker buildx"; missing=1; fi
+    exit $missing'
+}
+step "agent image has every command the pipeline calls" agent_has_commands
 
 finish_stage

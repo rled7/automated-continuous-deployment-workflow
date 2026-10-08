@@ -16,7 +16,7 @@ source "$(dirname "$0")/lib/common.sh"
 # later stages looking for a tag the image stage never built.
 export DEPLOY_IMAGE
 
-DEFAULT_STAGES=(static app image pod cluster-sim terraform)
+DEFAULT_STAGES=(static app image pod cluster-sim terraform jenkins)
 # Opt-in: needs a host where kind can run (your machine, GitHub Actions).
 OPTIONAL_STAGES=(cluster-real cluster-prod)
 
@@ -27,6 +27,7 @@ describe() {
     image)        echo "Build the production Docker image" ;;
     pod)          echo "Run the staging Deployment with podman kube play + Postgres/Redis; migrations, probes, smoke tests" ;;
     cluster-sim)  echo "Apply every overlay to a KWOK simulated cluster (real API server, fake nodes)" ;;
+    jenkins)      echo "Boot Jenkins from docker/jenkins with jenkins.yaml; credentials, agent labels and declarative validation of the Jenkinsfile" ;;
     terraform)    echo "fmt/validate/test/apply/drift/destroy each Terraform dir against Floci (local AWS)" ;;
     cluster-real) echo "Deploy staging to a real kind cluster and run smoke tests" ;;
     cluster-prod) echo "Production path on kind + Argo Rollouts: deploy, stray Deployment cleanup, failed canary, rollback" ;;

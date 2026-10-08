@@ -41,6 +41,28 @@ for dir in "$REPO_ROOT"/k8s/overlays/*/; do
   # Secrets are SealedSecrets in real clusters; use the test stand-in.
   kubectl -n "$ns" apply -f "$HARNESS_DIR/fixtures/app-secret.yaml" >/dev/null
 
+  # The API server's Pod Security admission (the namespaces enforce
+  # "restricted") only sees pods, which KWOK never gets from CRDs like the
+  # Rollout. Submit each workload's pod template, and the migration pod, as a
+  # Pod in a server-side dry run so admission judges them as it would for real.
+  pods="$RESULTS_DIR/rendered/$overlay-template-pods.yaml"
+  python3 - "$rendered" > "$pods" <<'PY'
+import sys, yaml
+out = []
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if d and d["kind"] in ("Deployment", "StatefulSet", "DaemonSet", "Rollout"):
+        t = d["spec"]["template"]
+        out.append({"apiVersion": "v1", "kind": "Pod",
+                    "metadata": {"name": f'{d["kind"].lower()}-{d["metadata"]["name"]}-template',
+                                 "namespace": d["metadata"]["namespace"],
+                                 "labels": t["metadata"].get("labels", {})},
+                    "spec": t["spec"]})
+print(yaml.safe_dump_all(out, sort_keys=False))
+PY
+  step "$overlay workload pods pass Pod Security admission" kubectl apply --dry-run=server -f "$pods"
+  migrate_pod_dry_run() { migrate_pod_yaml "$ns" "$DEPLOY_IMAGE" my-app-migrate-verify | kubectl apply --dry-run=server -f -; }
+  step "$overlay migration pod passes Pod Security admission" migrate_pod_dry_run
+
   for d in $(kubectl -n "$ns" get deploy -o name); do
     step "$overlay $d rolled out" kubectl -n "$ns" rollout status "$d" --timeout=90s
   done

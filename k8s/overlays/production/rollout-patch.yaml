@@ -13,6 +13,13 @@ spec:
         app: my-app
     spec:
       terminationGracePeriodSeconds: 60
+      # Same pod-level settings as k8s/base/deployment.yaml. The production
+      # namespace enforces Pod Security "restricted", which rejects any pod
+      # without a seccompProfile, so without this the Rollout creates no pods.
+      serviceAccountName: my-app
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       imagePullSecrets:
         - name: registry-credentials
       containers:

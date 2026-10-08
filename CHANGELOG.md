@@ -9,7 +9,7 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 > - Phase D: cluster security (Build 016) — done
 > - Phase E: app data layer (Build 017) — done
 > - Phase F: operations (Build 018) — done
-> - **Phase G: verification (Builds 023–025) — in progress.** The local harness exercised the pipeline end to end for the first time and found 16 defects in phases C–F that blocked deploys, testing, rollback or Jenkins itself, plus 3 in its own changes; all are fixed in Builds 023–025. Remaining:
+> - **Phase G: verification (Builds 023–025) — in progress.** The local harness exercised the pipeline end to end for the first time and found 18 defects in phases C–F that blocked deploys, testing, rollback or Jenkins itself, plus 3 in its own changes; all are fixed in Builds 023–025. Remaining:
 >   - [x] Harness for manifests, app, image, pod, simulated cluster, Terraform (Build 023)
 >   - [x] Staging deploy on a real cluster in CI (Build 023)
 >   - [x] Production Rollout path on a real cluster: deploy, failed canary, rollback (`cluster-prod`, Build 024; passing in CI)

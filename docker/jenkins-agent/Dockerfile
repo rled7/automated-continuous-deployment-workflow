@@ -11,7 +11,13 @@
 # Use:      Update docker/jenkins/jenkins.yaml `clouds.kubernetes.templates`
 #           to reference the pushed tag.
 # ─────────────────────────────────────────────────────────────────────────────
-FROM jenkins/inbound-agent:latest-jdk17
+# Trivy's GitHub release tarballs are gone (404 for v0.58.x and later), so its
+# binary comes from the official image, pinned to the same version.
+FROM aquasec/trivy:0.58.1 AS trivy
+
+# The Debian release is pinned: package names differ between releases (on
+# trixie docker.io is only the daemon; the CLI is docker-cli).
+FROM jenkins/inbound-agent:latest-trixie-jdk17
 
 USER root
 
@@ -23,16 +29,16 @@ ENV NODE_VERSION=20.18.1 \
     GITLEAKS_VERSION=8.21.4 \
     SYFT_VERSION=v1.18.1 \
     COSIGN_VERSION=v2.4.1 \
-    TRIVY_VERSION=v0.58.1 \
     GRYPE_VERSION=v0.85.0 \
     DEPENDENCY_CHECK_VERSION=11.1.1 \
     K6_VERSION=v0.55.0 \
-    GH_VERSION=2.63.2
+    GH_VERSION=2.63.2 \
+    SONAR_SCANNER_VERSION=6.2.1.4610
 
 # ── Base packages ────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates jq git unzip xz-utils gnupg \
-        docker.io \
+        docker-cli docker-buildx \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Node.js + npm (matches JCasC tool version, no separate install needed) ──
@@ -66,8 +72,7 @@ RUN curl -fsSLo /usr/local/bin/cosign \
     && chmod +x /usr/local/bin/cosign
 
 # ── trivy (image vuln scan) ──────────────────────────────────────────────────
-RUN curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION#v}_Linux-64bit.tar.gz" \
-        | tar -xzf - -C /usr/local/bin trivy
+COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 
 # ── grype (SBOM vulnerability scanner) ──────────────────────────────────────
 # Build 019: grype scans CycloneDX / SPDX SBOMs for known CVEs using the
@@ -87,12 +92,22 @@ RUN curl -fsSLo /tmp/dc.zip \
 RUN curl -fsSL "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz" \
         | tar -xzf - --strip-components=1 -C /usr/local/bin "k6-${K6_VERSION}-linux-amd64/k6"
 
+# ── SonarScanner CLI (SonarQube Analysis stage; bundles its own JRE) ─────────
+RUN curl -fsSLo /tmp/sonar.zip \
+        "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip" \
+    && unzip -q /tmp/sonar.zip -d /opt \
+    && ln -s "/opt/sonar-scanner-${SONAR_SCANNER_VERSION}-linux-x64/bin/sonar-scanner" /usr/local/bin/sonar-scanner \
+    && rm /tmp/sonar.zip
+
 # ── GitHub CLI (used by Release stage) ───────────────────────────────────────
 RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
         | tar -xzf - --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_amd64/bin/gh"
 
 # ── Sanity check (fails the build if any tool is missing from PATH) ─────────
 RUN node --version \
+    && docker --version \
+    && docker buildx version \
+    && sonar-scanner --version \
     && npm --version \
     && kubectl version --client \
     && kustomize version \

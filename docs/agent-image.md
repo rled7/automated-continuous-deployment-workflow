@@ -9,6 +9,9 @@ This directory builds a custom agent image that bundles every required CLI, and 
 | Tool | Used by Jenkinsfile stage |
 |---|---|
 | `node`, `npm` | Build, Test, Lint |
+| `docker` + `buildx` (CLI only) | Docker Build & Push, Release |
+| `sonar-scanner` | Code Quality & Security → SonarQube Analysis |
+| `grype` | Scan SBOM |
 | `kubectl` | Validate Manifests, Deploy → Staging, Deploy → Production, Deploy → PR Preview |
 | `kustomize` | Validate Manifests, Deploy stages |
 | `kubeconform` | Validate Manifests |
@@ -20,7 +23,11 @@ This directory builds a custom agent image that bundles every required CLI, and 
 | `k6` | Performance Tests |
 | `gh` | Release |
 
-Tool versions are pinned via `ENV` lines at the top of `Dockerfile`. Bump them in their own commits so Renovate / Dependabot can track them.
+Tool versions are pinned via `ENV` lines at the top of `Dockerfile`. Bump them in their own commits so Renovate / Dependabot can track them. Trivy is the exception: its GitHub release tarballs are no longer downloadable, so the binary is copied from the official `aquasec/trivy` image, pinned in the `FROM ... AS trivy` line.
+
+The base image is pinned to a Debian release (`latest-trixie-jdk17`), because package names change between releases: on trixie `docker.io` is only the daemon and the CLI is `docker-cli`.
+
+`harness/verify.sh jenkins` builds this image and checks it has every command the pipeline calls.
 
 ## Build
 

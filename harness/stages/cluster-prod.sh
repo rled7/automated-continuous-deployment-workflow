@@ -72,6 +72,8 @@ d["spec"]["replicas"] = 1
 print(yaml.safe_dump(d))
 PY
 }
+# Its ServiceAccount comes from the overlay, which a pre-fix cluster already has.
+apply_kinds "$rendered" ServiceAccount >/dev/null
 step "pre-fix state: stray Deployment running" stray_deployment
 
 # 2. deployToKubernetes('production', image).

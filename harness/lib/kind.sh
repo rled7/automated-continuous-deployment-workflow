@@ -41,9 +41,12 @@ cm = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] ==
 print(urlparse(cm["data"]["REDIS_URL"]).hostname)
 PY
 )
+  # The files are joined with a document separator: without one the last Pod
+  # in deps.yaml and the first Service merge into a single document.
   step "start Postgres + Redis ($redis_host)" bash -c '
-    cat "$1/deps.yaml" "$1/deps-services.yaml" | sed "s/redis-staging/$3/g" |
+    { cat "$1/deps.yaml"; echo "---"; cat "$1/deps-services.yaml"; } | sed "s/redis-staging/$3/g" |
       kubectl -n "$2" apply -f - -f "$1/deps-netpol.yaml"' _ "$HARNESS_DIR/fixtures" "$ns" "$redis_host" || return 1
+  step "Redis ready" kubectl -n "$ns" wait --for=condition=Ready "pod/$redis_host" --timeout=120s || return 1
   # Secrets are SealedSecrets in real clusters; use the test stand-in.
   kubectl -n "$ns" apply -f "$HARNESS_DIR/fixtures/app-secret.yaml" >/dev/null
   step "Postgres ready" kubectl -n "$ns" wait --for=condition=Ready pod/app-db --timeout=180s

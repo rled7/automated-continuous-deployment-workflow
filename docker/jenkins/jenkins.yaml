@@ -85,10 +85,17 @@ jenkins:
                       path: /var/run/docker.sock
                       type: Socket
 
+# Every credential the Jenkinsfile and the jobs below use, filled from the
+# environment (.env, passed in by docker/docker-compose.yml). A credential the
+# pipeline asks for but that is missing here fails the build at that step.
 credentials:
   system:
     domainCredentials:
       - credentials:
+          - string:
+              id: "docker-registry-url"
+              secret: "${DOCKER_REGISTRY}"
+              description: "Docker registry host (Jenkinsfile environment block)"
           - usernamePassword:
               id: "docker-registry-credentials"
               username: "${DOCKER_USER}"
@@ -105,6 +112,13 @@ credentials:
               fileName: "kubeconfig"
               secretBytes: "${readFileBase64:/run/secrets/kubeconfig}"
               description: "Kubernetes Config"
+          # Username + personal access token: the GitHub branch source of the
+          # my-app job needs this type, and the Release stage reads the token.
+          - usernamePassword:
+              id: "github-credentials"
+              username: "${GITHUB_USER}"
+              password: "${GITHUB_TOKEN}"
+              description: "GitHub PAT"
           - string:
               id: "slack-token"
               secret: "${SLACK_TOKEN}"

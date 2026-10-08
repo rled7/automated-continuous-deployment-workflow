@@ -87,15 +87,18 @@ Opens:
 
 ### 3. Configure Jenkins
 
-Jenkins auto-configures itself via `jenkins/jenkins.yaml` (JCasC). Add these credentials manually in **Manage Jenkins → Credentials**:
+Jenkins is built with the plugins in `docker/jenkins/plugins.txt` and configures itself from `docker/jenkins/jenkins.yaml` (JCasC). The credentials below are created from your `.env` at startup — no manual setup:
 
-| ID | Type | Description |
+| ID | Type | From `.env` |
 |----|------|-------------|
-| `docker-registry-credentials` | Username/Password | Docker registry |
-| `kubeconfig` | Secret file | Kubernetes config |
-| `sonarqube-token` | Secret text | SonarQube token |
-| `slack-token` | Secret text | Slack bot token |
-| `github-credentials` | Username/Password | GitHub PAT |
+| `docker-registry-url` | Secret text | `DOCKER_REGISTRY` |
+| `docker-registry-credentials` | Username/Password | `DOCKER_USER`, `DOCKER_PASSWORD` |
+| `kubeconfig` | Secret file | the file at `KUBECONFIG` |
+| `sonarqube-token` | Secret text | `SONAR_TOKEN` |
+| `slack-token` | Secret text | `SLACK_TOKEN` |
+| `github-credentials` | Username/Password | `GITHUB_USER`, `GITHUB_TOKEN` |
+
+After changing `.env` or `plugins.txt`, recreate Jenkins: `docker compose up -d --build jenkins`.
 
 ### 4. Set Up Kubernetes (Production)
 

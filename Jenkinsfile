@@ -615,7 +615,9 @@ EOF
                 // Create a GitHub Release via gh CLI.
                 // gh requires a GitHub token; wrap in withCredentials so the
                 // token is available as GH_TOKEN without leaking into the log.
-                withCredentials([string(credentialsId: 'github-credentials', variable: 'GH_TOKEN')]) {
+                // github-credentials is a username + PAT (the branch source
+                // needs that type), so read the token as its password.
+                withCredentials([usernamePassword(credentialsId: 'github-credentials', usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
                     sh '''
                         gh release create ${TAG_NAME} \
                           --title "Release ${TAG_NAME}" \

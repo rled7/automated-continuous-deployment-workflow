@@ -1,0 +1,67 @@
+name: verify
+
+# Runs the local verification harness (harness/verify.sh), including the
+# cluster-real and cluster-prod stages, which need a host where kind works.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      stages:
+        description: "Stages to run (space-separated; empty = all)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Harness prerequisites
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || pip install --user pyyaml
+          podman --version
+
+      - name: Run harness
+        env:
+          STAGES: ${{ inputs.stages || 'static app image pod cluster-sim terraform cluster-real cluster-prod' }}
+        run: harness/verify.sh $STAGES
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '| Stage | Result | Time | Failed steps |'
+            echo '|---|---|---|---|'
+            jq -r '.stages[] | "| \(.stage) | \(.status) | \(.seconds)s | \([.steps[] | select(.status=="fail") | .name] | join(", ")) |"' \
+              harness/.results/results.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logs of failed stages
+        if: failure()
+        run: |
+          for stage in $(jq -r '.stages[] | select(.status=="fail") | .stage' harness/.results/results.json); do
+            echo "::group::$stage"
+            cat "harness/.results/logs/$stage.log"
+            echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: harness-results
+          path: harness/.results/
+          include-hidden-files: true  # .results is a dot-directory
+          retention-days: 14

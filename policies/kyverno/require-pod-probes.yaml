@@ -88,29 +88,20 @@ spec:
           readinessProbe. Without readinessProbe, Kubernetes routes traffic to
           pods before they are ready. Without livenessProbe, deadlocked processes
           are never restarted. Add both probes to spec.template.spec.containers[].
-        pattern:
-          spec:
-            template:
-              spec:
-                containers:
-                  - livenessProbe:
-                      ?(httpGet):
-                        path: "?*"
-                        port: "?*"
-                      ?(tcpSocket):
-                        port: "?*"
-                      ?(exec):
-                        command:
-                          - "?*"
-                    readinessProbe:
-                      ?(httpGet):
-                        path: "?*"
-                        port: "?*"
-                      ?(tcpSocket):
-                        port: "?*"
-                      ?(exec):
-                        command:
-                          - "?*"
+        # Every container must have both probe keys; the probe type (httpGet,
+        # tcpSocket, exec, grpc) is up to the workload. Kyverno's pattern
+        # anchors can't express "one of", so check the keys directly.
+        foreach:
+          - list: request.object.spec.template.spec.containers
+            deny:
+              conditions:
+                any:
+                  - key: livenessProbe
+                    operator: AnyNotIn
+                    value: "{{ element.keys(@) }}"
+                  - key: readinessProbe
+                    operator: AnyNotIn
+                    value: "{{ element.keys(@) }}"
 
     - name: require-rollout-probes
       match:
@@ -127,29 +118,20 @@ spec:
           readinessProbe. Without readinessProbe, Kubernetes routes traffic to
           pods before they are ready. Without livenessProbe, deadlocked processes
           are never restarted. Add both probes to spec.template.spec.containers[].
-        pattern:
-          spec:
-            template:
-              spec:
-                containers:
-                  - livenessProbe:
-                      ?(httpGet):
-                        path: "?*"
-                        port: "?*"
-                      ?(tcpSocket):
-                        port: "?*"
-                      ?(exec):
-                        command:
-                          - "?*"
-                    readinessProbe:
-                      ?(httpGet):
-                        path: "?*"
-                        port: "?*"
-                      ?(tcpSocket):
-                        port: "?*"
-                      ?(exec):
-                        command:
-                          - "?*"
+        # Every container must have both probe keys; the probe type (httpGet,
+        # tcpSocket, exec, grpc) is up to the workload. Kyverno's pattern
+        # anchors can't express "one of", so check the keys directly.
+        foreach:
+          - list: request.object.spec.template.spec.containers
+            deny:
+              conditions:
+                any:
+                  - key: livenessProbe
+                    operator: AnyNotIn
+                    value: "{{ element.keys(@) }}"
+                  - key: readinessProbe
+                    operator: AnyNotIn
+                    value: "{{ element.keys(@) }}"
 
     - name: require-statefulset-probes
       match:
@@ -164,29 +146,20 @@ spec:
         message: >-
           Every container in a StatefulSet must define both livenessProbe and
           readinessProbe. Add both probes to spec.template.spec.containers[].
-        pattern:
-          spec:
-            template:
-              spec:
-                containers:
-                  - livenessProbe:
-                      ?(httpGet):
-                        path: "?*"
-                        port: "?*"
-                      ?(tcpSocket):
-                        port: "?*"
-                      ?(exec):
-                        command:
-                          - "?*"
-                    readinessProbe:
-                      ?(httpGet):
-                        path: "?*"
-                        port: "?*"
-                      ?(tcpSocket):
-                        port: "?*"
-                      ?(exec):
-                        command:
-                          - "?*"
+        # Every container must have both probe keys; the probe type (httpGet,
+        # tcpSocket, exec, grpc) is up to the workload. Kyverno's pattern
+        # anchors can't express "one of", so check the keys directly.
+        foreach:
+          - list: request.object.spec.template.spec.containers
+            deny:
+              conditions:
+                any:
+                  - key: livenessProbe
+                    operator: AnyNotIn
+                    value: "{{ element.keys(@) }}"
+                  - key: readinessProbe
+                    operator: AnyNotIn
+                    value: "{{ element.keys(@) }}"
 
     - name: require-daemonset-probes
       match:
@@ -201,26 +174,17 @@ spec:
         message: >-
           Every container in a DaemonSet must define both livenessProbe and
           readinessProbe. Add both probes to spec.template.spec.containers[].
-        pattern:
-          spec:
-            template:
-              spec:
-                containers:
-                  - livenessProbe:
-                      ?(httpGet):
-                        path: "?*"
-                        port: "?*"
-                      ?(tcpSocket):
-                        port: "?*"
-                      ?(exec):
-                        command:
-                          - "?*"
-                    readinessProbe:
-                      ?(httpGet):
-                        path: "?*"
-                        port: "?*"
-                      ?(tcpSocket):
-                        port: "?*"
-                      ?(exec):
-                        command:
-                          - "?*"
+        # Every container must have both probe keys; the probe type (httpGet,
+        # tcpSocket, exec, grpc) is up to the workload. Kyverno's pattern
+        # anchors can't express "one of", so check the keys directly.
+        foreach:
+          - list: request.object.spec.template.spec.containers
+            deny:
+              conditions:
+                any:
+                  - key: livenessProbe
+                    operator: AnyNotIn
+                    value: "{{ element.keys(@) }}"
+                  - key: readinessProbe
+                    operator: AnyNotIn
+                    value: "{{ element.keys(@) }}"

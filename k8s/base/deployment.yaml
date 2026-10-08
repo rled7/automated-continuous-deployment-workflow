@@ -46,10 +46,22 @@ spec:
                 name: my-app-secrets
           # Build 017: explicit env entries for DB connection vars so they appear
           # in container inspect and are cross-referenceable by other tooling.
-          # DB_HOST and DB_PASSWORD come from the SealedSecret (secretRef above).
+          # DB_HOST and DB_PASSWORD come from the SealedSecret, whose keys are
+          # db-host / db-password (see k8s/secrets/): envFrom would expose them
+          # under those names, which the app never reads, so map them here.
           # DB_PORT, DB_USER, DB_NAME come from the ConfigMap (configMapRef above);
           # these explicit entries make the intent clear and allow per-overlay override.
           env:
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: my-app-secrets
+                  key: db-host
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: my-app-secrets
+                  key: db-password
             - name: DB_PORT
               valueFrom:
                 configMapKeyRef:

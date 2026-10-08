@@ -5,10 +5,16 @@ metadata:
 spec:
   metrics:
     - name: success-rate
-      # Run the analysis every 30 s; require 3 consecutive successes before promoting
+      # Measure every 30 s, 3 times; every measurement must pass before the
+      # canary moves on. Argo rejects the whole Rollout (InvalidSpec) if an
+      # analysis step in a canary has no count, since it would never finish.
       interval: 30s
+      count: 3
       successCondition: result[0] >= 0.99
-      failureLimit: 3
+      failureLimit: 0
+      # Two failed queries in a row (Prometheus unreachable, bad query) fail the
+      # analysis too, so a canary is never promoted without its metrics.
+      consecutiveErrorLimit: 1
       provider:
         prometheus:
           address: http://prometheus-operated.monitoring.svc.cluster.local:9090

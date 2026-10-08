@@ -519,7 +519,7 @@ EOF
                 script {
                     // Save current image for potential rollback
                     env.PREVIOUS_IMAGE = sh(
-                        script: "kubectl get deployment ${APP_NAME} -n production -o jsonpath='{.spec.template.spec.containers[0].image}' || echo 'none'",
+                        script: "kubectl get ${workloadRef('production')} -n production -o jsonpath='{.spec.template.spec.containers[0].image}' || echo 'none'",
                         returnStdout: true
                     ).trim()
 
@@ -654,38 +654,89 @@ EOF
 
 // ─── SHARED FUNCTIONS ─────────────────────────────────────────────────────────
 
+// Production runs an Argo Rollout (k8s/overlays/production replaces the base
+// Deployment with it); every other namespace runs the plain Deployment.
+def workloadRef(String namespace) {
+    return namespace == 'production' ? "rollout/${APP_NAME}" : "deployment/${APP_NAME}"
+}
+
+// Shell snippet that blocks until the namespace's workload has rolled out.
+// Rollouts take longer than the 5 min Deployment budget: the canary steps
+// alone pause 4 min plus two analysis runs.
+def waitForWorkload(String namespace) {
+    if (namespace == 'production') {
+        return "scripts/wait-for-rollout.sh ${namespace} ${APP_NAME} 900"
+    }
+    return "kubectl rollout status deployment/${APP_NAME} --namespace=${namespace} --timeout=300s"
+}
+
+// The tag part of an image reference (registry:5000/my-app:42-abc1234 →
+// 42-abc1234), used as the pod template's version label.
+def imageTag(String image) {
+    return image.substring(image.lastIndexOf(':') + 1)
+}
+
 def deployToKubernetes(String namespace, String image) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
         sh """
             export KUBECONFIG=\${KUBECONFIG}
 
             # Set the image in the Kustomize overlay and apply
-            cd k8s/overlays/${namespace}
-            kustomize edit set image my-app=${image}
-            kubectl apply -k . --namespace=${namespace}
+            (
+              cd k8s/overlays/${namespace}
+              kustomize edit set image my-app=${image}
+              # require-labels (Kyverno) needs a version label on the pod template
+              kustomize edit add label version:${imageTag(image)} --without-selector --include-templates
+              kubectl apply -k . --namespace=${namespace}
+            )
 
-            # Wait for rollout to complete (timeout 5 min)
-            kubectl rollout status deployment/${APP_NAME} \
-              --namespace=${namespace} \
-              --timeout=300s
+            ${waitForWorkload(namespace)}
 
             echo "✅ Deployed to ${namespace}"
         """
+        if (namespace == 'production') {
+            // Earlier versions of the production overlay failed to delete the
+            // base Deployment, so clusters deployed before the fix run it next
+            // to the Rollout. `kubectl apply` never prunes it; remove it once
+            // the Rollout is healthy and serving.
+            sh """
+                export KUBECONFIG=\${KUBECONFIG}
+                kubectl delete deployment/${APP_NAME} --namespace=${namespace} --ignore-not-found
+            """
+        }
     }
 }
 
 def rollback(String namespace, String previousImage) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-        sh """
-            export KUBECONFIG=\${KUBECONFIG}
-            kubectl set image deployment/${APP_NAME} \
-              ${APP_NAME}=${previousImage} \
-              --namespace=${namespace}
-            kubectl rollout status deployment/${APP_NAME} \
-              --namespace=${namespace} \
-              --timeout=180s
-            echo "🔁 Rollback complete → ${previousImage}"
-        """
+        if (namespace == 'production') {
+            // `kubectl set image` only supports built-in workloads, so patch the
+            // Rollout's pod template back to the previous release: its image and
+            // the version label deployToKubernetes() derived from it. With both
+            // restored the template matches the stable ReplicaSet, so Argo
+            // Rollouts switches straight back instead of running the canary
+            // steps again.
+            sh """
+                export KUBECONFIG=\${KUBECONFIG}
+                kubectl patch rollout/${APP_NAME} --namespace=${namespace} --type=json -p '[
+                  {"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": "${previousImage}"},
+                  {"op": "replace", "path": "/spec/template/metadata/labels/version", "value": "${imageTag(previousImage)}"}
+                ]'
+                ${waitForWorkload(namespace)}
+                echo "🔁 Rollback complete → ${previousImage}"
+            """
+        } else {
+            sh """
+                export KUBECONFIG=\${KUBECONFIG}
+                kubectl set image deployment/${APP_NAME} \
+                  ${APP_NAME}=${previousImage} \
+                  --namespace=${namespace}
+                kubectl rollout status deployment/${APP_NAME} \
+                  --namespace=${namespace} \
+                  --timeout=180s
+                echo "🔁 Rollback complete → ${previousImage}"
+            """
+        }
     }
 }
 
@@ -726,9 +777,13 @@ def getEnvironment() {
 // Design notes:
 //   - Uses `kubectl run --rm --attach` (not a Job manifest) for simplicity;
 //     the pod is deleted automatically after completion.
-//   - The app image already contains knex + knexfile.js (copied by Dockerfile).
-//   - serviceaccount=my-app must have `get/list/watch pods` if you use --attach;
-//     in practice `kubectl run --rm` needs the same RBAC as kubectl run.
+//   - The app image contains knex, knexfile.js and migrations/ (Dockerfile).
+//   - The pod spec lives in k8s/migrations/migrate-pod-overrides.json: it gets
+//     the same ConfigMap and DB secret as the app and satisfies the Kyverno Pod
+//     policies. kubectl >= 1.24 has no --serviceaccount flag, and a bare
+//     `kubectl run` pod has no DB settings at all. See k8s/migrations/README.md.
+//   - The jenkins credentials in KUBECONFIG need create/get/delete on pods and
+//     pods/attach in the target namespace.
 //   - Expand-contract pattern assumed: migrations are additive (new columns
 //     nullable or with defaults, no DROP/RENAME) so old pods keep running
 //     during the deployment rollout window.  Destructive cleanup migrations
@@ -739,12 +794,14 @@ def runMigrations(String namespace, String image) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
         sh """
             export KUBECONFIG=\${KUBECONFIG}
-            kubectl run my-app-migrate-${BUILD_NUMBER} \
+            POD=my-app-migrate-${BUILD_NUMBER}
+            OVERRIDES=\$(sed -e "s|__NAME__|\$POD|" -e "s|__IMAGE__|${image}|" k8s/migrations/migrate-pod-overrides.json)
+            kubectl run \$POD \
               --namespace=${namespace} \
               --image=${image} \
+              --labels=app=my-app-migrate \
               --rm --restart=Never --attach=true \
-              --serviceaccount=my-app \
-              -- node node_modules/.bin/knex migrate:latest --knexfile=knexfile.js
+              --overrides="\$OVERRIDES"
         """
     }
 }

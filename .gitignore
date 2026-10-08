@@ -22,5 +22,7 @@ reports/
 .vscode/
 .idea/
 
-# Claude Code worktrees / agent state
-.claude/
+# Claude Code worktrees / agent state — except the shared settings and hooks
+.claude/*
+!.claude/settings.json
+!.claude/hooks/

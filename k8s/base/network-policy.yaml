@@ -135,3 +135,27 @@ spec:
       ports:
         - protocol: TCP
           port: 6379
+
+---
+# Egress for the one-off migration pod started by runMigrations() in the
+# Jenkinsfile (k8s/migrations/). It is labelled app=my-app-migrate rather than
+# app=my-app so the Service never routes traffic to it, so it needs its own
+# allowance to reach Postgres.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-migrate-egress-db
+spec:
+  podSelector:
+    matchLabels:
+      app: my-app-migrate
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: app-db
+      ports:
+        - protocol: TCP
+          port: 5432

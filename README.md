@@ -44,15 +44,21 @@ jenkins-cicd/
 │   ├── jenkins.yaml             # Jenkins Configuration as Code (JCasC)
 │   └── plugins.txt              # Required Jenkins plugins
 ├── k8s/
-│   ├── production/deployment.yaml   # HPA, PDB, rolling update, ingress
-│   └── staging/deployment.yaml
+│   ├── base/                    # Deployment, Service, HPA, PDB, NetworkPolicies, quota
+│   ├── overlays/staging/        # Staging: Deployment
+│   ├── overlays/production/     # Production: Argo Rollout (canary + analysis)
+│   └── migrations/              # Pod spec runMigrations() uses
 ├── monitoring/
 │   └── prometheus.yaml          # Prometheus scrape + alert rules
 ├── tests/
 │   ├── performance/load-test.js # k6 load test (ramp → spike → ramp down)
 │   └── smoke/smoke.test.js      # Post-deploy smoke tests
-└── scripts/
-    └── setup.sh                 # Bootstrap script
+├── scripts/
+│   ├── setup.sh                 # Bootstrap script
+│   └── wait-for-rollout.sh      # Waits for the production Rollout (no plugin needed)
+├── harness/                     # Local verification harness (see below)
+├── .github/workflows/verify.yml # Runs the harness on every PR
+└── .claude/hooks/               # Sets up Claude Code cloud sessions to run the harness
 ```
 
 ---
@@ -110,6 +116,28 @@ git push origin main      # → triggers production deploy (with approval gate)
 
 ---
 
+## Verify Changes Locally
+
+`harness/verify.sh` checks a change the way you would by hand, without a
+cloud account or a long-lived cluster, and writes machine-readable results
+(`harness/.results/results.json`) that agents can act on:
+
+```bash
+harness/verify.sh --list                      # what each stage checks
+harness/verify.sh                             # static, app, image, pod, cluster-sim, terraform
+harness/verify.sh cluster-real cluster-prod   # real kind clusters (your machine or CI)
+```
+
+It covers the rendered manifests and the repo's Kyverno and Pod Security
+rules, the app's lint and tests, the Docker image, the app running as its
+staging pod next to Postgres/Redis, every overlay on a simulated cluster,
+Terraform against a local AWS emulator, and the Jenkinsfile's staging and
+production deploy paths (including a failed canary and the automatic
+rollback) on real kind clusters. The `verify` GitHub workflow runs all of it
+on every pull request. Details: [`harness/README.md`](harness/README.md).
+
+---
+
 ## Pipeline Stages
 
 | Stage | What it does | Fails pipeline? |
@@ -137,7 +165,8 @@ git push origin main      # → triggers production deploy (with approval gate)
 - **HPA** — Auto-scales from 3 → 20 pods based on CPU/memory
 - **Pod Disruption Budget** — Guarantees ≥2 pods available during node maintenance
 - **Graceful shutdown** — SIGTERM handler closes connections cleanly in 55s
-- **Automatic rollback** — If production deploy fails, Jenkins reverts to previous image automatically
+- **Canary releases in production** — An Argo Rollout shifts traffic 25% → 50% → 100%, checking the success rate from Prometheus between steps
+- **Automatic rollback** — If production deploy fails, Jenkins reverts the Rollout to the previous image automatically
 - **Prometheus alerts** — Pages on-call if error rate, latency, or pod restarts spike
 
 ---
@@ -146,19 +175,20 @@ git push origin main      # → triggers production deploy (with approval gate)
 
 **Automatic** (triggered on pipeline failure):
 ```
-Jenkins detects deploy failure → kubectl set image → previous image → done
+Production: Jenkins detects deploy failure → patches the Rollout's image and version label
+            back to the previous release → Argo switches back to the stable ReplicaSet
+Staging:    Jenkins detects deploy failure → kubectl set image → previous image
 ```
 
 **Manual** (any time):
 ```bash
-# Roll back to previous revision
-kubectl rollout undo deployment/my-app --namespace=production
+# Production (Argo Rollout) — needs the kubectl-argo-rollouts plugin
+kubectl argo rollouts undo my-app --namespace=production
+kubectl argo rollouts get rollout my-app --namespace=production   # status and history
 
-# Roll back to specific revision
-kubectl rollout undo deployment/my-app --to-revision=3 --namespace=production
-
-# Check rollout history
-kubectl rollout history deployment/my-app --namespace=production
+# Staging (Deployment)
+kubectl rollout undo deployment/my-app --namespace=staging
+kubectl rollout history deployment/my-app --namespace=staging
 ```
 
 ---

@@ -13,6 +13,13 @@ spec:
         app: my-app
     spec:
       terminationGracePeriodSeconds: 60
+      # Same pod-level settings as k8s/base/deployment.yaml. The production
+      # namespace enforces Pod Security "restricted", which rejects any pod
+      # without a seccompProfile, so without this the Rollout creates no pods.
+      serviceAccountName: my-app
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       imagePullSecrets:
         - name: registry-credentials
       containers:
@@ -35,6 +42,18 @@ spec:
           env:
             - name: NODE_ENV
               value: production
+            # The SealedSecret keys are db-host / db-password; map them to the
+            # names the app reads (same as k8s/base/deployment.yaml).
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: my-app-secrets
+                  key: db-host
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: my-app-secrets
+                  key: db-password
           startupProbe:
             httpGet:
               path: /health/live

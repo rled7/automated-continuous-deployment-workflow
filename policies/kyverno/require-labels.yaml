@@ -4,9 +4,10 @@
 #
 # WHY THIS IS SAFE TO ENFORCE
 # ----------------------------
-# The production app Deployment carries all three required labels (app, env,
-# version) in spec.template.metadata.labels. Verified in k8s/base/deployment.yaml
-# and both overlays. Zero violations were reported in Audit mode during soak.
+# The app's pod templates carry all three required labels: app from
+# k8s/base, env from each overlay's `labels:` block, and version (the image tag)
+# added by deployToKubernetes() in the Jenkinsfile. `harness/verify.sh static`
+# checks the rendered overlays against this policy.
 #
 # IF THIS BREAKS A FUTURE WORKLOAD
 # ----------------------------------
@@ -57,12 +58,16 @@ spec:
         message: >-
           Deployments in production and staging must define labels: app, env,
           and version. Add these to spec.template.metadata.labels.
+        # The pod template, as the message says: these labels end up on the
+        # pods, where metrics and logs pick them up.
         pattern:
-          metadata:
-            labels:
-              app: "?*"
-              env: "?*"
-              version: "?*"
+          spec:
+            template:
+              metadata:
+                labels:
+                  app: "?*"
+                  env: "?*"
+                  version: "?*"
 
     - name: require-rollout-labels
       match:
@@ -77,9 +82,13 @@ spec:
         message: >-
           Argo Rollouts in production and staging must define labels: app, env,
           and version. Add these to spec.template.metadata.labels.
+        # The pod template, as the message says: these labels end up on the
+        # pods, where metrics and logs pick them up.
         pattern:
-          metadata:
-            labels:
-              app: "?*"
-              env: "?*"
-              version: "?*"
+          spec:
+            template:
+              metadata:
+                labels:
+                  app: "?*"
+                  env: "?*"
+                  version: "?*"

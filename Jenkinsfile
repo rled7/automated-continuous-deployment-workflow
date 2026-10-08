@@ -711,11 +711,17 @@ def rollback(String namespace, String previousImage) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
         if (namespace == 'production') {
             // `kubectl set image` only supports built-in workloads, so patch the
-            // Rollout's pod template; Argo Rollouts then rolls back to it.
+            // Rollout's pod template back to the previous release: its image and
+            // the version label deployToKubernetes() derived from it. With both
+            // restored the template matches the stable ReplicaSet, so Argo
+            // Rollouts switches straight back instead of running the canary
+            // steps again.
             sh """
                 export KUBECONFIG=\${KUBECONFIG}
-                kubectl patch rollout/${APP_NAME} --namespace=${namespace} --type=json \
-                  -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": "${previousImage}"}]'
+                kubectl patch rollout/${APP_NAME} --namespace=${namespace} --type=json -p '[
+                  {"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": "${previousImage}"},
+                  {"op": "replace", "path": "/spec/template/metadata/labels/version", "value": "${imageTag(previousImage)}"}
+                ]'
                 ${waitForWorkload(namespace)}
                 echo "🔁 Rollback complete → ${previousImage}"
             """

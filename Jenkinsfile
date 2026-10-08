@@ -267,12 +267,12 @@ pipeline {
         // Agent requirements for buildx multi-arch:
         //   - Docker daemon with the docker-container buildx driver (default on
         //     Docker ≥ 23 when BuildKit is enabled).
-        //   - binfmt_misc QEMU emulation for cross-arch builds. On kind clusters
-        //     this is available by default. On cloud VM agents without QEMU, run
-        //     once during agent bootstrap:
+        //   - binfmt_misc QEMU emulation for cross-arch builds, registered in
+        //     the node's kernel (the dind sidecar shares it). On nodes without
+        //     it, run once per node:
         //       docker run --privileged --rm tonistiigi/binfmt --install all
-        //   - The agent's docker socket must be accessible (already assumed by
-        //     earlier builds).
+        //   - A Docker daemon: the dind sidecar of the cicd-agent pod template
+        //     (docker/jenkins/jenkins.yaml), reached through DOCKER_HOST.
         stage('Docker Build & Push') {
             steps {
                 script {

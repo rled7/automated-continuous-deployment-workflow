@@ -14,8 +14,7 @@
 #     service account.
 #
 # Needs a host where kind works (your machine, GitHub Actions). KEEP=1 leaves
-# the cluster up, with Jenkins on localhost:18081 (admin / verify) while the
-# port-forward runs.
+# the cluster up, with Jenkins on localhost:18081 (admin / verify).
 source "$(dirname "$0")/../lib/common.sh"
 source "$HARNESS_DIR/lib/tools.sh"
 source "$HARNESS_DIR/lib/kind.sh"
@@ -37,10 +36,8 @@ source "$HARNESS_DIR/lib/jenkins.sh"
 need_tools kind kubectl || exit 1
 ensure_docker || exit 1
 
-pf_pid=""
 work=$(mktemp -d)
 teardown() {
-  [ -n "$pf_pid" ] && kill "$pf_pid" 2>/dev/null
   if [ "$STEP_FAILURES" -gt 0 ]; then
     log "agent pods and events in namespace jenkins:"
     kubectl -n jenkins get pods -o wide >&2 2>/dev/null
@@ -71,8 +68,20 @@ cluster_up() {
   export KUBECONFIG="${KIND_KUBECONFIG:-$work/kubeconfig}"
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
   docker rm -f kind-registry harness-git >/dev/null 2>&1
-  printf '%s\n' 'kind: Cluster' 'apiVersion: kind.x-k8s.io/v1alpha4' 'containerdConfigPatches:' '  - |-' \
-    '    [plugins."io.containerd.grpc.v1.cri".registry]' '      config_path = "/etc/containerd/certs.d"' > "$work/kind.yaml"
+  # Jenkins is reached through a NodePort mapped to this host (a
+  # port-forward stalls under load).
+  cat > "$work/kind.yaml" <<EOF
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - {containerPort: 30080, hostPort: ${JENKINS_URL##*:}, listenAddress: 127.0.0.1}
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+EOF
   kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE" --config "$work/kind.yaml" --wait 180s || return 1
   docker run -d --name kind-registry -p "127.0.0.1:${HOST_REGISTRY#*:}:5000" registry:2 >/dev/null &&
     docker network connect kind kind-registry || return 1
@@ -172,8 +181,19 @@ EOF
 }
 step "Jenkins starts in the cluster with jenkins.yaml" jenkins_up || finish_stage
 
-kubectl -n jenkins port-forward svc/jenkins "${JENKINS_URL##*:}:8080" >/dev/null 2>&1 & pf_pid=$!
-step "Jenkins reachable" wait_http "$JENKINS_URL/login" 60 || finish_stage
+jenkins_reachable() {
+  kubectl apply -f - >/dev/null <<EOF || return 1
+apiVersion: v1
+kind: Service
+metadata: {name: jenkins-harness, namespace: jenkins}
+spec:
+  type: NodePort
+  selector: {app: jenkins}
+  ports: [{port: 8080, targetPort: 8080, nodePort: 30080}]
+EOF
+  wait_http "$JENKINS_URL/login" 60
+}
+step "Jenkins reachable from this host" jenkins_reachable || finish_stage
 
 # ── The job: multibranch over the git server; builds only when asked ────────
 create_job() {

@@ -2,7 +2,7 @@
   "name": "jenkins-cicd-app",
   "version": "1.0.0",
   "scripts": {
-    "lint": "eslint src/**/*.js",
+    "lint": "eslint \"src/**/*.js\"",
     "build": "cp -r src dist",
     "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest",
     "test:unit": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --testPathPatterns=unit",

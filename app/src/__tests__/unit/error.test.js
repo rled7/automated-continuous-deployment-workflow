@@ -1,7 +1,7 @@
 import { describe, test, expect } from '@jest/globals';
 import express from 'express';
 import request from 'supertest';
-import { ZodError, z } from 'zod';
+import { z } from 'zod';
 
 import requestIdMiddleware from '../../middleware/requestId.js';
 import errorHandler from '../../middleware/error.js';

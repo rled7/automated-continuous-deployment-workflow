@@ -10,6 +10,8 @@
 #   - registry: a local registry (kind-registry:5000), for DOCKER_REGISTRY and
 #     the agent image the pod template names (ghcr.io/YOUR_ORG/...);
 #   - source: a git server in the cluster, instead of GitHub;
+#   - SonarQube: a fresh server in the cluster, with a token and the quality
+#     gate webhook;
 #   - secrets: placeholder values, plus a kubeconfig for an in-cluster
 #     service account.
 #
@@ -30,6 +32,10 @@ PIPELINE_TIMEOUT="${PIPELINE_TIMEOUT:-2700}"   # seconds for the whole build
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-300}"          # seconds for the first agent to connect
 
 JENKINS_URL="http://127.0.0.1:18081"
+SONAR_URL="http://127.0.0.1:19001"
+SONAR_IMAGE=sonarqube:10.7.0-community
+SONAR_PASSWORD="Harness-verify-1"   # SonarQube requires a complex one
+SONAR_TOKEN=""
 JENKINS_AUTH="admin:verify"
 source "$HARNESS_DIR/lib/jenkins.sh"
 
@@ -77,6 +83,7 @@ nodes:
   - role: control-plane
     extraPortMappings:
       - {containerPort: 30080, hostPort: ${JENKINS_URL##*:}, listenAddress: 127.0.0.1}
+      - {containerPort: 30090, hostPort: ${SONAR_URL##*:}, listenAddress: 127.0.0.1}
 containerdConfigPatches:
   - |-
     [plugins."io.containerd.grpc.v1.cri".registry]
@@ -118,12 +125,12 @@ PY
 }
 load_template_images() {
   local img
-  for img in $(template_images); do
+  for img in $(template_images) "$SONAR_IMAGE"; do
     pull_official "$img" && kind load docker-image "$img" --name "$CLUSTER" >/dev/null || { echo "could not load $img"; return 1; }
     echo "loaded $img"
   done
 }
-step "load the pod template's other images into the cluster" load_template_images || finish_stage
+step "load the pod template's other images and SonarQube into the cluster" load_template_images || finish_stage
 
 # ── Source: this working tree (committed or not) as $BRANCH and main ────────
 git_up() {
@@ -168,6 +175,38 @@ subsets:
 EOF
 }
 
+# ── SonarQube, the server jenkins.yaml names ────────────────────────────────
+# A token for the sonarqube-token credential, and the webhook through which
+# SonarQube reports the quality gate to Jenkins (waitForQualityGate).
+sonar_api() { local path=$1; shift; curl -sf --max-time 60 -u "admin:$SONAR_PASSWORD" -X POST "$@" "$SONAR_URL$path"; }
+sonar_up() {
+  kubectl create namespace jenkins --dry-run=client -o yaml | kubectl apply -f - >/dev/null &&
+    kubectl apply -f "$HARNESS_DIR/fixtures/sonarqube.yaml" >/dev/null || return 1
+  local deadline=$(( $(date +%s) + 600 )) status=""
+  until [ "$status" = UP ]; do
+    [ "$(date +%s)" -gt "$deadline" ] && { echo "SonarQube not UP after 10 minutes (last: ${status:-no answer})";
+      kubectl -n jenkins logs deploy/sonarqube --tail=30; return 1; }
+    sleep 5
+    status=$(curl -s --max-time 10 "$SONAR_URL/api/system/status" | jq -r '.status // empty' 2>/dev/null)
+    # The embedded Elasticsearch makes its indices read-only when the host
+    # disk is over 95% used (common on CI runners and sandboxes), and
+    # SonarQube then never leaves STARTING. Turn the disk thresholds off.
+    [ "$status" = STARTING ] && kubectl -n jenkins exec deploy/sonarqube -- sh -c '
+      curl -s -X PUT localhost:9001/_cluster/settings -H "Content-Type: application/json" \
+        -d "{\"persistent\":{\"cluster.routing.allocation.disk.threshold_enabled\":false}}" &&
+      curl -s -X PUT localhost:9001/_all/_settings -H "Content-Type: application/json" \
+        -d "{\"index.blocks.read_only_allow_delete\":null}"' >/dev/null 2>&1
+  done
+  curl -sf --max-time 60 -u admin:admin -X POST "$SONAR_URL/api/users/change_password" \
+    -d login=admin -d previousPassword=admin -d password="$SONAR_PASSWORD" || { echo "could not set the admin password"; return 1; }
+  SONAR_TOKEN=$(sonar_api /api/user_tokens/generate -d name=jenkins -d type=USER_TOKEN | jq -r .token)
+  [ -n "$SONAR_TOKEN" ] && [ "$SONAR_TOKEN" != null ] || { echo "could not create a token"; return 1; }
+  sonar_api /api/webhooks/create -d name=jenkins \
+    -d url=http://jenkins.jenkins.svc.cluster.local:8080/sonarqube-webhook/ >/dev/null || { echo "could not create the webhook"; return 1; }
+  echo "SonarQube up; token and Jenkins webhook created"
+}
+step "SonarQube starts (token, quality gate webhook)" sonar_up || finish_stage
+
 # ── Jenkins in the cluster ──────────────────────────────────────────────────
 jenkins_up() {
   sed "s|__JENKINS_IMAGE__|$JENKINS_IMAGE|" "$HARNESS_DIR/fixtures/jenkins-in-cluster.yaml" | kubectl apply -f - >/dev/null || return 1
@@ -182,7 +221,7 @@ jenkins_up() {
   kubectl -n jenkins create secret generic jenkins-env \
     --from-literal=JENKINS_ADMIN_PASSWORD=verify \
     --from-literal=DOCKER_REGISTRY="$REGISTRY" --from-literal=DOCKER_USER=verify --from-literal=DOCKER_PASSWORD=verify \
-    --from-literal=SONAR_TOKEN=verify --from-literal=SLACK_TOKEN=verify --from-literal=SLACK_WORKSPACE=verify \
+    --from-literal=SONAR_TOKEN="$SONAR_TOKEN" --from-literal=SLACK_TOKEN=verify --from-literal=SLACK_WORKSPACE=verify \
     --from-literal=GITHUB_USER=verify --from-literal=GITHUB_TOKEN=verify >/dev/null || return 1
 
   # The kubeconfig credential: the in-cluster API server, as jenkins-deployer.
@@ -304,15 +343,21 @@ step "build finishes" build_done
 console > "$RESULTS_DIR/logs/pipeline-console.log"
 
 # Each Jenkins stage as a step: pass, fail (with the end of its log), or skip
-# when its `when` condition kept it from running.
+# (its `when` condition, or an earlier failure, kept it from running). The
+# stage API reports a stage skipped after a failure as FAILED; the console
+# says which ones were skipped and why.
 record_stages() {
-  local describe; describe=$(jenkins_get "$JOB/1/wfapi/describe") || return 1
+  local describe skipped
+  describe=$(jenkins_get "$JOB/1/wfapi/describe") || return 1
+  skipped=$(console | sed -n 's/^.*Stage "\(.*\)" skipped due to \(.*\)$/\1\t\2/p')
   jq -c '.stages[] | {name, status, ms: .durationMillis, id}' <<<"$describe" | while read -r s; do
-    local name status id tail=""
+    local name status id tail="" why
     name=$(jq -r .name <<<"$s"); status=$(jq -r .status <<<"$s"); id=$(jq -r .id <<<"$s")
+    why=$(awk -F'\t' -v n="$name" '$1 == n {print $2; exit}' <<<"$skipped")
+    [ -n "$why" ] && status="SKIPPED ($why)"
     case $status in
       SUCCESS) st=pass ;;
-      NOT_EXECUTED|SKIPPED) st=skip ;;
+      NOT_EXECUTED|SKIPPED*) st=skip ;;
       # A stage's output lives on its step nodes.
       *) st=fail
          tail=$(for n in $(jenkins_get "$JOB/1/execution/node/$id/wfapi/describe" | jq -r '.stageFlowNodes[]?.id'); do

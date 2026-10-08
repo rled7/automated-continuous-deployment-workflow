@@ -7,7 +7,8 @@
 #   harness/verify.sh --list
 #
 # Results: harness/.results/results.json (machine-readable, one entry per
-# stage with its steps) and harness/.results/logs/<stage>.log.
+# stage with its steps; failed steps carry the end of their output in
+# output_tail) and harness/.results/logs/<stage>.log.
 # Exit code: 0 if every stage passed or was skipped, 1 otherwise.
 
 source "$(dirname "$0")/lib/common.sh"
@@ -70,7 +71,11 @@ for stage in "${STAGES[@]}"; do
      + (if $reason != "" then {skip_reason:$reason} else {} end)' >> "$STAGE_RESULTS"
   log "   → $status (${rc}) in $(( $(date +%s) - start ))s; log: $LOG_DIR/$stage.log"
   if [ "$status" = fail ]; then
-    jq -r '"     failed step: \(.name)"' < <(jq -c 'select(.status=="fail")' "$steps_file") >&2
+    # Each failed step with the end of its output, so the terminal (or an
+    # agent reading it) usually shows the cause without opening the log.
+    jq -r 'select(.status=="fail")
+      | "     failed step: \(.name)",
+        ((.output_tail // "") | split("\n") | .[-12:] | map("       │ " + .) | .[])' "$steps_file" >&2
   fi
 done
 

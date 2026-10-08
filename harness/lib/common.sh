@@ -22,20 +22,32 @@ log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 
 # step NAME CMD... — runs one check inside a stage, records pass/fail as a JSON
 # line in $STEPS_FILE, and keeps going so one failure doesn't hide the next.
+# A failed step also records the last $STEP_TAIL_LINES lines of its output, so
+# results.json usually says why without opening the stage log.
 STEPS_FILE="${STEPS_FILE:-/dev/null}"
 STEP_FAILURES=0
+STEP_TAIL_LINES="${STEP_TAIL_LINES:-30}"
 step() {
   local name=$1; shift
-  local start rc
+  local start rc out
   start=$(date +%s)
   log "── step: $name"
-  "$@"
+  # A file, not a pipe: the command must run in this shell so variables it
+  # sets (and traps that read them) still work.
+  out=$(mktemp)
+  "$@" > "$out" 2>&1
   rc=$?
-  local status=pass
-  if [ $rc -ne 0 ]; then status=fail; STEP_FAILURES=$((STEP_FAILURES + 1)); fi
+  cat "$out" >&2
+  local status=pass tail=""
+  if [ $rc -ne 0 ]; then
+    status=fail; STEP_FAILURES=$((STEP_FAILURES + 1))
+    tail=$(tail -n "$STEP_TAIL_LINES" "$out")
+  fi
+  rm -f "$out"
   jq -nc --arg name "$name" --arg status "$status" --argjson rc "$rc" \
-    --argjson secs "$(( $(date +%s) - start ))" \
-    '{name:$name,status:$status,exit_code:$rc,seconds:$secs}' >> "$STEPS_FILE"
+    --argjson secs "$(( $(date +%s) - start ))" --arg tail "$tail" \
+    '{name:$name,status:$status,exit_code:$rc,seconds:$secs}
+     + (if $tail != "" then {output_tail:$tail} else {} end)' >> "$STEPS_FILE"
   log "   $status ($name)"
   return $rc
 }

@@ -13,7 +13,9 @@ kubectl run "$POD" --namespace=<ns> --image=<image> --labels=app=my-app-migrate 
 `migrate-pod-overrides.json` is the full pod spec (`--overrides` replaces the
 container list). It gives the pod what the app gets — the ConfigMap plus
 `DB_HOST`/`DB_PASSWORD` from the SealedSecret — and satisfies the Kyverno Pod
-policies (resource limits, read-only root filesystem, dropped capabilities).
+policies (resource limits, read-only root filesystem, dropped capabilities) and
+the namespaces' Pod Security "restricted" level (non-root, RuntimeDefault
+seccomp profile).
 
 - `--env=production` selects the knexfile block that reads `DB_SSL`; the
   ConfigMap's `NODE_ENV` (`staging`) has no knexfile block of its own.

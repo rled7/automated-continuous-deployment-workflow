@@ -31,7 +31,7 @@ harness/verify.sh cluster-real cluster-prod   # the opt-in real-cluster stages
 | `cluster-sim` | Every overlay is accepted by a real Kubernetes API server (KWOK: simulated nodes); every workload's pod template and the migration pod pass Pod Security admission ("restricted"); Deployments roll out; HPA targets exist | — |
 | `terraform` | Each module in `TF_DIRS`: fmt, validate, `terraform test`, apply, no drift, destroy — against [Floci](https://github.com/floci-io/floci) (local AWS) | Docker |
 | `cluster-real` (opt-in) | Staging deployed to a real kind cluster exactly as the Jenkinsfile does it, with Pod Security and NetworkPolicies enforced; smoke tests through the Service | Docker, a host where kind works |
-| `cluster-prod` (opt-in) | The Jenkinsfile's production path on kind with the Argo Rollouts controller: starting from a pre-fix cluster (stray Deployment), deploy and wait with `scripts/wait-for-rollout.sh`, remove the stray Deployment, smoke tests; then a release whose canary fails must be reported, rolled back with `rollback()`, and serve the previous image again (~10 min) | Docker, a host where kind works |
+| `cluster-prod` (opt-in) | The Jenkinsfile's production path on kind with the Argo Rollouts controller: starting from a pre-fix cluster (stray Deployment), deploy and wait with `scripts/wait-for-rollout.sh`, remove the stray Deployment, smoke tests; then a release whose canary fails must be reported, rolled back with `rollback()`, and serve the previous image again (~5 min) | Docker, a host where kind works |
 
 Steps keep going after a failure so one run reports everything it can. Where
 a pipeline step fails (for example migrations), the stage records the failure

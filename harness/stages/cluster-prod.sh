@@ -15,7 +15,7 @@
 # success-rate analysis errors and Argo aborts the rollout. That exercises the
 # failure → rollback path, not the analysis query itself.
 #
-# Needs a host where kind works (your machine, GitHub Actions). Takes ~10 min:
+# Needs a host where kind works (your machine, GitHub Actions). Takes ~5 min:
 # the canary pauses 2 min before its analysis. KEEP=1 leaves the cluster up.
 source "$(dirname "$0")/../lib/common.sh"
 source "$HARNESS_DIR/lib/tools.sh"

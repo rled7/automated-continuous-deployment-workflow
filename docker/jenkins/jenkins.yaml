@@ -98,9 +98,12 @@ credentials:
               id: "sonarqube-token"
               secret: "${SONAR_TOKEN}"
               description: "SonarQube Token"
+          # A file credential must have content or Jenkins fails to start.
+          # docker-compose.yml mounts $KUBECONFIG (or a placeholder) here.
           - file:
               id: "kubeconfig"
               fileName: "kubeconfig"
+              secretBytes: "${readFileBase64:/run/secrets/kubeconfig}"
               description: "Kubernetes Config"
           - string:
               id: "slack-token"
@@ -114,8 +117,14 @@ tool:
         home: git
   nodejs:
     installations:
+      # The NodeJS plugin takes the version as an installer, not a `version:`
+      # attribute (which JCasC rejects, and Jenkins then refuses to start).
       - name: NodeJS-20
-        version: "20.0.0"
+        properties:
+          - installSource:
+              installers:
+                - nodeJSInstaller:
+                    id: "20.0.0"
 
 unclassified:
   slackNotifier:
@@ -133,20 +142,33 @@ unclassified:
 jobs:
   - script: |
       multibranchPipelineJob('my-app') {
+          // The traits below only exist in Job DSL's generated
+          // branchSource/source syntax; the older github {} shorthand has no
+          // credentialsId or traits, and JCasC refuses to start Jenkins.
           branchSources {
-              github {
-                  id('my-app-github')
-                  repoOwner('YOUR_ORG')
-                  repository('my-app')
-                  credentialsId('github-credentials')
-                  traits {
-                      gitHubBranchDiscovery { strategyId(1) }
-                      gitHubPullRequestDiscovery { strategyId(1) }
+              branchSource {
+                  source {
+                      github {
+                          id('my-app-github')
+                          repoOwner('YOUR_ORG')
+                          repository('my-app')
+                          repositoryUrl('https://github.com/YOUR_ORG/my-app')
+                          configuredByUrl(false)
+                          credentialsId('github-credentials')
+                          traits {
+                              gitHubBranchDiscovery { strategyId(1) }
+                              gitHubPullRequestDiscovery { strategyId(1) }
+                          }
+                      }
                   }
               }
           }
+          // Rescan the repository every 5 minutes. (periodic(5) is the
+          // freestyle-job trigger; multibranch jobs take periodicFolderTrigger.)
           triggers {
-              periodic(5)
+              periodicFolderTrigger {
+                  interval('5m')
+              }
           }
           factory {
               workflowBranchProjectFactory {

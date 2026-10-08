@@ -27,7 +27,7 @@ JENKINS_IMAGE="$REGISTRY/jenkins-cicd:verify"
 AGENT_IMAGE="$REGISTRY/jenkins-cicd-agent:verify"
 GIT_URL=http://git.jenkins.svc.cluster.local/my-app.git
 PIPELINE_TIMEOUT="${PIPELINE_TIMEOUT:-2700}"   # seconds for the whole build
-AGENT_TIMEOUT="${AGENT_TIMEOUT:-600}"          # seconds for the first agent to connect
+AGENT_TIMEOUT="${AGENT_TIMEOUT:-300}"          # seconds for the first agent to connect
 
 JENKINS_URL="http://127.0.0.1:18081"
 JENKINS_AUTH="admin:verify"
@@ -102,6 +102,28 @@ push_images() {
   done
 }
 step "push the Jenkins and agent images to the registry" push_images || finish_stage
+
+# Other images the pod template runs (the dind sidecar), loaded into the
+# nodes so they are not pulled from Docker Hub, which rate-limits CI runners.
+template_images() {
+  python3 - "$REPO_ROOT/docker/jenkins/jenkins.yaml" <<'PY'
+import sys, yaml
+casc = yaml.safe_load(open(sys.argv[1]))
+for cloud in casc["jenkins"]["clouds"]:
+    for t in cloud.get("kubernetes", {}).get("templates", []):
+        for c in yaml.safe_load(t["yaml"])["spec"]["containers"]:
+            if "YOUR_ORG" not in c["image"]:
+                print(c["image"])
+PY
+}
+load_template_images() {
+  local img
+  for img in $(template_images); do
+    pull_official "$img" && kind load docker-image "$img" --name "$CLUSTER" >/dev/null || { echo "could not load $img"; return 1; }
+    echo "loaded $img"
+  done
+}
+step "load the pod template's other images into the cluster" load_template_images || finish_stage
 
 # ── Source: this working tree (committed or not) as $BRANCH and main ────────
 git_up() {

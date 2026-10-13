@@ -15,8 +15,12 @@
 # success-rate analysis errors and Argo aborts the rollout. That exercises the
 # failure → rollback path, not the analysis query itself.
 #
-# Needs a host where kind works (your machine, GitHub Actions). Takes ~5 min:
-# the canary pauses 2 min before its analysis. KEEP=1 leaves the cluster up.
+# The canary's pauses (2 min each in the overlay) are cut to CANARY_PAUSE
+# (default 10s) in the harness's copy of the release: how long it pauses is
+# not what this stage checks, and the analysis still has to fail it.
+#
+# Needs a host where kind works (your machine, GitHub Actions). KEEP=1 leaves
+# the cluster up.
 source "$(dirname "$0")/../lib/common.sh"
 source "$HARNESS_DIR/lib/tools.sh"
 source "$HARNESS_DIR/lib/kind.sh"
@@ -93,6 +97,17 @@ canary_image="${DEPLOY_IMAGE}-canary"
 docker tag "$DEPLOY_IMAGE" "$canary_image"
 step "load canary image" kind load docker-image "$canary_image" --name "$CLUSTER" || finish_stage
 canary_rendered=$(DEPLOY_IMAGE=$canary_image render_overlay "$NS" production-canary) || exit 1
+python3 - "$canary_rendered" "${CANARY_PAUSE:-10s}" <<'PY2' || exit 1
+import sys, yaml
+path, pause = sys.argv[1:]
+docs = list(yaml.safe_load_all(open(path)))
+for d in docs:
+    if d and d.get("kind") == "Rollout":
+        for s in d["spec"]["strategy"].get("canary", {}).get("steps", []):
+            if isinstance(s.get("pause"), dict) and "duration" in s["pause"]:
+                s["pause"]["duration"] = pause
+yaml.safe_dump_all(docs, open(path, "w"), sort_keys=False)
+PY2
 step "apply canary release" kubectl apply -f "$canary_rendered" || finish_stage
 # The pipeline must see this as a failure (so post { failure } rolls back),
 # and it must be Argo aborting the canary, not a timeout.

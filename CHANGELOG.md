@@ -9,7 +9,7 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 > - Phase D: cluster security (Build 016) — done
 > - Phase E: app data layer (Build 017) — done
 > - Phase F: operations (Build 018) — done
-> - **Phase G: verification (Builds 023–027) — in progress.** The local harness exercised the pipeline end to end for the first time and found 26 defects in phases B–F that blocked deploys, testing, rollback, Jenkins or its agents, plus 3 in its own changes. Builds 023–026 fix all but two: the dependency scan (waiting on an activated NVD API key) and the SonarQube webhook the quality gate needs (only the harness creates it so far). Remaining:
+> - **Phase G: verification (Builds 023–027) — in progress.** The local harness exercised the pipeline end to end for the first time and found 27 defects in phases B–F that blocked deploys, testing, rollback, Jenkins or its agents, plus 3 in its own changes. Builds 023–026 fix all but one: the SonarQube webhook the quality gate needs (only the harness creates it so far). Remaining:
 >   - [x] Harness for manifests, app, image, pod, simulated cluster, Terraform (Build 023)
 >   - [x] Staging deploy on a real cluster in CI (Build 023)
 >   - [x] Production Rollout path on a real cluster: deploy, failed canary, rollback (`cluster-prod`, Build 024; passing in CI)
@@ -19,7 +19,7 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 >     - [x] The agent image builds and has every command the pipeline calls (Build 026)
 >     - [x] Every way of asking for an agent resolves to the `cicd-agent` pod, offline and in kind (Build 026)
 >     - [x] Jenkins runs the Jenkinsfile on kind (`pipeline` stage, Build 026): Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks pass
->     - [ ] Dependency Vulnerability Scan: wired to an NVD API key (Build 026); waiting on an activated key in the `NVD_API_KEY` secret
+>     - [ ] Dependency Vulnerability Scan: database ownership fixed and NVD API key wired (Build 026); first full run in CI pending
 >     - [ ] SonarQube webhook to Jenkins (`/sonarqube-webhook/`) created by the real setup, not just the harness; without it `waitForQualityGate` times out
 >     - [ ] The stages after it: Build, tests, Docker Build & Push (dind), image scans, deploys, Release
 >     - [ ] Decisions: where the dependency-check database lives; cosign keyless or key-based signing; how the staging smoke tests reach staging
@@ -31,13 +31,14 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ## Build 026 — The Jenkinsfile runs in Jenkins on kind; every agent block gets the agent pod
 **Date:** 2026-10-13
-**Scope:** Run the real Jenkinsfile in the real Jenkins (`docker/jenkins`, `jenkins.yaml`) inside a kind cluster with pods from the agent image. No build could ever have run: the agent image did not build, it lacked tools, the Jenkinsfile asked for a pod without them, and the pod template mounted a Docker socket Kubernetes nodes don't have. Jenkins now resolves every way of asking for an agent to the same pod (write-up: `docs/agent-resolution.md`). The run now passes Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks, and stops at the Dependency Vulnerability Scan until an activated NVD API key is in place.
+**Scope:** Run the real Jenkinsfile in the real Jenkins (`docker/jenkins`, `jenkins.yaml`) inside a kind cluster with pods from the agent image. No build could ever have run: the agent image did not build, it lacked tools, the Jenkinsfile asked for a pod without them, and the pod template mounted a Docker socket Kubernetes nodes don't have. Jenkins now resolves every way of asking for an agent to the same pod (write-up: `docs/agent-resolution.md`). The run now passes Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks, and stopped at the Dependency Vulnerability Scan, which could never create its database; that is fixed and the scan has an NVD API key.
 
 ### Fixed
 
 - `docker/jenkins-agent/Dockerfile` — The image did not build: Trivy's GitHub release tarballs return 404; `trivy` is now copied from `aquasec/trivy` at the same version. Once it built, it had no `docker` command (on Debian trixie, which the floating `latest-jdk17` base had moved to, `docker.io` is only the daemon) and no `sonar-scanner`, so Docker Build & Push and SonarQube Analysis could never run. The base is pinned to trixie; `docker-cli`, `docker-buildx` and a pinned SonarScanner CLI are installed and checked in the build's sanity step.
 - `Jenkinsfile`, `docker/jenkins/jenkins.yaml` (`pr-preview-teardown`) — `agent { kubernetes { label 'cicd-agent' } }` does not use the template with that label: the plugin builds a new pod with only its default `jnlp` container, so `defaultContainer 'cicd'` named a container that did not exist and no stage could run. Now `inheritFrom 'cicd-agent'`.
 - `docker/jenkins/jenkins.yaml` — Every agent pod failed to start ("hostPath type check failed: /var/run/docker.sock is not a socket file"): Kubernetes nodes run containerd. Each pod now runs `docker:27-dind` as a privileged sidecar listening only on `127.0.0.1:2375`, and the tools containers point `DOCKER_HOST` at it. `dockerd` is named in its args; otherwise the image's entrypoint adds a listener on `0.0.0.0:2375`, open to the cluster, which collides with the local one.
+- `docker/jenkins-agent/Dockerfile` — Every Dependency Vulnerability Scan failed within a second with "Unable to connect to the dependency-check database": dependency-check creates its database in `/opt/dependency-check/data`, which belonged to root, and the agent runs as `jenkins`. The directory now belongs to `jenkins`; the `jenkins` stage checks that dependency-check can create its database as the agent user.
 - `Jenkinsfile`, `docker/jenkins/jenkins.yaml`, `.env.example`, `README.md`, `.github/workflows/verify.yml` — dependency-check had no NVD API key, so it could not download its vulnerability database and the Dependency Vulnerability Scan always failed. The key is the `nvd-api-key` credential (`NVD_API_KEY` in `.env`); the scan passes it with `--nvdApiKey`, and CI reads it from the `NVD_API_KEY` repo secret.
 - `.gitleaks.toml` — The Gitleaks stage flagged `curl -u admin:admin` in the harness: SonarQube's documented first-login credentials, used once to set a password on the harness's throwaway server. Allowed by exact match only; any other credential in a curl command is still reported.
 

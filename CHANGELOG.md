@@ -9,36 +9,49 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 > - Phase D: cluster security (Build 016) — done
 > - Phase E: app data layer (Build 017) — done
 > - Phase F: operations (Build 018) — done
-> - **Phase G: verification (Builds 023–025) — in progress.** The local harness exercised the pipeline end to end for the first time and found 18 defects in phases C–F that blocked deploys, testing, rollback or Jenkins itself, plus 3 in its own changes; all are fixed in Builds 023–025. Remaining:
+> - **Phase G: verification (Builds 023–027) — in progress.** The local harness exercised the pipeline end to end for the first time and found 26 defects in phases B–F that blocked deploys, testing, rollback, Jenkins or its agents, plus 3 in its own changes. Builds 023–026 fix all but two: the dependency scan (waiting on an activated NVD API key) and the SonarQube webhook the quality gate needs (only the harness creates it so far). Remaining:
 >   - [x] Harness for manifests, app, image, pod, simulated cluster, Terraform (Build 023)
 >   - [x] Staging deploy on a real cluster in CI (Build 023)
 >   - [x] Production Rollout path on a real cluster: deploy, failed canary, rollback (`cluster-prod`, Build 024; passing in CI)
 >   - [ ] First production deploy with the Rollout-only overlay, watched (removes the stray Deployment)
 >   - [ ] Whole Jenkinsfile run end to end (Jenkins controller + agent image in kind)
->     - [x] Jenkins starts from `docker/jenkins` with `jenkins.yaml`; credentials, agent label and declarative validation checked (`jenkins` stage, Build 025)
->     - [x] Every way of asking for an agent resolves to the `cicd-agent` pod (Build 026)
->     - [ ] Pipeline runs on kind: agent pods from the `cicd-agent` template, stand-ins for SonarQube, the registry and Slack
+>     - [x] Jenkins starts from `docker/jenkins` with `jenkins.yaml`; credentials and declarative validation checked (`jenkins` stage, Build 025)
+>     - [x] The agent image builds and has every command the pipeline calls (Build 026)
+>     - [x] Every way of asking for an agent resolves to the `cicd-agent` pod, offline and in kind (Build 026)
+>     - [x] Jenkins runs the Jenkinsfile on kind (`pipeline` stage, Build 026): Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks pass
+>     - [ ] Dependency Vulnerability Scan: wired to an NVD API key (Build 026); waiting on an activated key in the `NVD_API_KEY` secret
+>     - [ ] SonarQube webhook to Jenkins (`/sonarqube-webhook/`) created by the real setup, not just the harness; without it `waitForQualityGate` times out
+>     - [ ] The stages after it: Build, tests, Docker Build & Push (dind), image scans, deploys, Release
+>     - [ ] Decisions: where the dependency-check database lives; cosign keyless or key-based signing; how the staging smoke tests reach staging
+>   - [x] CI runs in about 6 minutes instead of 15.5 (parallel groups, cached layers and tools; Build 027)
 >   - [ ] Terraform stage pointed at the real infrastructure modules
 >   - [ ] Promote `require-pod-probes` to Enforce (now that it accepts valid probes)
 
 ---
 
-## Build 026 — Every agent block gets the agent pod
+## Build 026 — The Jenkinsfile runs in Jenkins on kind; every agent block gets the agent pod
 **Date:** 2026-10-13
-**Scope:** The Jenkinsfile asked for its agent with the Kubernetes plugin's deprecated `label` option, which builds a new, bare pod instead of using the `cicd-agent` template, so builds had no tools and no Docker. Beyond fixing the Jenkinsfile, Jenkins now resolves every way of asking for an agent to the same pod, and the harness checks each one. Write-up: `docs/agent-resolution.md`.
+**Scope:** Run the real Jenkinsfile in the real Jenkins (`docker/jenkins`, `jenkins.yaml`) inside a kind cluster with pods from the agent image. No build could ever have run: the agent image did not build, it lacked tools, the Jenkinsfile asked for a pod without them, and the pod template mounted a Docker socket Kubernetes nodes don't have. Jenkins now resolves every way of asking for an agent to the same pod (write-up: `docs/agent-resolution.md`). The run now passes Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks, and stops at the Dependency Vulnerability Scan until an activated NVD API key is in place.
 
 ### Fixed
 
-- `Jenkinsfile`, `docker/jenkins/jenkins.yaml` (`pr-preview-teardown`) — `kubernetes { label 'cicd-agent' }` → `inheritFrom 'cicd-agent'`.
+- `docker/jenkins-agent/Dockerfile` — The image did not build: Trivy's GitHub release tarballs return 404; `trivy` is now copied from `aquasec/trivy` at the same version. Once it built, it had no `docker` command (on Debian trixie, which the floating `latest-jdk17` base had moved to, `docker.io` is only the daemon) and no `sonar-scanner`, so Docker Build & Push and SonarQube Analysis could never run. The base is pinned to trixie; `docker-cli`, `docker-buildx` and a pinned SonarScanner CLI are installed and checked in the build's sanity step.
+- `Jenkinsfile`, `docker/jenkins/jenkins.yaml` (`pr-preview-teardown`) — `agent { kubernetes { label 'cicd-agent' } }` does not use the template with that label: the plugin builds a new pod with only its default `jnlp` container, so `defaultContainer 'cicd'` named a container that did not exist and no stage could run. Now `inheritFrom 'cicd-agent'`.
+- `docker/jenkins/jenkins.yaml` — Every agent pod failed to start ("hostPath type check failed: /var/run/docker.sock is not a socket file"): Kubernetes nodes run containerd. Each pod now runs `docker:27-dind` as a privileged sidecar listening only on `127.0.0.1:2375`, and the tools containers point `DOCKER_HOST` at it. `dockerd` is named in its args; otherwise the image's entrypoint adds a listener on `0.0.0.0:2375`, open to the cluster, which collides with the local one.
+- `Jenkinsfile`, `docker/jenkins/jenkins.yaml`, `.env.example`, `README.md`, `.github/workflows/verify.yml` — dependency-check had no NVD API key, so it could not download its vulnerability database and the Dependency Vulnerability Scan always failed. The key is the `nvd-api-key` credential (`NVD_API_KEY` in `.env`); the scan passes it with `--nvdApiKey`, and CI reads it from the `NVD_API_KEY` repo secret.
+- `.gitleaks.toml` — The Gitleaks stage flagged `curl -u admin:admin` in the harness: SonarQube's documented first-login credentials, used once to set a password on the harness's throwaway server. Allowed by exact match only; any other credential in a curl command is still reported.
 
 ### Changed
 
-- `docker/jenkins/jenkins.yaml` — The cloud's `defaultsProviderTemplate: cicd-agent` makes every pod inherit the template (the deprecated `label`, a pod of the pipeline's own yaml); the template takes unlabelled builds (`nodeUsageMode: NORMAL`) and the controller has no executors, so `agent any` runs in the pod too; containers are container templates instead of pod yaml, because a pipeline's own yaml replaces the template's yaml but container templates are always merged; the `jnlp` container is the agent image with `DOCKER_HOST`, so steps that pick no container still have the tools and Docker.
+- `docker/jenkins/jenkins.yaml` — However a pipeline asks for its agent, it gets the `cicd-agent` pod: the cloud's `defaultsProviderTemplate: cicd-agent` makes every pod inherit the template (the deprecated `label`, a pod of the pipeline's own yaml); the template takes unlabelled builds (`nodeUsageMode: NORMAL`) and the controller has no executors, so `agent any` runs in the pod too; containers are container templates instead of pod yaml, because a pipeline's own yaml replaces the template's yaml but container templates are always merged; the `jnlp` container is the agent image with `DOCKER_HOST`, so steps that pick no container still have the tools and Docker.
+- `harness/lib/common.sh` — In sandboxes that intercept HTTPS, the CA reached only non-final build stages, so single-stage images (the agent) downloaded nothing. It is now a BuildKit bind mount on every shell-form `RUN`, with the variables curl, npm and Java read, and never lands in a layer.
 
 ### Added
 
-- `harness/lib/agent-resolution.groovy`, `harness/stages/jenkins.sh` — Resolves every agent block of the Jenkinsfile, inline pipeline jobs and `harness/fixtures/agent-forms.Jenkinsfile` (one stage per syntax) with Jenkins' declarative parser and the Kubernetes plugin's own pod builder, and checks the steps' container, `DOCKER_HOST`, the privileged `dind` sidecar and controller executors. Fails with the original defect when `defaultsProviderTemplate` is removed.
-- `harness/stages/pipeline.sh` — Runs `agent-forms.Jenkinsfile` as a job in kind after the Jenkinsfile build; each stage checks its pod has the tools and a Docker daemon.
+- `harness/stages/pipeline.sh`, `harness/fixtures/jenkins-in-cluster.yaml`, `harness/fixtures/sonarqube.yaml` — Opt-in `pipeline` stage, run in CI: Jenkins in a kind cluster with the repo's `jenkins.yaml` launches agent pods from the agent image and builds this working tree as a multibranch branch (`develop` by default) from a git server in the cluster. Stand-ins: a local registry, placeholder secrets, an in-cluster kubeconfig, and SonarQube 10.7 in the cluster with a token and the `/sonarqube-webhook/` webhook that `waitForQualityGate` needs (nothing in the repo set that up). Each Jenkins stage is a step: pass, fail with its log, or skip (Jenkins' "skipped due to earlier failure(s)", which its stage API reports as failed). Jenkins is reached through a NodePort, and failed API calls print their HTTP status and body.
+- `harness/stages/jenkins.sh` — Builds the agent image and checks it has every command the pipeline calls (`docker buildx` included). Resolves every agent block of the Jenkinsfile, inline pipeline jobs and `harness/fixtures/agent-forms.Jenkinsfile` (one stage per syntax) with Jenkins' declarative parser and the Kubernetes plugin's own pod builder (`harness/lib/agent-resolution.groovy`), and checks the steps' container, `DOCKER_HOST`, the privileged `dind` sidecar and controller executors. Fails with the original defect when `defaultsProviderTemplate` is removed. Jenkins API helpers move to `harness/lib/jenkins.sh`.
+- `harness/stages/pipeline.sh` — After the Jenkinsfile build, runs `agent-forms.Jenkinsfile` as a job; each stage checks its pod has the tools and a Docker daemon. All five forms pass in CI.
+- `docs/agent-resolution.md` — How builds get their agent: the bug, the configuration with code, how the check works and what it still does not cover.
 
 ---
 

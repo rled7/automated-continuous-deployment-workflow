@@ -29,9 +29,9 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
-## Build 027 — CI in about 6 minutes: parallel groups and caches
+## Build 027 — Faster CI: parallel groups, caches, skipping what already passed
 **Date:** 2026-10-13
-**Scope:** The `verify` workflow ran every harness stage one after another in one job, about 15.5 minutes. It now runs them as parallel groups that reuse earlier downloads and builds.
+**Scope:** The `verify` workflow ran every harness stage one after another in one job, about 15.5 minutes. It now runs them as parallel groups that reuse earlier downloads and builds, skips groups whose inputs already passed, and the slowest stages overlap or drop waits that are not under test.
 
 ### Changed
 
@@ -40,6 +40,10 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 - `.github/workflows/verify.yml` — A group whose inputs (git blob hashes of the files its stages read, plus the harness and the ISO week) match a run that passed is skipped in seconds. A docs-only change skips every group; a Terraform change runs only `terraform`. `force` on a manual run runs everything. Runs on `main` fill the caches every pull request can read.
 - `.github/workflows/verify.yml`, `harness/stages/pipeline.sh`, `Jenkinsfile`, `docker/jenkins/jenkins.yaml` — dependency-check's vulnerability database is kept between runs: the Jenkinsfile passes `--data "$DEPENDENCY_CHECK_DATA"` when the pod template sets it; the `pipeline` stage mounts `harness/.cache/dependency-check` into agent pods through the kind node, and CI restores and saves the directory (one copy per day), so the scan updates it instead of downloading all of NVD. `jenkins.yaml` shows the persistent volume to add for the same effect in production.
+- `harness/stages/pipeline.sh` — The database is brought up to date in its own container before the build, the way a nightly job would, because the first download of NVD takes longer than the Jenkinsfile's 30-minute build timeout leaves the scan; the key is checked with NVD first (dependency-check retries a rejected key for a long time). The kind cluster is created while the images build, SonarQube starts as soon as the cluster is up, and the node pulls Docker Hub images through `mirror.gcr.io` instead of having them copied in.
+- `harness/stages/terraform.sh` — `terraform test` runs alongside apply → plan → destroy instead of before it: both spend most of their time on the AWS provider's SQS waits, and they use different names. Every check still runs. Locally 345 s → 195 s.
+- `harness/stages/cluster-prod.sh` — The failing canary pauses 10 s per step instead of 2 minutes in the harness's copy of the release; the analysis still has to fail it and the rollback still has to restore the previous image.
+- `harness/lib/common.sh` — With the CI builder, base images are no longer pulled into the Docker daemon first; BuildKit pulls what it needs.
 
 ### Measured
 

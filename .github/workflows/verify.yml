@@ -46,6 +46,9 @@ jobs:
       STAGES: ${{ inputs.stages || matrix.stages }}
       PIPELINE_BRANCH: ${{ inputs.pipeline_branch || 'develop' }}
       HARNESS_DOCKER_CACHE: gha
+      # For the Dependency Vulnerability Scan (repo secret; empty on forks).
+      # Only the job that runs the Jenkinsfile gets it.
+      NVD_API_KEY: ${{ matrix.group == 'pipeline' && secrets.NVD_API_KEY || '' }}
     steps:
       # A manual run with explicit stages runs them once, in the first group.
       - name: Skip (manual run with explicit stages)

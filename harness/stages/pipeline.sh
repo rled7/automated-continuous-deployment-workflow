@@ -13,7 +13,8 @@
 #   - SonarQube: a fresh server in the cluster, with a token and the quality
 #     gate webhook;
 #   - secrets: placeholder values, plus a kubeconfig for an in-cluster
-#     service account.
+#     service account. NVD_API_KEY comes from the environment: the
+#     Dependency Vulnerability Scan needs a real one.
 #
 # Needs a host where kind works (your machine, GitHub Actions). KEEP=1 leaves
 # the cluster up, with Jenkins on localhost:18081 (admin / verify).
@@ -40,6 +41,7 @@ JENKINS_AUTH="admin:verify"
 source "$HARNESS_DIR/lib/jenkins.sh"
 
 need_tools kind kubectl || exit 1
+[ -n "${NVD_API_KEY:-}" ] || log "NVD_API_KEY is not set: the Dependency Vulnerability Scan will fail"
 ensure_docker || exit 1
 
 work=$(mktemp -d)
@@ -224,7 +226,8 @@ jenkins_up() {
   kubectl -n jenkins create secret generic jenkins-env \
     --from-literal=JENKINS_ADMIN_PASSWORD=verify \
     --from-literal=DOCKER_REGISTRY="$REGISTRY" --from-literal=DOCKER_USER=verify --from-literal=DOCKER_PASSWORD=verify \
-    --from-literal=SONAR_TOKEN="$SONAR_TOKEN" --from-literal=SLACK_TOKEN=verify --from-literal=SLACK_WORKSPACE=verify \
+    --from-literal=SONAR_TOKEN="$SONAR_TOKEN" --from-literal=NVD_API_KEY="${NVD_API_KEY:-}" \
+    --from-literal=SLACK_TOKEN=verify --from-literal=SLACK_WORKSPACE=verify \
     --from-literal=GITHUB_USER=verify --from-literal=GITHUB_TOKEN=verify >/dev/null || return 1
 
   # The kubeconfig credential: the in-cluster API server, as jenkins-deployer.

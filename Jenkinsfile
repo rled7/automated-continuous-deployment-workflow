@@ -96,19 +96,25 @@ pipeline {
                 }
                 stage('Dependency Vulnerability Scan') {
                     steps {
-                        sh '''
-                            cd app
-                            mkdir -p reports/dependency-check
-                            # OWASP Dependency Check
-                            # Build 015: --failOnCVSS tightened from 8 to 7 to match
-                            # the Trivy HIGH threshold (CVSS 7.0 == HIGH boundary).
-                            dependency-check.sh \
-                              --project "${APP_NAME}" \
-                              --scan . \
-                              --format "HTML" \
-                              --out reports/dependency-check \
-                              --failOnCVSS 7
-                        '''
+                        // The NVD API key lets dependency-check download the
+                        // vulnerability database; without one it is
+                        // rate-limited too hard to finish.
+                        withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+                            sh '''
+                                cd app
+                                mkdir -p reports/dependency-check
+                                # OWASP Dependency Check
+                                # Build 015: --failOnCVSS tightened from 8 to 7 to match
+                                # the Trivy HIGH threshold (CVSS 7.0 == HIGH boundary).
+                                dependency-check.sh \
+                                  --project "${APP_NAME}" \
+                                  --scan . \
+                                  --nvdApiKey "$NVD_API_KEY" \
+                                  --format "HTML" \
+                                  --out reports/dependency-check \
+                                  --failOnCVSS 7
+                            '''
+                        }
                     }
                     post {
                         always {

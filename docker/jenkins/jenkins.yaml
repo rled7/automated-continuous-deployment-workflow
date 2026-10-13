@@ -147,6 +147,12 @@ credentials:
               id: "sonarqube-token"
               secret: "${SONAR_TOKEN}"
               description: "SonarQube Token"
+          # Dependency Vulnerability Scan: dependency-check downloads the NVD
+          # database with it.
+          - string:
+              id: "nvd-api-key"
+              secret: "${NVD_API_KEY}"
+              description: "NVD API key"
           # A file credential must have content or Jenkins fails to start.
           # docker-compose.yml mounts $KUBECONFIG (or a placeholder) here.
           - file:

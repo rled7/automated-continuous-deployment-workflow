@@ -445,7 +445,7 @@ EOF
                     mkdir -p reports
                     k6 run \
                       --out json=reports/k6-results.json \
-                      --env BASE_URL=https://staging.${APP_NAME}.internal \
+                      --env BASE_URL="$STAGING_URL" \
                       tests/performance/load-test.js
 
                     node tests/performance/compare-baseline.js \
@@ -482,7 +482,7 @@ EOF
                         mkdir -p reports
                         npm ci --prefer-offline
                         npx playwright install --with-deps chromium
-                        BASE_URL=https://staging.app.${APP_NAME}.internal npm run test:e2e
+                        BASE_URL="$STAGING_URL" npm run test:e2e
                     '''
                 }
             }
@@ -765,10 +765,13 @@ def runSmokeTests(String env) {
     // fragile because the working directory is not guaranteed across sh steps.
     // Bug 2 fix: run npm ci before the test command so smoke-test deps are
     // installed (the tests/ directory has its own package.json).
+    // STAGING_URL / PRODUCTION_URL: where the agents reach each environment
+    // (Jenkins global environment, from .env).
+    def baseUrl = (env == 'production') ? PRODUCTION_URL : STAGING_URL
     dir('tests') {
         sh """
             npm ci --prefer-offline --no-audit --no-fund
-            BASE_URL=https://${env}.${APP_NAME}.internal \
+            BASE_URL=${baseUrl} \
             npm run test:smoke -- \
               --reporters=jest-junit \
               --outputFile=reports/junit-smoke-${env}.xml

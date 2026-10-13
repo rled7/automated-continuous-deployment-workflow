@@ -40,6 +40,12 @@ jenkins:
             value: "my-app"
           - key: DOCKER_REGISTRY
             value: "localhost:5000"
+          # Where the smoke, performance and E2E tests reach each environment
+          # (STAGING_URL / PRODUCTION_URL in .env).
+          - key: STAGING_URL
+            value: "${STAGING_URL:-https://staging.my-app.internal}"
+          - key: PRODUCTION_URL
+            value: "${PRODUCTION_URL:-https://production.my-app.internal}"
 
   # ── Kubernetes cloud: spawns pods from the custom agent image (Build 013) ──
   # The image bundles every CLI the Jenkinsfile invokes. See docs/agent-image.md.

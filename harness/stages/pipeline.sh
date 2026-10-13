@@ -305,6 +305,8 @@ PY2
     --from-literal=JENKINS_ADMIN_PASSWORD=verify \
     --from-literal=DOCKER_REGISTRY="$REGISTRY" --from-literal=DOCKER_USER=verify --from-literal=DOCKER_PASSWORD=verify \
     --from-literal=SONAR_TOKEN="$SONAR_TOKEN" --from-literal=NVD_API_KEY="${NVD_API_KEY:-}" \
+    --from-literal=STAGING_URL=http://my-app.staging.svc.cluster.local \
+    --from-literal=PRODUCTION_URL=http://my-app.production.svc.cluster.local \
     --from-literal=SLACK_TOKEN=verify --from-literal=SLACK_WORKSPACE=verify \
     --from-literal=GITHUB_USER=verify --from-literal=GITHUB_TOKEN=verify >/dev/null || return 1
 

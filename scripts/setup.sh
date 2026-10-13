@@ -57,6 +57,11 @@ start_local() {
     info "Jenkins ready at http://localhost:8080 ✅"
     info "SonarQube ready at http://localhost:9000 ✅"
     info "Docker Registry at http://localhost:5000 ✅"
+    echo ""
+    echo "  Next: connect SonarQube to Jenkins. Log in at http://localhost:9000 as"
+    echo "  admin/admin, set a new password, then run:"
+    echo "       SONAR_ADMIN_PASSWORD=<new password> $SCRIPT_DIR/sonarqube-setup.sh"
+    echo "  and put the SONAR_TOKEN it prints in .env (then restart Jenkins)."
 }
 
 # ── Argo CD bootstrap mode ────────────────────────────────────────────────────

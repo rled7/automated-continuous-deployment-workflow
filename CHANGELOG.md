@@ -9,7 +9,7 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 > - Phase D: cluster security (Build 016) — done
 > - Phase E: app data layer (Build 017) — done
 > - Phase F: operations (Build 018) — done
-> - **Phase G: verification (Builds 023–027) — in progress.** The local harness exercised the pipeline end to end for the first time and found 27 defects in phases B–F that blocked deploys, testing, rollback, Jenkins or its agents, plus 3 in its own changes. Builds 023–026 fix all but one: the SonarQube webhook the quality gate needs (only the harness creates it so far). Remaining:
+> - **Phase G: verification (Builds 023–027) — in progress.** The local harness exercised the pipeline end to end for the first time and found 27 defects in phases B–F that blocked deploys, testing, rollback, Jenkins or its agents, plus 3 in its own changes; Builds 023–026 fix all of them. Remaining:
 >   - [x] Harness for manifests, app, image, pod, simulated cluster, Terraform (Build 023)
 >   - [x] Staging deploy on a real cluster in CI (Build 023)
 >   - [x] Production Rollout path on a real cluster: deploy, failed canary, rollback (`cluster-prod`, Build 024; passing in CI)
@@ -20,7 +20,7 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 >     - [x] Every way of asking for an agent resolves to the `cicd-agent` pod, offline and in kind (Build 026)
 >     - [x] Jenkins runs the Jenkinsfile on kind (`pipeline` stage, Build 026): Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks pass
 >     - [ ] Dependency Vulnerability Scan: database ownership fixed and NVD API key wired (Build 026); first full run in CI pending
->     - [ ] SonarQube webhook to Jenkins (`/sonarqube-webhook/`) created by the real setup, not just the harness; without it `waitForQualityGate` times out
+>     - [x] SonarQube webhook to Jenkins created by the real setup (`scripts/sonarqube-setup.sh`, Build 026)
 >     - [ ] The stages after it: Build, tests, Docker Build & Push (dind), image scans, deploys, Release
 >     - [ ] Decisions: where the dependency-check database lives; cosign keyless or key-based signing; how the staging smoke tests reach staging
 >   - [x] CI runs in about 6 minutes instead of 15.5 (parallel groups, cached layers and tools; Build 027)
@@ -78,6 +78,7 @@ About 6 minutes in all, set by `terraform`: most of it is the AWS provider's bui
 - `harness/stages/pipeline.sh`, `harness/fixtures/jenkins-in-cluster.yaml`, `harness/fixtures/sonarqube.yaml` — Opt-in `pipeline` stage, run in CI: Jenkins in a kind cluster with the repo's `jenkins.yaml` launches agent pods from the agent image and builds this working tree as a multibranch branch (`develop` by default) from a git server in the cluster. Stand-ins: a local registry, placeholder secrets, an in-cluster kubeconfig, and SonarQube 10.7 in the cluster with a token and the `/sonarqube-webhook/` webhook that `waitForQualityGate` needs (nothing in the repo set that up). Each Jenkins stage is a step: pass, fail with its log, or skip (Jenkins' "skipped due to earlier failure(s)", which its stage API reports as failed). Jenkins is reached through a NodePort, and failed API calls print their HTTP status and body.
 - `harness/stages/jenkins.sh` — Builds the agent image and checks it has every command the pipeline calls (`docker buildx` included). Resolves every agent block of the Jenkinsfile, inline pipeline jobs and `harness/fixtures/agent-forms.Jenkinsfile` (one stage per syntax) with Jenkins' declarative parser and the Kubernetes plugin's own pod builder (`harness/lib/agent-resolution.groovy`), and checks the steps' container, `DOCKER_HOST`, the privileged `dind` sidecar and controller executors. Fails with the original defect when `defaultsProviderTemplate` is removed. Jenkins API helpers move to `harness/lib/jenkins.sh`.
 - `harness/stages/pipeline.sh` — After the Jenkinsfile build, runs `agent-forms.Jenkinsfile` as a job; each stage checks its pod has the tools and a Docker daemon. All five forms pass in CI.
+- `scripts/sonarqube-setup.sh`, `README.md`, `scripts/setup.sh` — Nothing in the repo created the SonarQube webhook to Jenkins that `waitForQualityGate` needs, so the quality gate would wait 5 minutes and fail every build. The script creates it and the token for Jenkins, idempotently; the README's setup steps and `setup.sh --local` point to it, and the `pipeline` stage sets up its SonarQube with it.
 - `docs/agent-resolution.md` — How builds get their agent: the bug, the configuration with code, how the check works and what it still does not cover.
 
 ---

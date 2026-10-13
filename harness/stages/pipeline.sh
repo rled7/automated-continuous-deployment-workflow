@@ -208,7 +208,6 @@ EOF
 # ── SonarQube, the server jenkins.yaml names ────────────────────────────────
 # A token for the sonarqube-token credential, and the webhook through which
 # SonarQube reports the quality gate to Jenkins (waitForQualityGate).
-sonar_api() { local path=$1; shift; curl -sf --max-time 60 -u "admin:$SONAR_PASSWORD" -X POST "$@" "$SONAR_URL$path"; }
 sonar_up() {
   kubectl create namespace jenkins --dry-run=client -o yaml | kubectl apply -f - >/dev/null &&
     kubectl apply -f "$HARNESS_DIR/fixtures/sonarqube.yaml" >/dev/null || return 1
@@ -229,11 +228,14 @@ sonar_up() {
   done
   curl -sf --max-time 60 -u admin:admin -X POST "$SONAR_URL/api/users/change_password" \
     -d login=admin -d previousPassword=admin -d password="$SONAR_PASSWORD" || { echo "could not set the admin password"; return 1; }
-  SONAR_TOKEN=$(sonar_api /api/user_tokens/generate -d name=jenkins -d type=USER_TOKEN | jq -r .token)
-  [ -n "$SONAR_TOKEN" ] && [ "$SONAR_TOKEN" != null ] || { echo "could not create a token"; return 1; }
-  sonar_api /api/webhooks/create -d name=jenkins \
-    -d url=http://jenkins.jenkins.svc.cluster.local:8080/sonarqube-webhook/ >/dev/null || { echo "could not create the webhook"; return 1; }
-  echo "SonarQube up; token and Jenkins webhook created"
+  # The webhook and token, the way a real setup creates them.
+  local out
+  out=$(SONAR_URL="$SONAR_URL" SONAR_ADMIN_PASSWORD="$SONAR_PASSWORD" \
+    JENKINS_WEBHOOK_URL=http://jenkins.jenkins.svc.cluster.local:8080/sonarqube-webhook/ \
+    "$REPO_ROOT/scripts/sonarqube-setup.sh") || { echo "$out"; return 1; }
+  grep -v '^SONAR_TOKEN=' <<<"$out"
+  SONAR_TOKEN=$(sed -n 's/^SONAR_TOKEN=//p' <<<"$out")
+  [ -n "$SONAR_TOKEN" ] || { echo "scripts/sonarqube-setup.sh printed no token"; return 1; }
 }
 step "SonarQube up (token, quality gate webhook)" sonar_up || finish_stage
 

@@ -101,6 +101,16 @@ Jenkins is built with the plugins in `docker/jenkins/plugins.txt` and configures
 
 After changing `.env` or `plugins.txt`, recreate Jenkins: `docker compose up -d --build jenkins`.
 
+#### Connect SonarQube to Jenkins
+
+The SonarQube Analysis stage needs a token for Jenkins, and its quality gate needs SonarQube to send results back to Jenkins through a webhook. Without the webhook, `waitForQualityGate` waits its 5 minutes and fails every build. Log in to SonarQube (http://localhost:9000) as `admin` / `admin`, set a new password, then:
+
+```bash
+SONAR_ADMIN_PASSWORD=<new password> scripts/sonarqube-setup.sh
+```
+
+It creates the webhook to `http://jenkins:8080/sonarqube-webhook/` (set `JENKINS_WEBHOOK_URL` for another Jenkins address) and a token, and prints `SONAR_TOKEN=...` once; put that in `.env` and recreate Jenkins. Running it again changes nothing. The `pipeline` harness stage sets up its SonarQube with the same script.
+
 ### 4. Set Up Kubernetes (Production)
 
 ```bash

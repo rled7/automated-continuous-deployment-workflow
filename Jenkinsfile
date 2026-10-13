@@ -300,7 +300,11 @@ pipeline {
                             # Ensure a buildx builder with the docker-container driver exists.
                             # The docker-container driver supports multi-platform builds via QEMU.
                             # If a builder named 'multiarch' already exists, reuse it.
-                            docker buildx create --use --name multiarch --driver docker-container || docker buildx use multiarch
+                            # BUILDKITD_CONFIG (optional, set on the pod template) is a
+                            # buildkitd.toml for the builder: registry mirrors, a private
+                            # registry's CA, or a plain-HTTP registry in a test setup.
+                            docker buildx create --use --name multiarch --driver docker-container \
+                              \${BUILDKITD_CONFIG:+--buildkitd-config "\$BUILDKITD_CONFIG"} || docker buildx use multiarch
 
                             # Build and push the multi-arch manifest list in one step.
                             # --push streams layers directly to the registry without a local load;

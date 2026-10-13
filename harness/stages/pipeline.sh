@@ -110,6 +110,11 @@ export KUBECONFIG="${KIND_KUBECONFIG:-$work/kubeconfig}"
 mkdir -p "$DC_DATA" && chmod -R a+rwX "$DC_DATA" || exit 1
 ( cluster_up > "$work/cluster.log" 2>&1; echo $? > "$work/cluster.rc" ) &
 cluster_pid=$!
+# The Docker Build & Push stage builds linux/arm64 too, through QEMU, which
+# the Jenkinsfile expects each node to have registered (binfmt_misc is the
+# kernel's, so the kind node and every dind in it share the host's).
+( pull_official tonistiigi/binfmt:latest && docker run --privileged --rm tonistiigi/binfmt:latest --install arm64 ) \
+  > "$work/binfmt.log" 2>&1 &
 
 # ── Images: the controller and the agent, as the jenkins stage builds them ──
 for df in docker/jenkins/Dockerfile docker/jenkins-agent/Dockerfile; do
@@ -262,19 +267,36 @@ jenkins_up() {
   { external_service kind-registry "$(ip_on_kind kind-registry)" 5000
     external_service git "$(ip_on_kind harness-git)" 80; } | kubectl apply -f - >/dev/null || return 1
 
-  # jenkins.yaml with the stand-in agent image, and the dependency-check
-  # database mounted from the node where production would mount a volume.
+  # jenkins.yaml with the stand-in agent image; the dependency-check
+  # database mounted from the node where production would mount a volume;
+  # and the stand-in registry, which speaks plain HTTP, allowed for the Docker
+  # daemon (dind), the buildx builder (BUILDKITD_CONFIG), Trivy and Syft.
   sed "s|ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest|$AGENT_IMAGE|" "$REPO_ROOT/docker/jenkins/jenkins.yaml" > "$work/jenkins.yaml"
   grep -q "$AGENT_IMAGE" "$work/jenkins.yaml" || { echo "agent image not found in jenkins.yaml"; return 1; }
-  python3 - "$work/jenkins.yaml" "$DC_NODE_PATH" <<'PY2' || return 1
+  printf '[registry."%s"]\n  http = true\n  insecure = true\n' "$REGISTRY" > "$work/buildkitd.toml"
+  kubectl -n jenkins create configmap harness-buildkitd --from-file=buildkitd.toml="$work/buildkitd.toml" >/dev/null || return 1
+  python3 - "$work/jenkins.yaml" "$DC_NODE_PATH" "$REGISTRY" <<'PY2' || return 1
 import sys, yaml
-path, data = sys.argv[1:]
+path, data, registry = sys.argv[1:]
 casc = yaml.safe_load(open(path))
+env = {
+    "DEPENDENCY_CHECK_DATA": data,
+    "BUILDKITD_CONFIG": "/etc/harness-buildkitd/buildkitd.toml",
+    "TRIVY_INSECURE": "true",
+    "SYFT_REGISTRY_INSECURE_USE_HTTP": "true",
+}
 for cloud in casc["jenkins"]["clouds"]:
     for t in cloud.get("kubernetes", {}).get("templates", []):
-        if t["name"] == "cicd-agent":
-            t.setdefault("volumes", []).append({"hostPathVolume": {"hostPath": data, "mountPath": data}})
-            t.setdefault("envVars", []).append({"envVar": {"key": "DEPENDENCY_CHECK_DATA", "value": data}})
+        if t["name"] != "cicd-agent":
+            continue
+        t.setdefault("volumes", []).extend([
+            {"hostPathVolume": {"hostPath": data, "mountPath": data}},
+            {"configMapVolume": {"configMapName": "harness-buildkitd", "mountPath": "/etc/harness-buildkitd"}},
+        ])
+        t.setdefault("envVars", []).extend({"envVar": {"key": k, "value": v}} for k, v in env.items())
+        for c in t["containers"]:
+            if c["name"] == "dind":
+                c["args"] += f" --insecure-registry={registry}"
 yaml.safe_dump(casc, open(path, "w"), sort_keys=False, width=10**6)
 PY2
   kubectl -n jenkins create configmap jenkins-casc --from-file=jenkins.yaml="$work/jenkins.yaml" >/dev/null || return 1

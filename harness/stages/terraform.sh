@@ -76,8 +76,19 @@ for rel in $TF_DIRS; do
   step "$rel fmt" terraform -chdir="$src" fmt -check -recursive -diff
   step "$rel init" terraform -chdir="$work" init -no-color || { rm -rf "$work"; continue; }
   step "$rel validate" terraform -chdir="$work" validate -no-color
+  # `terraform test` and apply → plan → destroy each create and destroy
+  # everything, and most of their time is the AWS provider waiting on
+  # resources (SQS queues: about 25 s to create, 42 s to delete). They use
+  # different names (the tests set their own), so they run side by side, each
+  # in its own copy of the module. The copy shares the initialized .terraform
+  # (providers are hundreds of MB): neither run writes to it.
+  test_pid="" test_work=""
   if compgen -G "$work/tests/*.tftest.hcl" >/dev/null || compgen -G "$work/*.tftest.hcl" >/dev/null; then
-    step "$rel terraform test" terraform -chdir="$work" test -no-color
+    test_work=$(mktemp -d)
+    (cd "$work" && tar --exclude=./.terraform -cf - .) | (cd "$test_work" && tar -xf -)
+    ln -s "$work/.terraform" "$test_work/.terraform"
+    ( terraform -chdir="$test_work" test -no-color > "$test_work.log" 2>&1; echo $? > "$test_work.rc" ) &
+    test_pid=$!
   fi
   if step "$rel apply" terraform -chdir="$work" apply -auto-approve -no-color; then
     # Exit code 2 means the plan has changes right after apply: drift or a
@@ -85,6 +96,11 @@ for rel in $TF_DIRS; do
     step "$rel no drift after apply" terraform -chdir="$work" plan -detailed-exitcode -no-color
   fi
   step "$rel destroy" timeout 300 terraform -chdir="$work" destroy -auto-approve -no-color
+  if [ -n "$test_pid" ]; then
+    test_result() { wait "$test_pid"; cat "$test_work.log"; return "$(cat "$test_work.rc")"; }
+    step "$rel terraform test (ran alongside apply)" test_result
+    rm -rf "$test_work" "$test_work.log" "$test_work.rc"
+  fi
   rm -rf "$work"
 done
 

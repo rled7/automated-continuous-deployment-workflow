@@ -72,8 +72,6 @@ step "pull busybox" pull_official busybox:1.37
 cluster_up() {
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
   docker rm -f kind-registry harness-git >/dev/null 2>&1
-  # Agent pods run as uid 1000 and must be able to write the database.
-  mkdir -p "$DC_DATA" && chmod -R a+rwX "$DC_DATA" || return 1
   # Jenkins is reached through a NodePort mapped to this host (a
   # port-forward stalls under load).
   cat > "$work/kind.yaml" <<EOF
@@ -108,6 +106,8 @@ EOF
   done
 }
 export KUBECONFIG="${KIND_KUBECONFIG:-$work/kubeconfig}"
+# The agent image runs as uid 1000 and must be able to write the database.
+mkdir -p "$DC_DATA" && chmod -R a+rwX "$DC_DATA" || exit 1
 ( cluster_up > "$work/cluster.log" 2>&1; echo $? > "$work/cluster.rc" ) &
 cluster_pid=$!
 
@@ -119,6 +119,23 @@ step "build docker/jenkins/Dockerfile" \
   docker_build "$REPO_ROOT/docker/jenkins/Dockerfile" "$REPO_ROOT/docker/jenkins" -t harness-jenkins:local || finish_stage
 step "build docker/jenkins-agent/Dockerfile" \
   docker_build "$REPO_ROOT/docker/jenkins-agent/Dockerfile" "$REPO_ROOT/docker/jenkins-agent" -t harness-agent:local || finish_stage
+
+# dependency-check's database, brought up to date outside the build, the way a
+# nightly job would: the first download of NVD takes longer than the
+# Jenkinsfile's 30-minute build timeout allows, and with an up-to-date
+# database the scan in the build only checks for changes. Runs while the
+# cluster and Jenkins come up.
+dc_pid="" nvd_status=""
+# dependency-check retries a rejected key for a long time, so ask NVD first.
+# A key NVD does not know (or not yet activated) gets a 404.
+[ -n "${NVD_API_KEY:-}" ] && nvd_status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
+  -H "apiKey: $NVD_API_KEY" "https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=1")
+if [ "$nvd_status" = 200 ]; then
+  ( timeout 2400 docker run --rm -e NVD_API_KEY -v "$DC_DATA:/data" --entrypoint bash harness-agent:local -c \
+      'dependency-check.sh --updateonly --data /data --nvdApiKey "$NVD_API_KEY"' > "$work/dc-update.log" 2>&1
+    echo $? > "$work/dc-update.rc" ) &
+  dc_pid=$!
+fi
 
 cluster_ready() { wait "$cluster_pid"; cat "$work/cluster.log"; return "$(cat "$work/cluster.rc" 2>/dev/null || echo 1)"; }
 step "create kind cluster with a local registry (started before the builds)" cluster_ready || finish_stage
@@ -348,6 +365,19 @@ run_build() {
   done
   echo "build started"
 }
+dc_updated() {
+  if [ -z "$dc_pid" ]; then
+    case $nvd_status in
+      "") echo "NVD_API_KEY is not set: not updating" ;;
+      404) echo "NVD rejected NVD_API_KEY (404 Invalid apiKey): is the key activated (link in NVD's email)?" ;;
+      *) echo "NVD API answered HTTP $nvd_status to a test request" ;;
+    esac
+    return 1
+  fi
+  wait "$dc_pid"; tail -n 20 "$work/dc-update.log"
+  return "$(cat "$work/dc-update.rc" 2>/dev/null || echo 1)"
+}
+step "dependency-check database up to date (started with the cluster)" dc_updated
 step "start build of $BRANCH" run_build || finish_stage
 
 agent_connected() {

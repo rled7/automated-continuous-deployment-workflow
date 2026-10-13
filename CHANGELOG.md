@@ -29,6 +29,29 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 027 — CI in about 6 minutes: parallel groups and caches
+**Date:** 2026-10-13
+**Scope:** The `verify` workflow ran every harness stage one after another in one job, about 15.5 minutes. It now runs them as parallel groups that reuse earlier downloads and builds.
+
+### Changed
+
+- `.github/workflows/verify.yml` — Six jobs run in parallel: `checks` (static, app, image, pod, cluster-sim), `terraform`, `jenkins`, `cluster-real`, `cluster-prod` and `pipeline`. The workflow takes as long as its slowest group. A manual run with explicit stages still runs them in one job. Only the `pipeline` job gets the `NVD_API_KEY` secret.
+- `harness/lib/common.sh`, `.github/workflows/verify.yml` — Docker layers are read from and written to the GitHub Actions cache (`type=gha`, one scope per Dockerfile) when `HARNESS_DOCKER_CACHE=gha`, on a buildx builder whose Docker Hub pulls go through `mirror.gcr.io`. The pinned tools in `harness/.bin`, Terraform providers and npm packages are cached too. Local runs are unchanged.
+
+### Measured
+
+| Group | First run (empty cache) | Second run (cache filled) |
+|---|---|---|
+| checks | 4m10s | 2m49s |
+| jenkins | 3m11s | 1m24s |
+| cluster-real | 3m58s | 2m29s |
+| cluster-prod | 7m04s | 5m23s |
+| terraform | 6m03s | 6m00s |
+
+About 6 minutes in all, set by `terraform`: most of it is the AWS provider's built-in waits on the example module's two SQS queues (about 25 s to create and 42 s to delete each, and `terraform test` does it again), which caching cannot remove. `pipeline` takes about 8 minutes up to the dependency scan and will take longer once the scan and later stages run. Public repositories get these runner minutes free.
+
+---
+
 ## Build 026 — The Jenkinsfile runs in Jenkins on kind; every agent block gets the agent pod
 **Date:** 2026-10-13
 **Scope:** Run the real Jenkinsfile in the real Jenkins (`docker/jenkins`, `jenkins.yaml`) inside a kind cluster with pods from the agent image. No build could ever have run: the agent image did not build, it lacked tools, the Jenkinsfile asked for a pod without them, and the pod template mounted a Docker socket Kubernetes nodes don't have. Jenkins now resolves every way of asking for an agent to the same pod (write-up: `docs/agent-resolution.md`). The run now passes Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks, and stops at the Dependency Vulnerability Scan until an activated NVD API key is in place.

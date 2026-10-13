@@ -118,7 +118,10 @@ import sys, yaml
 casc = yaml.safe_load(open(sys.argv[1]))
 for cloud in casc["jenkins"]["clouds"]:
     for t in cloud.get("kubernetes", {}).get("templates", []):
-        for c in yaml.safe_load(t["yaml"])["spec"]["containers"]:
+        containers = t.get("containers", [])
+        if t.get("yaml"):
+            containers += yaml.safe_load(t["yaml"]).get("spec", {}).get("containers", [])
+        for c in containers:
             if "YOUR_ORG" not in c["image"]:
                 print(c["image"])
 PY
@@ -347,9 +350,9 @@ console > "$RESULTS_DIR/logs/pipeline-console.log"
 # stage API reports a stage skipped after a failure as FAILED; the console
 # says which ones were skipped and why.
 record_stages() {
-  local describe skipped
-  describe=$(jenkins_get "$JOB/1/wfapi/describe") || return 1
-  skipped=$(console | sed -n 's/^.*Stage "\(.*\)" skipped due to \(.*\)$/\1\t\2/p')
+  local build=$1 prefix=$2 describe skipped
+  describe=$(jenkins_get "$build/wfapi/describe") || return 1
+  skipped=$(jenkins_get "$build/consoleText" | sed -n 's/^.*Stage "\(.*\)" skipped due to \(.*\)$/\1\t\2/p')
   jq -c '.stages[] | {name, status, ms: .durationMillis, id}' <<<"$describe" | while read -r s; do
     local name status id tail="" why
     name=$(jq -r .name <<<"$s"); status=$(jq -r .status <<<"$s"); id=$(jq -r .id <<<"$s")
@@ -360,21 +363,47 @@ record_stages() {
       NOT_EXECUTED|SKIPPED*) st=skip ;;
       # A stage's output lives on its step nodes.
       *) st=fail
-         tail=$(for n in $(jenkins_get "$JOB/1/execution/node/$id/wfapi/describe" | jq -r '.stageFlowNodes[]?.id'); do
-                  jenkins_get "$JOB/1/execution/node/$n/wfapi/log" | jq -r '.text // ""'
+         tail=$(for n in $(jenkins_get "$build/execution/node/$id/wfapi/describe" | jq -r '.stageFlowNodes[]?.id'); do
+                  jenkins_get "$build/execution/node/$n/wfapi/log" | jq -r '.text // ""'
                 done | sed 's/<[^>]*>//g' | tail -n "$STEP_TAIL_LINES") ;;
     esac
-    log "   $st (Jenkins stage: $name — $status)"
-    jq -nc --arg name "Jenkins stage: $name" --arg status "$st" --arg js "$status" \
+    log "   $st ($prefix: $name — $status)"
+    jq -nc --arg name "$prefix: $name" --arg status "$st" --arg js "$status" \
       --argjson secs "$(( $(jq -r .ms <<<"$s") / 1000 ))" --arg tail "$tail" \
       '{name:$name,status:$status,jenkins_status:$js,seconds:$secs}
        + (if $tail != "" then {output_tail:$tail} else {} end)' >> "$STEPS_FILE"
     [ "$st" = fail ] && echo fail
   done
 }
-[ -n "$(record_stages)" ] && STEP_FAILURES=$((STEP_FAILURES + 1))
+[ -n "$(record_stages "$JOB/1" "Jenkins stage")" ] && STEP_FAILURES=$((STEP_FAILURES + 1))
 
 result_success() { build_json | jq -e '.result == "SUCCESS"' >/dev/null || { build_json | jq -r .result; console | tail -40; return 1; }; }
 step "build result is SUCCESS" result_success
+
+# ── Every way of asking for an agent, run for real ──────────────────────────
+# fixtures/agent-forms.Jenkinsfile: one stage per syntax (inheritFrom, the
+# deprecated kubernetes label, a yaml-only pod, label, any), each checking its
+# steps have the tools and a Docker daemon. The jenkins stage resolves the
+# same file offline. See docs/agent-resolution.md.
+FORMS=/job/agent-forms
+run_agent_forms() {
+  groovy "
+import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
+import org.jenkinsci.plugins.workflow.job.WorkflowJob
+def job = jenkins.model.Jenkins.get().createProject(WorkflowJob, 'agent-forms')
+job.definition = new CpsFlowDefinition(new String(Base64.decoder.decode('$(base64 -w0 "$HARNESS_DIR/fixtures/agent-forms.Jenkinsfile")'), 'UTF-8'), true)
+job.save()
+println('created')" | grep -qx created || { echo "could not create the agent-forms job"; return 1; }
+  jenkins_post "$FORMS/build" >/dev/null || return 1
+  local deadline=$(( $(date +%s) + 1800 ))
+  until [ "$(jenkins_get "$FORMS/1/api/json" | jq -r .building)" = false ]; do
+    [ "$(date +%s)" -gt "$deadline" ] && { echo "agent-forms still running after 30 minutes"; jenkins_post "$FORMS/1/stop" >/dev/null; return 1; }
+    sleep 10
+  done
+  jenkins_get "$FORMS/1/consoleText" > "$RESULTS_DIR/logs/pipeline-agent-forms.log"
+  jenkins_get "$FORMS/1/api/json" | jq -r '"result: \(.result)"'
+}
+step "agent-forms job runs" run_agent_forms
+[ -n "$(record_stages "$FORMS/1" "agent form")" ] && STEP_FAILURES=$((STEP_FAILURES + 1))
 
 finish_stage

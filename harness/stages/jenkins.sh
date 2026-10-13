@@ -141,4 +141,16 @@ agent_has_commands() {
 }
 step "agent image has every command the pipeline calls" agent_has_commands
 
+# The scan runs as the agent's user, so dependency-check must be able to
+# create its database as that user. Without a database and with updates off,
+# a working install stops at "the database does not exist".
+dependency_check_db_writable() {
+  local out
+  out=$(docker run --rm --entrypoint bash "$AGENT_IMAGE" -c \
+    'mkdir -p /tmp/empty && dependency-check.sh --project verify --scan /tmp/empty --noupdate --format JSON --out /tmp/out 2>&1')
+  echo "$out" | grep -E "ERROR|WARN" | head -5
+  ! grep -q "Unable to connect to the dependency-check database" <<<"$out"
+}
+step "dependency-check can create its database as the agent user" dependency_check_db_writable
+
 finish_stage

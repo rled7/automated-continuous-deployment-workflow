@@ -82,10 +82,16 @@ RUN curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
         | sh -s -- -b /usr/local/bin "${GRYPE_VERSION}"
 
 # ── OWASP Dependency Check ───────────────────────────────────────────────────
+# Its database lives in /opt/dependency-check/data unless --data says
+# otherwise. The agent runs as jenkins, so that directory must be jenkins's:
+# otherwise every scan fails with "Unable to connect to the dependency-check
+# database".
 RUN curl -fsSLo /tmp/dc.zip \
         "https://github.com/jeremylong/DependencyCheck/releases/download/v${DEPENDENCY_CHECK_VERSION}/dependency-check-${DEPENDENCY_CHECK_VERSION}-release.zip" \
     && unzip -q /tmp/dc.zip -d /opt \
     && ln -s /opt/dependency-check/bin/dependency-check.sh /usr/local/bin/dependency-check.sh \
+    && mkdir -p /opt/dependency-check/data \
+    && chown -R jenkins:jenkins /opt/dependency-check/data \
     && rm /tmp/dc.zip
 
 # ── k6 (load testing) ────────────────────────────────────────────────────────

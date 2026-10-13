@@ -77,6 +77,8 @@ jobs:
     timeout-minutes: 75
     env:
       PIPELINE_BRANCH: ${{ inputs.pipeline_branch || 'develop' }}
+      # For the Dependency Vulnerability Scan (repo secret; empty on forks).
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 

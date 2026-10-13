@@ -41,7 +41,7 @@ start_jenkins() {
     -e CASC_JENKINS_CONFIG=/var/jenkins_home/casc_configs \
     -e JENKINS_ADMIN_PASSWORD=verify \
     -e DOCKER_REGISTRY=registry.verify.local:5000 -e DOCKER_USER=verify -e DOCKER_PASSWORD=verify \
-    -e SONAR_TOKEN=verify -e SLACK_TOKEN=verify -e SLACK_WORKSPACE=verify \
+    -e SONAR_TOKEN=verify -e NVD_API_KEY=verify -e SLACK_TOKEN=verify -e SLACK_WORKSPACE=verify \
     -e GITHUB_USER=verify -e GITHUB_TOKEN=verify \
     -v "$REPO_ROOT/docker/jenkins/jenkins.yaml:/var/jenkins_home/casc_configs/jenkins.yaml:ro" \
     -v "$REPO_ROOT/docker/jenkins/kubeconfig.placeholder:/run/secrets/kubeconfig:ro" \

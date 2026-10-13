@@ -95,6 +95,7 @@ Jenkins is built with the plugins in `docker/jenkins/plugins.txt` and configures
 | `docker-registry-credentials` | Username/Password | `DOCKER_USER`, `DOCKER_PASSWORD` |
 | `kubeconfig` | Secret file | the file at `KUBECONFIG` |
 | `sonarqube-token` | Secret text | `SONAR_TOKEN` |
+| `nvd-api-key` | Secret text | `NVD_API_KEY` |
 | `slack-token` | Secret text | `SLACK_TOKEN` |
 | `github-credentials` | Username/Password | `GITHUB_USER`, `GITHUB_TOKEN` |
 

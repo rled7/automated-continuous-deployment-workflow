@@ -3,7 +3,9 @@
 
 jenkins:
   systemMessage: "Jenkins CI/CD — Configured via JCasC"
-  numExecutors: 4
+  # No builds on the controller: every build, whatever its agent block asks
+  # for (even `agent any`), runs in a cicd-agent pod. See docs/agent-resolution.md.
+  numExecutors: 0
   mode: NORMAL
   scmCheckoutRetryCount: 2
 
@@ -41,6 +43,17 @@ jenkins:
 
   # ── Kubernetes cloud: spawns pods from the custom agent image (Build 013) ──
   # The image bundles every CLI the Jenkinsfile invokes. See docs/agent-image.md.
+  #
+  # However a pipeline asks for its agent, it gets a cicd-agent pod
+  # (docs/agent-resolution.md):
+  #   - inheritFrom 'cicd-agent'            names the template (preferred);
+  #   - label 'cicd-agent', node('cicd-agent'), agent { label ... }
+  #                                         match the template's label;
+  #   - agent any                           matches it through nodeUsageMode NORMAL;
+  #   - anything else the plugin builds (the deprecated kubernetes `label`
+  #     option, a yaml-only pod) inherits it through defaultsProviderTemplate.
+  # And steps that don't pick a container run in jnlp, which is the agent
+  # image too.
   clouds:
     - kubernetes:
         name: "kubernetes"
@@ -51,67 +64,68 @@ jenkins:
         connectTimeout: 30
         readTimeout: 30
         containerCapStr: "10"
+        # Every pod this cloud creates inherits cicd-agent first.
+        defaultsProviderTemplate: "cicd-agent"
         templates:
           - name: "cicd-agent"
             label: "cicd-agent"
+            # Also used for builds that name no label (agent any).
+            nodeUsageMode: NORMAL
             namespace: "jenkins"
             serviceAccount: "jenkins-agent"
-            yaml: |
-              apiVersion: v1
-              kind: Pod
-              spec:
-                containers:
-                  - name: cicd
-                    image: "ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest"
-                    imagePullPolicy: Always
-                    command:
-                      - sleep
-                    args:
-                      - infinity
-                    tty: true
-                    env:
-                      # docker and buildx talk to the dind sidecar.
-                      - name: DOCKER_HOST
-                        value: "tcp://localhost:2375"
-                    resources:
-                      requests:
-                        cpu: "500m"
-                        memory: "1Gi"
-                      limits:
-                        cpu: "2"
-                        memory: "4Gi"
-                  # Docker for the Docker Build & Push and Release stages.
-                  # Kubernetes nodes run containerd and have no
-                  # /var/run/docker.sock to mount, so each agent pod runs its
-                  # own daemon. It must be privileged; it listens only inside
-                  # the pod.
-                  - name: dind
-                    image: "docker:27-dind"
-                    # `dockerd` first, or the image's entrypoint adds its own
-                    # --host=tcp://0.0.0.0:2375 (open to the whole cluster),
-                    # which also collides with this one.
-                    args:
-                      - "dockerd"
-                      - "--host=tcp://127.0.0.1:2375"
-                      - "--tls=false"
-                    env:
-                      - name: DOCKER_TLS_CERTDIR
-                        value: ""
-                    securityContext:
-                      privileged: true
-                    resources:
-                      requests:
-                        cpu: "500m"
-                        memory: "1Gi"
-                      limits:
-                        cpu: "2"
-                        memory: "4Gi"
-                    volumeMounts:
-                      - name: docker-data
-                        mountPath: /var/lib/docker
-                volumes:
-                  - name: docker-data
-                    emptyDir: {}
+            # Containers are container templates, not pod yaml: a pipeline
+            # that brings its own yaml replaces this template's yaml (the
+            # plugin's default yamlMergeStrategy), but container templates are
+            # always merged in.
+            containers:
+              # The agent connection. Steps run here unless the pipeline picks
+              # a container, so it is the agent image as well.
+              - name: "jnlp"
+                image: "ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest"
+                alwaysPullImage: true
+                envVars:
+                  - envVar: {key: "DOCKER_HOST", value: "tcp://localhost:2375"}
+                resourceRequestCpu: "250m"
+                resourceRequestMemory: "512Mi"
+                resourceLimitCpu: "2"
+                resourceLimitMemory: "4Gi"
+              # Where the Jenkinsfile runs its steps (defaultContainer 'cicd').
+              - name: "cicd"
+                image: "ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest"
+                alwaysPullImage: true
+                command: "sleep"
+                args: "infinity"
+                ttyEnabled: true
+                envVars:
+                  # docker and buildx talk to the dind sidecar.
+                  - envVar: {key: "DOCKER_HOST", value: "tcp://localhost:2375"}
+                resourceRequestCpu: "500m"
+                resourceRequestMemory: "1Gi"
+                resourceLimitCpu: "2"
+                resourceLimitMemory: "4Gi"
+              # Docker for the Docker Build & Push and Release stages.
+              # Kubernetes nodes run containerd and have no
+              # /var/run/docker.sock to mount, so each agent pod runs its own
+              # daemon. It must be privileged; it listens only inside the pod.
+              - name: "dind"
+                image: "docker:27-dind"
+                # `dockerd` first, or the image's entrypoint adds its own
+                # --host=tcp://0.0.0.0:2375 (open to the whole cluster), which
+                # also collides with this one.
+                args: "dockerd --host=tcp://127.0.0.1:2375 --tls=false"
+                privileged: true
+                envVars:
+                  - envVar: {key: "DOCKER_TLS_CERTDIR", value: ""}
+                resourceRequestCpu: "500m"
+                resourceRequestMemory: "1Gi"
+                resourceLimitCpu: "2"
+                resourceLimitMemory: "4Gi"
+            # dockerd's storage. Template volumes are mounted in every
+            # container; only dind uses this one.
+            volumes:
+              - emptyDirVolume:
+                  mountPath: "/var/lib/docker"
+                  memory: false
 
 # Every credential the Jenkinsfile and the jobs below use, filled from the
 # environment (.env, passed in by docker/docker-compose.yml). A credential the
@@ -263,7 +277,7 @@ jobs:
                       pipeline {
                           agent {
                               kubernetes {
-                                  label 'cicd-agent'
+                                  inheritFrom 'cicd-agent'
                                   defaultContainer 'cicd'
                               }
                           }

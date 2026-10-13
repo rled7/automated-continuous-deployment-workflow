@@ -16,9 +16,29 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 >   - [ ] First production deploy with the Rollout-only overlay, watched (removes the stray Deployment)
 >   - [ ] Whole Jenkinsfile run end to end (Jenkins controller + agent image in kind)
 >     - [x] Jenkins starts from `docker/jenkins` with `jenkins.yaml`; credentials, agent label and declarative validation checked (`jenkins` stage, Build 025)
+>     - [x] Every way of asking for an agent resolves to the `cicd-agent` pod (Build 026)
 >     - [ ] Pipeline runs on kind: agent pods from the `cicd-agent` template, stand-ins for SonarQube, the registry and Slack
 >   - [ ] Terraform stage pointed at the real infrastructure modules
 >   - [ ] Promote `require-pod-probes` to Enforce (now that it accepts valid probes)
+
+---
+
+## Build 026 — Every agent block gets the agent pod
+**Date:** 2026-10-13
+**Scope:** The Jenkinsfile asked for its agent with the Kubernetes plugin's deprecated `label` option, which builds a new, bare pod instead of using the `cicd-agent` template, so builds had no tools and no Docker. Beyond fixing the Jenkinsfile, Jenkins now resolves every way of asking for an agent to the same pod, and the harness checks each one. Write-up: `docs/agent-resolution.md`.
+
+### Fixed
+
+- `Jenkinsfile`, `docker/jenkins/jenkins.yaml` (`pr-preview-teardown`) — `kubernetes { label 'cicd-agent' }` → `inheritFrom 'cicd-agent'`.
+
+### Changed
+
+- `docker/jenkins/jenkins.yaml` — The cloud's `defaultsProviderTemplate: cicd-agent` makes every pod inherit the template (the deprecated `label`, a pod of the pipeline's own yaml); the template takes unlabelled builds (`nodeUsageMode: NORMAL`) and the controller has no executors, so `agent any` runs in the pod too; containers are container templates instead of pod yaml, because a pipeline's own yaml replaces the template's yaml but container templates are always merged; the `jnlp` container is the agent image with `DOCKER_HOST`, so steps that pick no container still have the tools and Docker.
+
+### Added
+
+- `harness/lib/agent-resolution.groovy`, `harness/stages/jenkins.sh` — Resolves every agent block of the Jenkinsfile, inline pipeline jobs and `harness/fixtures/agent-forms.Jenkinsfile` (one stage per syntax) with Jenkins' declarative parser and the Kubernetes plugin's own pod builder, and checks the steps' container, `DOCKER_HOST`, the privileged `dind` sidecar and controller executors. Fails with the original defect when `defaultsProviderTemplate` is removed.
+- `harness/stages/pipeline.sh` — Runs `agent-forms.Jenkinsfile` as a job in kind after the Jenkinsfile build; each stage checks its pod has the tools and a Docker daemon.
 
 ---
 

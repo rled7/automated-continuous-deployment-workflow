@@ -90,23 +90,23 @@ println(CredentialsProvider.lookupCredentials(com.cloudbees.plugins.credentials.
 }
 step "every credential the Jenkinsfile uses is defined" credentials_defined
 
-# The Kubernetes agent must name a pod template from jenkins.yaml with
-# inheritFrom: with only `label`, the plugin generates a pod of its own that
-# lacks the template's containers.
-agent_templates_defined() {
-  local jf wanted have missing=0
-  jf=$(grep -vE '^\s*//' "$REPO_ROOT/Jenkinsfile")
-  if grep -qE "^\s*label +'" <<<"$jf"; then
-    echo "the Jenkinsfile's kubernetes agent uses label; use inheritFrom '<template name>'"; missing=1
-  fi
-  wanted=$(grep -oE "inheritFrom +'[^']+'" <<<"$jf" | sed -E "s/.*'([^']+)'.*/\1/" | sort -u)
-  [ -n "$wanted" ] || { echo "no inheritFrom in the Jenkinsfile"; return 1; }
-  have=$(groovy 'println(jenkins.model.Jenkins.instance.clouds.collectMany { c -> c.respondsTo("getTemplates") ? c.templates*.name : [] }.join(" "))')
-  echo "pod templates in clouds: $have"
-  for t in $wanted; do grep -qw "$t" <<<"$have" || { echo "MISSING pod template $t"; missing=1; }; done
-  return $missing
+# However a pipeline asks for its agent (inheritFrom, the deprecated
+# kubernetes label, label, any, a pod of its own yaml), it must get a pod whose
+# steps run in the agent image next to a Docker daemon. Jenkins' parser reads
+# the agent blocks and the Kubernetes plugin builds each pod, for the
+# Jenkinsfile, every way of asking (fixtures/agent-forms.Jenkinsfile) and every
+# inline pipeline job. See docs/agent-resolution.md.
+agents_resolve() {
+  local map="[" f out
+  for f in "$REPO_ROOT/Jenkinsfile" "$HARNESS_DIR/fixtures/agent-forms.Jenkinsfile"; do
+    map+="'${f#"$REPO_ROOT"/}': '$(base64 -w0 "$f")', "
+  done
+  map+="]"
+  out=$(groovy "$(sed "s|__PIPELINES__|$map|" "$HARNESS_DIR/lib/agent-resolution.groovy")") || return 1
+  echo "$out"
+  grep -q '^RESULT: every agent resolves' <<<"$out"
 }
-step "the pod template the Jenkinsfile inherits from is defined" agent_templates_defined
+step "every agent block resolves to the agent pod (all syntaxes)" agents_resolve
 
 # The declarative linter Jenkins exposes (what `jenkins-cli declarative-linter`
 # calls).

@@ -7,7 +7,7 @@ ensure_docker || exit 1
 
 # The Dockerfile's base image, pulled via the mirror to dodge Docker Hub limits.
 base=$(awk '/^FROM/{print $2; exit}' "$REPO_ROOT/docker/Dockerfile")
-step "pull base image $base" pull_official "$base"
+step "pull base image $base" pull_base "$base"
 
 step "docker build" docker_build "$REPO_ROOT/docker/Dockerfile" "$REPO_ROOT" \
   -t "$APP_IMAGE" -t "$DEPLOY_IMAGE" || finish_stage

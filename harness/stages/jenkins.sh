@@ -28,7 +28,7 @@ teardown() {
 trap teardown EXIT
 
 base=$(awk '/^FROM/{print $2; exit}' "$REPO_ROOT/docker/jenkins/Dockerfile")
-step "pull $base" pull_official "$base"
+step "pull $base" pull_base "$base"
 step "build docker/jenkins/Dockerfile (plugins.txt)" \
   docker_build "$REPO_ROOT/docker/jenkins/Dockerfile" "$REPO_ROOT/docker/jenkins" -t "$IMAGE" || finish_stage
 
@@ -121,7 +121,7 @@ step "Jenkinsfile passes Jenkins' declarative validation" validate_jenkinsfile
 # The agent image every stage runs in (the cicd container of the pod template).
 AGENT_IMAGE="harness-agent:local"
 for img in $(awk '/^FROM/{print $2}' "$REPO_ROOT/docker/jenkins-agent/Dockerfile"); do
-  step "pull $img" pull_official "$img"
+  step "pull $img" pull_base "$img"
 done
 step "build docker/jenkins-agent/Dockerfile" \
   docker_build "$REPO_ROOT/docker/jenkins-agent/Dockerfile" "$REPO_ROOT/docker/jenkins-agent" -t "$AGENT_IMAGE" || finish_stage

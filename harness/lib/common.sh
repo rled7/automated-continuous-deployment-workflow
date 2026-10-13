@@ -72,6 +72,15 @@ pull_official() {
   docker pull -q "$src" >/dev/null && docker tag "$src" "$img"
 }
 
+# pull_base IMAGE — a Dockerfile's base image, for docker_build. The CI
+# builder (HARNESS_DOCKER_CACHE=gha, a BuildKit container with its own
+# registry mirror) pulls bases itself, often only their manifests when the
+# layers are cached, so there it is skipped.
+pull_base() {
+  [ "${HARNESS_DOCKER_CACHE:-}" = gha ] && { echo "the BuildKit builder pulls $1 itself"; return 0; }
+  pull_official "$1"
+}
+
 # ensure_docker — succeeds if a Docker daemon is reachable. In throwaway
 # sandboxes (running as root, dockerd installed but not started) it starts one.
 ensure_docker() {

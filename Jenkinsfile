@@ -98,7 +98,11 @@ pipeline {
                     steps {
                         // The NVD API key lets dependency-check download the
                         // vulnerability database; without one it is
-                        // rate-limited too hard to finish.
+                        // rate-limited too hard to finish. With
+                        // DEPENDENCY_CHECK_DATA set (a volume on the pod
+                        // template, see jenkins.yaml) the database is kept
+                        // between builds and only updated, instead of
+                        // downloaded in full by every build.
                         withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
                             sh '''
                                 cd app
@@ -110,6 +114,7 @@ pipeline {
                                   --project "${APP_NAME}" \
                                   --scan . \
                                   --nvdApiKey "$NVD_API_KEY" \
+                                  ${DEPENDENCY_CHECK_DATA:+--data "$DEPENDENCY_CHECK_DATA"} \
                                   --format "HTML" \
                                   --out reports/dependency-check \
                                   --failOnCVSS 7

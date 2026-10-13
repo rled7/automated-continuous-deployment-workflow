@@ -31,6 +31,11 @@ AGENT_IMAGE="$REGISTRY/jenkins-cicd-agent:verify"
 GIT_URL=http://git.jenkins.svc.cluster.local/my-app.git
 PIPELINE_TIMEOUT="${PIPELINE_TIMEOUT:-2700}"   # seconds for the whole build
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-300}"          # seconds for the first agent to connect
+# dependency-check's vulnerability database, kept between runs (CI caches the
+# directory) and mounted into agent pods, so the scan updates it instead of
+# downloading all of NVD every time.
+DC_DATA="${DEPENDENCY_CHECK_DATA_DIR:-$HARNESS_DIR/.cache/dependency-check}"
+DC_NODE_PATH=/var/lib/dependency-check
 
 JENKINS_URL="http://127.0.0.1:18081"
 SONAR_URL="http://127.0.0.1:19001"
@@ -57,6 +62,8 @@ teardown() {
   [ "${KEEP:-0}" = 1 ] && { log "KEEP=1: kind cluster $CLUSTER left running (KUBECONFIG=$KUBECONFIG)"; return; }
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
   docker rm -f kind-registry harness-git >/dev/null 2>&1
+  # Agent pods run as uid 1000.
+  mkdir -p "$DC_DATA" && chmod -R a+rwX "$DC_DATA" || return 1
 }
 trap teardown EXIT
 
@@ -86,6 +93,8 @@ nodes:
     extraPortMappings:
       - {containerPort: 30080, hostPort: ${JENKINS_URL##*:}, listenAddress: 127.0.0.1}
       - {containerPort: 30090, hostPort: ${SONAR_URL##*:}, listenAddress: 127.0.0.1}
+    extraMounts:
+      - {hostPath: "$DC_DATA", containerPath: $DC_NODE_PATH}
 containerdConfigPatches:
   - |-
     [plugins."io.containerd.grpc.v1.cri".registry]
@@ -218,9 +227,21 @@ jenkins_up() {
   { external_service kind-registry "$(ip_on_kind kind-registry)" 5000
     external_service git "$(ip_on_kind harness-git)" 80; } | kubectl apply -f - >/dev/null || return 1
 
-  # jenkins.yaml with the stand-in agent image.
+  # jenkins.yaml with the stand-in agent image, and the dependency-check
+  # database mounted from the node where production would mount a volume.
   sed "s|ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest|$AGENT_IMAGE|" "$REPO_ROOT/docker/jenkins/jenkins.yaml" > "$work/jenkins.yaml"
   grep -q "$AGENT_IMAGE" "$work/jenkins.yaml" || { echo "agent image not found in jenkins.yaml"; return 1; }
+  python3 - "$work/jenkins.yaml" "$DC_NODE_PATH" <<'PY2' || return 1
+import sys, yaml
+path, data = sys.argv[1:]
+casc = yaml.safe_load(open(path))
+for cloud in casc["jenkins"]["clouds"]:
+    for t in cloud.get("kubernetes", {}).get("templates", []):
+        if t["name"] == "cicd-agent":
+            t.setdefault("volumes", []).append({"hostPathVolume": {"hostPath": data, "mountPath": data}})
+            t.setdefault("envVars", []).append({"envVar": {"key": "DEPENDENCY_CHECK_DATA", "value": data}})
+yaml.safe_dump(casc, open(path, "w"), sort_keys=False, width=10**6)
+PY2
   kubectl -n jenkins create configmap jenkins-casc --from-file=jenkins.yaml="$work/jenkins.yaml" >/dev/null || return 1
 
   kubectl -n jenkins create secret generic jenkins-env \

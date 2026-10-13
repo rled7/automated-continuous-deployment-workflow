@@ -126,6 +126,16 @@ jenkins:
               - emptyDirVolume:
                   mountPath: "/var/lib/docker"
                   memory: false
+              # Keep dependency-check's vulnerability database between
+              # builds, so each scan updates it instead of downloading all of
+              # NVD (10+ minutes). Create a ReadWriteOnce PVC in the jenkins
+              # namespace, then uncomment this and the envVars below.
+              # - persistentVolumeClaim:
+              #     claimName: "dependency-check-data"
+              #     mountPath: "/var/lib/dependency-check"
+              #     readOnly: false
+            # envVars:
+            #   - envVar: {key: "DEPENDENCY_CHECK_DATA", value: "/var/lib/dependency-check"}
 
 # Every credential the Jenkinsfile and the jobs below use, filled from the
 # environment (.env, passed in by docker/docker-compose.yml). A credential the

@@ -50,7 +50,7 @@ docker push ghcr.io/<ORG>/jenkins-cicd-agent:<TAG>
 
 ## Use
 
-1. Update `docker/jenkins/jenkins.yaml` — `jenkins.clouds.kubernetes.templates[0].containers[0].image` — to reference the pushed tag.
+1. Update `docker/jenkins/jenkins.yaml` — the `image` of the `jnlp` and `cicd` containers in the `cicd-agent` template — to reference the pushed tag. Both run the agent image so that steps have the tools whichever container they run in (see [agent-resolution.md](agent-resolution.md)).
 2. Apply the JCasC change (Argo CD will sync it if Jenkins runs in-cluster, otherwise restart the Jenkins controller pod).
 3. The `Jenkinsfile` already declares `agent { kubernetes { ... } }`, so subsequent builds will spawn pods from the new image automatically.
 

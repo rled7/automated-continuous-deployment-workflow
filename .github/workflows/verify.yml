@@ -1,15 +1,16 @@
 name: verify
 
-# Runs the local verification harness (harness/verify.sh), including the
-# stages that need a host where kind works: cluster-real and cluster-prod in
-# the verify job, and pipeline (the Jenkinsfile run by Jenkins in kind) in its
-# own job alongside it.
+# Runs the local verification harness (harness/verify.sh). Stage groups run as
+# parallel jobs, so the workflow takes as long as its slowest group instead of
+# the sum of all stages; pipeline (the Jenkinsfile run by Jenkins in kind) is
+# one of them. Every job reuses Docker layers, the harness tools and npm
+# packages from the GitHub Actions cache.
 on:
   pull_request:
   workflow_dispatch:
     inputs:
       stages:
-        description: "Stages for the verify job (space-separated; empty = all but pipeline)"
+        description: "Run only these stages, in one job (space-separated; empty = every group)"
         required: false
         default: ""
       pipeline_branch:
@@ -26,38 +27,103 @@ concurrency:
 
 jobs:
   verify:
+    name: verify (${{ matrix.group }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        # Stages that need the app image build it first; the layer cache
+        # makes that cheap after the first run.
+        include:
+          - {group: checks, stages: "static app image pod cluster-sim"}
+          - {group: terraform, stages: "terraform"}
+          - {group: jenkins, stages: "jenkins"}
+          - {group: cluster-real, stages: "image cluster-real"}
+          - {group: cluster-prod, stages: "image cluster-prod"}
+          - {group: pipeline, stages: "pipeline"}
+    env:
+      STAGES: ${{ inputs.stages || matrix.stages }}
+      PIPELINE_BRANCH: ${{ inputs.pipeline_branch || 'develop' }}
+      HARNESS_DOCKER_CACHE: gha
     steps:
+      # A manual run with explicit stages runs them once, in the first group.
+      - name: Skip (manual run with explicit stages)
+        id: skip
+        if: inputs.stages != '' && matrix.group != 'checks'
+        run: echo "skip=1" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
+        if: steps.skip.outputs.skip != '1'
 
       - uses: actions/setup-node@v4
+        if: steps.skip.outputs.skip != '1'
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            tests/package-lock.json
+
+      # Pinned tool downloads (kubectl, kind, terraform, ...): keyed on the
+      # file that pins their versions.
+      - uses: actions/cache@v4
+        if: steps.skip.outputs.skip != '1'
+        with:
+          path: harness/.bin
+          key: harness-bin-${{ runner.os }}-${{ hashFiles('harness/lib/tools.sh') }}
+
+      # Terraform providers, shared across runs.
+      - uses: actions/cache@v4
+        if: steps.skip.outputs.skip != '1' && contains(env.STAGES, 'terraform')
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: terraform-plugins-${{ runner.os }}-${{ hashFiles('harness/terraform/**/*.tf', 'infra/**/*.tf') }}
+          restore-keys: terraform-plugins-${{ runner.os }}-
+
+      # Docker layer caching: a BuildKit builder that can export to the
+      # Actions cache, with Docker Hub pulls going through Google's mirror
+      # (Docker Hub rate-limits shared runner IPs).
+      - uses: crazy-max/ghaction-github-runtime@v3
+        if: steps.skip.outputs.skip != '1'
+      - uses: docker/setup-buildx-action@v3
+        if: steps.skip.outputs.skip != '1'
+        with:
+          driver: docker-container
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       - name: Harness prerequisites
+        if: steps.skip.outputs.skip != '1'
         run: |
           python3 -c 'import yaml' 2>/dev/null || pip install --user pyyaml
           podman --version
+          mkdir -p ~/.terraform.d/plugin-cache
 
       - name: Run harness
-        env:
-          STAGES: ${{ inputs.stages || 'static app image pod cluster-sim terraform jenkins cluster-real cluster-prod' }}
-        run: harness/verify.sh $STAGES
+        if: steps.skip.outputs.skip != '1'
+        run: |
+          # STAGES is a space-separated list, split on purpose.
+          # shellcheck disable=SC2086
+          TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" harness/verify.sh $STAGES
 
       - name: Summary
-        if: always()
+        if: always() && steps.skip.outputs.skip != '1'
         run: |
+          [ -f harness/.results/results.json ] || exit 0
           {
-            echo '| Stage | Result | Time | Failed steps |'
+            echo "### ${{ matrix.group }}"
+            echo '| Stage | Step | Result | Time |'
             echo '|---|---|---|---|'
-            jq -r '.stages[] | "| \(.stage) | \(.status) | \(.seconds)s | \([.steps[] | select(.status=="fail") | .name] | join(", ")) |"' \
+            jq -r '.stages[] | .stage as $s | .steps[] | "| \($s) | \(.name) | \(.status) | \(.seconds)s |"' \
               harness/.results/results.json
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Logs of failed stages
-        if: failure()
+        if: failure() && steps.skip.outputs.skip != '1'
         run: |
+          [ -f harness/.results/results.json ] || exit 0
           for stage in $(jq -r '.stages[] | select(.status=="fail") | .stage' harness/.results/results.json); do
             echo "::group::$stage"
             cat "harness/.results/logs/$stage.log"
@@ -65,42 +131,9 @@ jobs:
           done
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.skip.outputs.skip != '1'
         with:
-          name: harness-results
+          name: harness-results-${{ matrix.group }}
           path: harness/.results/
           include-hidden-files: true  # .results is a dot-directory
-          retention-days: 14
-
-  pipeline:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 75
-    env:
-      PIPELINE_BRANCH: ${{ inputs.pipeline_branch || 'develop' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run the Jenkinsfile in Jenkins on kind
-        run: harness/verify.sh pipeline
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo "### Jenkinsfile on $PIPELINE_BRANCH"
-            echo '| Step | Result | Time |'
-            echo '|---|---|---|'
-            jq -r '.stages[].steps[] | "| \(.name) | \(.status) | \(.seconds)s |"' harness/.results/results.json
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Stage log
-        if: failure()
-        run: cat harness/.results/logs/pipeline.log
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: pipeline-results
-          path: harness/.results/
-          include-hidden-files: true
           retention-days: 14

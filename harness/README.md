@@ -71,10 +71,14 @@ a real sandbox account for the final check.
 ## Where it runs
 
 - **Your machine**: everything, including `cluster-real` and `cluster-prod`.
-- **GitHub Actions**: `.github/workflows/verify.yml` runs all stages,
-  including both real-cluster stages, on every PR and on demand, prints the
-  logs of failed stages, and uploads `harness/.results` as an artifact. The
-  `pipeline` stage runs in its own job alongside.
+- **GitHub Actions**: `.github/workflows/verify.yml` runs every stage on
+  every PR and on demand. Stage groups run as parallel jobs (checks,
+  terraform, jenkins, cluster-real, cluster-prod, pipeline), so the workflow
+  takes as long as the slowest group rather than the sum of all stages. Every
+  job reuses Docker layers (`HARNESS_DOCKER_CACHE=gha` in `docker_build`),
+  the pinned tools in `harness/.bin`, Terraform providers and npm packages
+  from the GitHub Actions cache. Each job prints its steps in the run summary,
+  the logs of failed stages, and uploads `harness/.results` as an artifact.
 - **Claude Code cloud sessions**: everything except `cluster-real`,
   `cluster-prod` and `pipeline` (the sandbox does not allow the negative OOM scores Kubernetes
   gives its pods, so kind and k3s pods never start). The SessionStart hook

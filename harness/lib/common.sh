@@ -165,9 +165,19 @@ fi
 # `docker buildx build --load`. With the sandbox trust above, every shell-form
 # RUN gets it as a bind mount plus the variables curl, npm and Java read, so
 # it works in single-stage images too and never lands in a layer.
+#
+# With HARNESS_DOCKER_CACHE=gha (set by the CI workflow) layers are also read
+# from and written to the GitHub Actions cache, so unchanged layers are not
+# rebuilt on the next run. Needs a docker-container buildx builder and the
+# Actions runtime variables, which the workflow sets up.
 docker_build() {
   local dockerfile=$1 context=$2; shift 2
-  local args=() trust env=""
+  local args=() trust env="" scope
+  if [ "${HARNESS_DOCKER_CACHE:-}" = gha ]; then
+    # One cache per Dockerfile, shared by every job that builds it.
+    scope=$(realpath --relative-to="$REPO_ROOT" "$dockerfile" | tr '/.' '--')
+    args+=(--cache-from "type=gha,scope=$scope" --cache-to "type=gha,mode=max,scope=$scope")
+  fi
   if [ -n "${HARNESS_CA_BUNDLE:-}${HARNESS_JAVA_TRUSTSTORE:-}" ]; then
     trust=$(mktemp -d)
     if [ -n "${HARNESS_CA_BUNDLE:-}" ]; then

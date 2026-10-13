@@ -39,7 +39,6 @@ DC_NODE_PATH=/var/lib/dependency-check
 
 JENKINS_URL="http://127.0.0.1:18081"
 SONAR_URL="http://127.0.0.1:19001"
-SONAR_IMAGE=sonarqube:10.7.0-community
 SONAR_PASSWORD="Harness-verify-1"   # SonarQube requires a complex one
 SONAR_TOKEN=""
 JENKINS_AUTH="admin:verify"
@@ -62,27 +61,19 @@ teardown() {
   [ "${KEEP:-0}" = 1 ] && { log "KEEP=1: kind cluster $CLUSTER left running (KUBECONFIG=$KUBECONFIG)"; return; }
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
   docker rm -f kind-registry harness-git >/dev/null 2>&1
-  # Agent pods run as uid 1000.
-  mkdir -p "$DC_DATA" && chmod -R a+rwX "$DC_DATA" || return 1
 }
 trap teardown EXIT
 
-# ── Images: the controller and the agent, as the jenkins stage builds them ──
-for df in docker/jenkins/Dockerfile docker/jenkins-agent/Dockerfile; do
-  for img in $(awk '/^FROM/{print $2}' "$REPO_ROOT/$df"); do step "pull $img" pull_official "$img"; done
-done
-step "build docker/jenkins/Dockerfile" \
-  docker_build "$REPO_ROOT/docker/jenkins/Dockerfile" "$REPO_ROOT/docker/jenkins" -t harness-jenkins:local || finish_stage
-step "build docker/jenkins-agent/Dockerfile" \
-  docker_build "$REPO_ROOT/docker/jenkins-agent/Dockerfile" "$REPO_ROOT/docker/jenkins-agent" -t harness-agent:local || finish_stage
+# ── Cluster with a local registry (kind's documented setup) ─────────────────
+# It needs nothing the image builds produce, so it is created in the
+# background while they run.
 step "pull registry:2" pull_official registry:2
 step "pull busybox" pull_official busybox:1.37
-
-# ── Cluster with a local registry (kind's documented setup) ─────────────────
 cluster_up() {
-  export KUBECONFIG="${KIND_KUBECONFIG:-$work/kubeconfig}"
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
   docker rm -f kind-registry harness-git >/dev/null 2>&1
+  # Agent pods run as uid 1000 and must be able to write the database.
+  mkdir -p "$DC_DATA" && chmod -R a+rwX "$DC_DATA" || return 1
   # Jenkins is reached through a NodePort mapped to this host (a
   # port-forward stalls under load).
   cat > "$work/kind.yaml" <<EOF
@@ -103,14 +94,42 @@ EOF
   kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE" --config "$work/kind.yaml" --wait 180s || return 1
   docker run -d --name kind-registry -p "127.0.0.1:${HOST_REGISTRY#*:}:5000" registry:2 >/dev/null &&
     docker network connect kind kind-registry || return 1
-  # Nodes pull kind-registry:5000/... over plain HTTP.
+  local node
   for node in $(kind get nodes --name "$CLUSTER"); do
-    docker exec "$node" sh -c "mkdir -p /etc/containerd/certs.d/$REGISTRY &&
-      printf '[host.\"http://$REGISTRY\"]\n' > /etc/containerd/certs.d/$REGISTRY/hosts.toml" || return 1
+    # Nodes pull kind-registry:5000/... over plain HTTP, and Docker Hub
+    # images (SonarQube, the dind sidecar) through Google's mirror: Docker
+    # Hub rate-limits CI runners.
+    docker exec "$node" mkdir -p "/etc/containerd/certs.d/$REGISTRY" /etc/containerd/certs.d/docker.io || return 1
+    printf '[host."http://%s"]\n' "$REGISTRY" |
+      docker exec -i "$node" sh -c "cat > /etc/containerd/certs.d/$REGISTRY/hosts.toml" || return 1
+    printf '%s\n' 'server = "https://registry-1.docker.io"' '[host."https://mirror.gcr.io"]' \
+      '  capabilities = ["pull", "resolve"]' |
+      docker exec -i "$node" sh -c "cat > /etc/containerd/certs.d/docker.io/hosts.toml" || return 1
   done
 }
 export KUBECONFIG="${KIND_KUBECONFIG:-$work/kubeconfig}"
-step "create kind cluster with a local registry" cluster_up || finish_stage
+( cluster_up > "$work/cluster.log" 2>&1; echo $? > "$work/cluster.rc" ) &
+cluster_pid=$!
+
+# ── Images: the controller and the agent, as the jenkins stage builds them ──
+for df in docker/jenkins/Dockerfile docker/jenkins-agent/Dockerfile; do
+  for img in $(awk '/^FROM/{print $2}' "$REPO_ROOT/$df"); do step "pull $img" pull_base "$img"; done
+done
+step "build docker/jenkins/Dockerfile" \
+  docker_build "$REPO_ROOT/docker/jenkins/Dockerfile" "$REPO_ROOT/docker/jenkins" -t harness-jenkins:local || finish_stage
+step "build docker/jenkins-agent/Dockerfile" \
+  docker_build "$REPO_ROOT/docker/jenkins-agent/Dockerfile" "$REPO_ROOT/docker/jenkins-agent" -t harness-agent:local || finish_stage
+
+cluster_ready() { wait "$cluster_pid"; cat "$work/cluster.log"; return "$(cat "$work/cluster.rc" 2>/dev/null || echo 1)"; }
+step "create kind cluster with a local registry (started before the builds)" cluster_ready || finish_stage
+
+# SonarQube takes the better part of a minute to start: start it now and set
+# it up after the next steps.
+sonar_start() {
+  kubectl create namespace jenkins --dry-run=client -o yaml | kubectl apply -f - >/dev/null &&
+    kubectl apply -f "$HARNESS_DIR/fixtures/sonarqube.yaml"
+}
+step "start SonarQube" sonar_start || finish_stage
 
 push_images() {
   local src dst
@@ -121,8 +140,8 @@ push_images() {
 }
 step "push the Jenkins and agent images to the registry" push_images || finish_stage
 
-# Other images the pod template runs (the dind sidecar), loaded into the
-# nodes so they are not pulled from Docker Hub, which rate-limits CI runners.
+# The pod template's other images (the dind sidecar), pulled onto the node in
+# the background now, so the first agent pod does not wait for them.
 template_images() {
   python3 - "$REPO_ROOT/docker/jenkins/jenkins.yaml" <<'PY'
 import sys, yaml
@@ -137,14 +156,11 @@ for cloud in casc["jenkins"]["clouds"]:
                 print(c["image"])
 PY
 }
-load_template_images() {
-  local img
-  for img in $(template_images) "$SONAR_IMAGE"; do
-    pull_official "$img" && kind load docker-image "$img" --name "$CLUSTER" >/dev/null || { echo "could not load $img"; return 1; }
-    echo "loaded $img"
+for img in $(template_images); do
+  for node in $(kind get nodes --name "$CLUSTER"); do
+    docker exec "$node" crictl pull "$img" >/dev/null 2>&1 &
   done
-}
-step "load the pod template's other images and SonarQube into the cluster" load_template_images || finish_stage
+done
 
 # ── Source: this working tree (committed or not) as $BRANCH and main ────────
 git_up() {
@@ -219,7 +235,7 @@ sonar_up() {
     -d url=http://jenkins.jenkins.svc.cluster.local:8080/sonarqube-webhook/ >/dev/null || { echo "could not create the webhook"; return 1; }
   echo "SonarQube up; token and Jenkins webhook created"
 }
-step "SonarQube starts (token, quality gate webhook)" sonar_up || finish_stage
+step "SonarQube up (token, quality gate webhook)" sonar_up || finish_stage
 
 # ── Jenkins in the cluster ──────────────────────────────────────────────────
 jenkins_up() {

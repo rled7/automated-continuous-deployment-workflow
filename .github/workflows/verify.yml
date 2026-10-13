@@ -3,10 +3,21 @@ name: verify
 # Runs the local verification harness (harness/verify.sh). Stage groups run as
 # parallel jobs, so the workflow takes as long as its slowest group instead of
 # the sum of all stages; pipeline (the Jenkinsfile run by Jenkins in kind) is
-# one of them. Every job reuses Docker layers, the harness tools and npm
-# packages from the GitHub Actions cache.
+# one of them.
+#
+# Two layers of caching:
+#   - A group whose inputs (the files it reads, hashed from git) are exactly
+#     those of a run that passed is skipped: changing only the docs, or only
+#     Terraform, re-runs only what that change can affect. Each week starts
+#     clean, so floating base images and tool downloads are re-checked.
+#   - A group that runs reuses Docker layers, the harness tools, Terraform
+#     providers, npm packages and dependency-check's vulnerability database
+#     from the GitHub Actions cache.
 on:
   pull_request:
+  # Runs on main populate the caches every pull request can read.
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       stages:
@@ -17,6 +28,10 @@ on:
         description: "Branch name the pipeline job builds the commit as (develop or main)"
         required: false
         default: "develop"
+      force:
+        description: "Run every group, even those whose inputs already passed"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,34 +48,92 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Stages that need the app image build it first; the layer cache
-        # makes that cheap after the first run.
+        # inputs: git pathspecs of everything the group's stages read, on top
+        # of the harness itself (COMMON_INPUTS). Stages that need the app
+        # image build it first; the layer cache makes that cheap.
         include:
-          - {group: checks, stages: "static app image pod cluster-sim"}
-          - {group: terraform, stages: "terraform"}
-          - {group: jenkins, stages: "jenkins"}
-          - {group: cluster-real, stages: "image cluster-real"}
-          - {group: cluster-prod, stages: "image cluster-prod"}
-          - {group: pipeline, stages: "pipeline"}
+          - group: checks
+            stages: "static app image pod cluster-sim"
+            inputs: >-
+              app tests docker/Dockerfile .dockerignore docker/.dockerignore k8s policies
+              harness/checks harness/fixtures harness/stages/static.sh harness/stages/app.sh
+              harness/stages/image.sh harness/stages/pod.sh harness/stages/cluster-sim.sh
+          - group: terraform
+            stages: "terraform"
+            inputs: harness/terraform harness/stages/terraform.sh
+          - group: jenkins
+            stages: "jenkins"
+            inputs: >-
+              docker/jenkins docker/jenkins-agent Jenkinsfile
+              harness/stages/jenkins.sh harness/fixtures/agent-forms.Jenkinsfile
+          - group: cluster-real
+            stages: "image cluster-real"
+            inputs: >-
+              app tests docker/Dockerfile .dockerignore docker/.dockerignore k8s scripts
+              harness/fixtures harness/stages/image.sh harness/stages/cluster-real.sh
+          - group: cluster-prod
+            stages: "image cluster-prod"
+            inputs: >-
+              app tests docker/Dockerfile .dockerignore docker/.dockerignore k8s scripts
+              harness/fixtures harness/stages/image.sh harness/stages/cluster-prod.sh
+          # The Jenkinsfile lints, tests, scans and builds the whole tree.
+          - group: pipeline
+            stages: "pipeline"
+            inputs: ". :(exclude)docs :(exclude)*.md"
     env:
       STAGES: ${{ inputs.stages || matrix.stages }}
       PIPELINE_BRANCH: ${{ inputs.pipeline_branch || 'develop' }}
       HARNESS_DOCKER_CACHE: gha
+      COMMON_INPUTS: .github/workflows/verify.yml harness/verify.sh harness/lib
       # For the Dependency Vulnerability Scan (repo secret; empty on forks).
       # Only the job that runs the Jenkinsfile gets it.
       NVD_API_KEY: ${{ matrix.group == 'pipeline' && secrets.NVD_API_KEY || '' }}
     steps:
-      # A manual run with explicit stages runs them once, in the first group.
-      - name: Skip (manual run with explicit stages)
-        id: skip
-        if: inputs.stages != '' && matrix.group != 'checks'
-        run: echo "skip=1" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v4
-        if: steps.skip.outputs.skip != '1'
+
+      # The key names the exact content of every file the group reads (git
+      # blob hashes), so identical inputs give an identical key.
+      - name: Inputs of this group
+        id: plan
+        env:
+          GROUP_INPUTS: ${{ matrix.inputs }}
+          MANUAL_STAGES: ${{ inputs.stages }}
+        run: |
+          set -f  # pathspecs like *.md are for git, not the shell
+          echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+          if [ -n "$MANUAL_STAGES" ]; then
+            # A manual run with explicit stages runs them once, in the first
+            # group, and is never skipped.
+            [ "${{ matrix.group }}" = checks ] && echo "manual=run" || echo "manual=skip"
+          else
+            # shellcheck disable=SC2086 # space-separated pathspecs
+            hash=$(git ls-files -s -- $COMMON_INPUTS $GROUP_INPUTS | sha256sum | cut -c1-24)
+            echo "key=verified-${{ matrix.group }}-$(date -u +%G-W%V)-$hash"
+          fi >> "$GITHUB_OUTPUT"
+
+      - name: Did these inputs already pass?
+        id: verified
+        if: steps.plan.outputs.key != '' && !inputs.force
+        uses: actions/cache/restore@v4
+        with:
+          path: harness/.verified
+          key: ${{ steps.plan.outputs.key }}
+          lookup-only: true
+
+      - name: Run or skip
+        id: gate
+        run: |
+          if [ "${{ steps.plan.outputs.manual }}" = skip ]; then
+            echo "run=false"
+          elif [ "${{ steps.verified.outputs.cache-hit }}" = true ]; then
+            echo "run=false"
+            echo "### ${{ matrix.group }}: skipped, inputs unchanged since a passing run (\`${{ steps.plan.outputs.key }}\`)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "run=true"
+          fi >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
-        if: steps.skip.outputs.skip != '1'
+        if: steps.gate.outputs.run == 'true'
         with:
           node-version: 20
           cache: npm
@@ -71,26 +144,38 @@ jobs:
       # Pinned tool downloads (kubectl, kind, terraform, ...): keyed on the
       # file that pins their versions.
       - uses: actions/cache@v4
-        if: steps.skip.outputs.skip != '1'
+        if: steps.gate.outputs.run == 'true'
         with:
           path: harness/.bin
           key: harness-bin-${{ runner.os }}-${{ hashFiles('harness/lib/tools.sh') }}
 
       # Terraform providers, shared across runs.
       - uses: actions/cache@v4
-        if: steps.skip.outputs.skip != '1' && contains(env.STAGES, 'terraform')
+        if: steps.gate.outputs.run == 'true' && contains(env.STAGES, 'terraform')
         with:
           path: ~/.terraform.d/plugin-cache
           key: terraform-plugins-${{ runner.os }}-${{ hashFiles('harness/terraform/**/*.tf', 'infra/**/*.tf') }}
           restore-keys: terraform-plugins-${{ runner.os }}-
 
+      # dependency-check's vulnerability database: the newest copy, which the
+      # scan only updates (downloading all of NVD takes 10+ minutes). One copy
+      # is saved per day.
+      - name: Restore the dependency-check database
+        id: dc-restore
+        if: steps.gate.outputs.run == 'true' && contains(env.STAGES, 'pipeline')
+        uses: actions/cache/restore@v4
+        with:
+          path: harness/.cache/dependency-check
+          key: dependency-check-${{ runner.os }}-${{ steps.plan.outputs.day }}
+          restore-keys: dependency-check-${{ runner.os }}-
+
       # Docker layer caching: a BuildKit builder that can export to the
       # Actions cache, with Docker Hub pulls going through Google's mirror
       # (Docker Hub rate-limits shared runner IPs).
       - uses: crazy-max/ghaction-github-runtime@v3
-        if: steps.skip.outputs.skip != '1'
+        if: steps.gate.outputs.run == 'true'
       - uses: docker/setup-buildx-action@v3
-        if: steps.skip.outputs.skip != '1'
+        if: steps.gate.outputs.run == 'true'
         with:
           driver: docker-container
           buildkitd-config-inline: |
@@ -98,21 +183,42 @@ jobs:
               mirrors = ["mirror.gcr.io"]
 
       - name: Harness prerequisites
-        if: steps.skip.outputs.skip != '1'
+        if: steps.gate.outputs.run == 'true'
         run: |
           python3 -c 'import yaml' 2>/dev/null || pip install --user pyyaml
           podman --version
           mkdir -p ~/.terraform.d/plugin-cache
 
       - name: Run harness
-        if: steps.skip.outputs.skip != '1'
+        if: steps.gate.outputs.run == 'true'
         run: |
           # STAGES is a space-separated list, split on purpose.
           # shellcheck disable=SC2086
           TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" harness/verify.sh $STAGES
 
+      # Saved even when the build fails later on: the scan has updated it.
+      # Agent pods write it as another user; stale lock files would make the
+      # next scan wait.
+      - name: Prepare the dependency-check database for the cache
+        id: dc-prepare
+        if: always() && steps.dc-restore.outcome == 'success' && steps.dc-restore.outputs.cache-hit != 'true'
+        run: |
+          dir=harness/.cache/dependency-check
+          if [ -n "$(sudo find "$dir" -name 'odc.mv.db' -size +1M 2>/dev/null)" ]; then
+            sudo find "$dir" -name '*.lock' -delete
+            sudo chmod -R a+rX "$dir"
+            du -sh "$dir"
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save the dependency-check database
+        if: always() && steps.dc-prepare.outputs.save == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: harness/.cache/dependency-check
+          key: dependency-check-${{ runner.os }}-${{ steps.plan.outputs.day }}
+
       - name: Summary
-        if: always() && steps.skip.outputs.skip != '1'
+        if: always() && steps.gate.outputs.run == 'true'
         run: |
           [ -f harness/.results/results.json ] || exit 0
           {
@@ -124,7 +230,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Logs of failed stages
-        if: failure() && steps.skip.outputs.skip != '1'
+        if: failure() && steps.gate.outputs.run == 'true'
         run: |
           [ -f harness/.results/results.json ] || exit 0
           for stage in $(jq -r '.stages[] | select(.status=="fail") | .stage' harness/.results/results.json); do
@@ -134,9 +240,20 @@ jobs:
           done
 
       - uses: actions/upload-artifact@v4
-        if: always() && steps.skip.outputs.skip != '1'
+        if: always() && steps.gate.outputs.run == 'true'
         with:
           name: harness-results-${{ matrix.group }}
           path: harness/.results/
           include-hidden-files: true  # .results is a dot-directory
           retention-days: 14
+
+      # These inputs passed: later runs with the same inputs skip this group.
+      - name: Record that these inputs passed
+        if: success() && steps.gate.outputs.run == 'true' && steps.plan.outputs.key != ''
+        run: mkdir -p harness/.verified && echo "${{ github.sha }}" > harness/.verified/passed
+      - name: Save the record
+        if: success() && steps.gate.outputs.run == 'true' && steps.plan.outputs.key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: harness/.verified
+          key: ${{ steps.plan.outputs.key }}

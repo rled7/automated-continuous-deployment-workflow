@@ -71,14 +71,27 @@ a real sandbox account for the final check.
 ## Where it runs
 
 - **Your machine**: everything, including `cluster-real` and `cluster-prod`.
-- **GitHub Actions**: `.github/workflows/verify.yml` runs every stage on
-  every PR and on demand. Stage groups run as parallel jobs (checks,
+- **GitHub Actions**: `.github/workflows/verify.yml` runs on every PR, on
+  pushes to `main` and on demand. Stage groups run as parallel jobs (checks,
   terraform, jenkins, cluster-real, cluster-prod, pipeline), so the workflow
-  takes as long as the slowest group rather than the sum of all stages. Every
-  job reuses Docker layers (`HARNESS_DOCKER_CACHE=gha` in `docker_build`),
-  the pinned tools in `harness/.bin`, Terraform providers and npm packages
-  from the GitHub Actions cache. Each job prints its steps in the run summary,
-  the logs of failed stages, and uploads `harness/.results` as an artifact.
+  takes as long as the slowest group rather than the sum of all stages.
+  - **Skipping what already passed.** Each group lists the files its stages
+    read (`inputs` in the workflow's matrix). Their git blob hashes, plus the
+    harness itself and the ISO week, make a key. A group whose key belongs to
+    a run that passed is skipped in seconds, so a docs-only change skips
+    everything and a Terraform change runs only `terraform`. A new week
+    re-runs everything, which re-checks floating base images. To run every
+    group anyway, start the workflow by hand with `force`. When a stage starts
+    reading a new path, add it to its group's `inputs`.
+  - **Caches for the groups that run:** Docker layers
+    (`HARNESS_DOCKER_CACHE=gha` in `docker_build`), the pinned tools in
+    `harness/.bin`, Terraform providers, npm packages, and dependency-check's
+    vulnerability database (`harness/.cache/dependency-check`, mounted into
+    the agent pods of the `pipeline` stage, so the scan updates it instead of
+    downloading all of NVD).
+
+  Each job prints its steps in the run summary, the logs of failed stages, and
+  uploads `harness/.results` as an artifact.
 - **Claude Code cloud sessions**: everything except `cluster-real`,
   `cluster-prod` and `pipeline` (the sandbox does not allow the negative OOM scores Kubernetes
   gives its pods, so kind and k3s pods never start). The SessionStart hook

@@ -38,6 +38,9 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 - `.github/workflows/verify.yml` — Six jobs run in parallel: `checks` (static, app, image, pod, cluster-sim), `terraform`, `jenkins`, `cluster-real`, `cluster-prod` and `pipeline`. The workflow takes as long as its slowest group. A manual run with explicit stages still runs them in one job. Only the `pipeline` job gets the `NVD_API_KEY` secret.
 - `harness/lib/common.sh`, `.github/workflows/verify.yml` — Docker layers are read from and written to the GitHub Actions cache (`type=gha`, one scope per Dockerfile) when `HARNESS_DOCKER_CACHE=gha`, on a buildx builder whose Docker Hub pulls go through `mirror.gcr.io`. The pinned tools in `harness/.bin`, Terraform providers and npm packages are cached too. Local runs are unchanged.
 
+- `.github/workflows/verify.yml` — A group whose inputs (git blob hashes of the files its stages read, plus the harness and the ISO week) match a run that passed is skipped in seconds. A docs-only change skips every group; a Terraform change runs only `terraform`. `force` on a manual run runs everything. Runs on `main` fill the caches every pull request can read.
+- `.github/workflows/verify.yml`, `harness/stages/pipeline.sh`, `Jenkinsfile`, `docker/jenkins/jenkins.yaml` — dependency-check's vulnerability database is kept between runs: the Jenkinsfile passes `--data "$DEPENDENCY_CHECK_DATA"` when the pod template sets it; the `pipeline` stage mounts `harness/.cache/dependency-check` into agent pods through the kind node, and CI restores and saves the directory (one copy per day), so the scan updates it instead of downloading all of NVD. `jenkins.yaml` shows the persistent volume to add for the same effect in production.
+
 ### Measured
 
 | Group | First run (empty cache) | Second run (cache filled) |

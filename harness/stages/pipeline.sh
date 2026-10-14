@@ -13,8 +13,8 @@
 #   - SonarQube: a fresh server in the cluster, with a token and the quality
 #     gate webhook;
 #   - secrets: placeholder values, plus a kubeconfig for an in-cluster
-#     service account. NVD_API_KEY comes from the environment: the
-#     Dependency Vulnerability Scan needs a real one;
+#     service account. NVD_API_KEY (optional) comes from the environment,
+#     for updating the vulnerability database through the NVD API;
 #   - staging: the namespace already set up the way a long-lived one is
 #     (Pod Security labels, throwaway Postgres and Redis, the app's Secret,
 #     ConfigMap and NetworkPolicies), with STAGING_URL the in-cluster Service
@@ -50,7 +50,7 @@ JENKINS_AUTH="admin:verify"
 source "$HARNESS_DIR/lib/jenkins.sh"
 
 need_tools kind kubectl kustomize || exit 1
-[ -n "${NVD_API_KEY:-}" ] || log "NVD_API_KEY is not set: the Dependency Vulnerability Scan will fail"
+[ -n "${NVD_API_KEY:-}" ] || log "NVD_API_KEY is not set: the vulnerability database is built from NVD's public data feeds"
 ensure_docker || exit 1
 
 work=$(mktemp -d)
@@ -130,22 +130,17 @@ step "build docker/jenkins/Dockerfile" \
 step "build docker/jenkins-agent/Dockerfile" \
   docker_build "$REPO_ROOT/docker/jenkins-agent/Dockerfile" "$REPO_ROOT/docker/jenkins-agent" -t harness-agent:local || finish_stage
 
-# dependency-check's database, brought up to date outside the build, the way a
-# nightly job would: the first download of NVD takes longer than the
-# Jenkinsfile's 30-minute build timeout allows, and with an up-to-date
-# database the scan in the build only checks for changes. Runs while the
-# cluster and Jenkins come up.
-dc_pid="" nvd_status=""
-# dependency-check retries a rejected key for a long time, so ask NVD first.
-# A key NVD does not know (or not yet activated) gets a 404.
-[ -n "${NVD_API_KEY:-}" ] && nvd_status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
-  -H "apiKey: $NVD_API_KEY" "https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=1")
-if [ "$nvd_status" = 200 ]; then
-  ( timeout 2400 docker run --rm -e NVD_API_KEY -v "$DC_DATA:/data" --entrypoint bash harness-agent:local -c \
-      'dependency-check.sh --updateonly --data /data --nvdApiKey "$NVD_API_KEY"' > "$work/dc-update.log" 2>&1
-    echo $? > "$work/dc-update.rc" ) &
-  dc_pid=$!
-fi
+# dependency-check's database, brought up to date before the build by
+# scripts/dependency-check-db-update.sh, as the nightly
+# dependency-check-db-update job does in production; the scan in the build
+# then reads it without downloading anything (--noupdate, since the pod
+# template sets DEPENDENCY_CHECK_DATA). It uses NVD_API_KEY when NVD accepts
+# it and NVD's public data feeds otherwise. Runs while the cluster and
+# Jenkins come up.
+( timeout 2400 docker run --rm -e NVD_API_KEY -v "$DC_DATA:/data" -v "$REPO_ROOT/scripts:/scripts:ro" \
+    --entrypoint bash harness-agent:local /scripts/dependency-check-db-update.sh /data > "$work/dc-update.log" 2>&1
+  echo $? > "$work/dc-update.rc" ) &
+dc_pid=$!
 
 cluster_ready() { wait "$cluster_pid"; cat "$work/cluster.log"; return "$(cat "$work/cluster.rc" 2>/dev/null || echo 1)"; }
 step "create kind cluster with a local registry (started before the builds)" cluster_ready || finish_stage
@@ -417,15 +412,7 @@ run_build() {
   echo "build started"
 }
 dc_updated() {
-  if [ -z "$dc_pid" ]; then
-    case $nvd_status in
-      "") echo "NVD_API_KEY is not set: not updating" ;;
-      404) echo "NVD rejected NVD_API_KEY (404 Invalid apiKey): is the key activated (link in NVD's email)?" ;;
-      *) echo "NVD API answered HTTP $nvd_status to a test request" ;;
-    esac
-    return 1
-  fi
-  wait "$dc_pid"; tail -n 20 "$work/dc-update.log"
+  wait "$dc_pid"; grep -vE '^\s+at ' "$work/dc-update.log" | tail -n 20
   return "$(cat "$work/dc-update.rc" 2>/dev/null || echo 1)"
 }
 step "dependency-check database up to date (started with the cluster)" dc_updated

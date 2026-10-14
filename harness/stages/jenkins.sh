@@ -70,7 +70,7 @@ step "Jenkins boots with jenkins.yaml applied" booted || finish_stage
 jobs_exist() {
   local jobs; jobs=$(groovy 'println(jenkins.model.Jenkins.instance.allItems*.fullName.join(" "))')
   echo "jobs: $jobs"
-  for j in my-app pr-preview-teardown; do grep -qw "$j" <<<"$jobs" || { echo "missing job $j"; return 1; }; done
+  for j in my-app pr-preview-teardown dependency-check-db-update; do grep -qw "$j" <<<"$jobs" || { echo "missing job $j"; return 1; }; done
 }
 step "jobs from jenkins.yaml exist" jobs_exist
 
@@ -98,7 +98,7 @@ step "every credential the Jenkinsfile uses is defined" credentials_defined
 # inline pipeline job. See docs/agent-resolution.md.
 agents_resolve() {
   local map="[" f out
-  for f in "$REPO_ROOT/Jenkinsfile" "$HARNESS_DIR/fixtures/agent-forms.Jenkinsfile"; do
+  for f in "$REPO_ROOT/Jenkinsfile" "$REPO_ROOT"/jenkins/*.Jenkinsfile "$HARNESS_DIR/fixtures/agent-forms.Jenkinsfile"; do
     map+="'${f#"$REPO_ROOT"/}': '$(base64 -w0 "$f")', "
   done
   map+="]"

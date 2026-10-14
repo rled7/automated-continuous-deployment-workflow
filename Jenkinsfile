@@ -96,25 +96,30 @@ pipeline {
                 }
                 stage('Dependency Vulnerability Scan') {
                     steps {
-                        // The NVD API key lets dependency-check download the
-                        // vulnerability database; without one it is
-                        // rate-limited too hard to finish. With
-                        // DEPENDENCY_CHECK_DATA set (a volume on the pod
-                        // template, see jenkins.yaml) the database is kept
-                        // between builds and only updated, instead of
-                        // downloaded in full by every build.
+                        // Two ways to get the vulnerability database:
+                        //   - DEPENDENCY_CHECK_DATA set (a volume on the pod
+                        //     template, see jenkins.yaml): a database the
+                        //     dependency-check-db-update job keeps current; the
+                        //     scan reads it and downloads nothing (--noupdate).
+                        //   - otherwise the scan updates its own copy from the
+                        //     NVD API with the nvd-api-key credential (without a
+                        //     key, NVD rate-limits it too hard to finish).
                         withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
                             sh '''
                                 cd app
                                 mkdir -p reports/dependency-check
+                                if [ -n "${DEPENDENCY_CHECK_DATA:-}" ]; then
+                                    set -- --data "$DEPENDENCY_CHECK_DATA" --noupdate
+                                else
+                                    set -- --nvdApiKey "$NVD_API_KEY"
+                                fi
                                 # OWASP Dependency Check
                                 # Build 015: --failOnCVSS tightened from 8 to 7 to match
                                 # the Trivy HIGH threshold (CVSS 7.0 == HIGH boundary).
                                 dependency-check.sh \
                                   --project "${APP_NAME}" \
                                   --scan . \
-                                  --nvdApiKey "$NVD_API_KEY" \
-                                  ${DEPENDENCY_CHECK_DATA:+--data "$DEPENDENCY_CHECK_DATA"} \
+                                  "$@" \
                                   --format "HTML" \
                                   --out reports/dependency-check \
                                   --failOnCVSS 7

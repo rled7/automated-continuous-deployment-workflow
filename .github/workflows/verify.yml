@@ -64,7 +64,7 @@ jobs:
           - group: jenkins
             stages: "jenkins"
             inputs: >-
-              docker/jenkins docker/jenkins-agent Jenkinsfile
+              docker/jenkins docker/jenkins-agent Jenkinsfile jenkins
               harness/stages/jenkins.sh harness/fixtures/agent-forms.Jenkinsfile
           - group: cluster-real
             stages: "image cluster-real"

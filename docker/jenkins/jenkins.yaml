@@ -132,10 +132,11 @@ jenkins:
               - emptyDirVolume:
                   mountPath: "/var/lib/docker"
                   memory: false
-              # Keep dependency-check's vulnerability database between
-              # builds, so each scan updates it instead of downloading all of
-              # NVD (10+ minutes). Create a ReadWriteOnce PVC in the jenkins
-              # namespace, then uncomment this and the envVars below.
+              # dependency-check's vulnerability database, kept current by the
+              # nightly dependency-check-db-update job; builds then scan it
+              # without downloading anything (no NVD key needed in builds).
+              # Create a PVC in the jenkins namespace (ReadWriteMany if agents
+              # run on several nodes), then uncomment this and the envVars below.
               # - persistentVolumeClaim:
               #     claimName: "dependency-check-data"
               #     mountPath: "/var/lib/dependency-check"
@@ -251,6 +252,37 @@ jobs:
           factory {
               workflowBranchProjectFactory {
                   scriptPath('Jenkinsfile')
+              }
+          }
+      }
+
+  # ── Nightly dependency-check database update ──────────────────────────────
+  # Keeps the vulnerability database on the shared volume current, so builds
+  # scan it without downloading NVD (jenkins/dependency-check-db-update.Jenkinsfile).
+  # Does nothing until the pod template has DEPENDENCY_CHECK_DATA and its volume.
+  - script: |
+      pipelineJob('dependency-check-db-update') {
+          description('Nightly: brings the dependency-check vulnerability database on the shared volume up to date.')
+          properties {
+              pipelineTriggers {
+                  triggers {
+                      cron { spec('H 2 * * *') }
+                  }
+              }
+          }
+          definition {
+              cpsScm {
+                  scm {
+                      git {
+                          remote {
+                              url('https://github.com/YOUR_ORG/my-app')
+                              credentials('github-credentials')
+                          }
+                          branch('main')
+                      }
+                  }
+                  scriptPath('jenkins/dependency-check-db-update.Jenkinsfile')
+                  lightweight(true)
               }
           }
       }

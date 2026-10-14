@@ -99,7 +99,7 @@ sync them in sync-wave order:
 
 | Wave | Components |
 |------|-----------|
-| -10 | sealed-secrets, ingress-nginx, cert-manager, argo-rollouts |
+| -10 | sealed-secrets, ingress-nginx, cert-manager, argo-rollouts, metrics-server |
 | 0 | cert-manager-issuers, kube-prometheus-stack, loki-stack, otel-collector |
 
 Watch progress:

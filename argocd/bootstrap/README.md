@@ -17,6 +17,7 @@ argocd/bootstrap/
 │   ├── cert-manager.yaml
 │   ├── cert-manager-issuers.yaml
 │   ├── argo-rollouts.yaml
+│   ├── metrics-server.yaml
 │   ├── kube-prometheus-stack.yaml
 │   ├── loki-stack.yaml
 │   └── otel-collector.yaml
@@ -124,7 +125,7 @@ kubectl port-forward svc/argo-rollouts-dashboard -n argo-rollouts 3100:3100
 
 | Wave | Components | Reason |
 |------|-----------|--------|
-| -10 | `sealed-secrets`, `ingress-nginx`, `cert-manager`, `argo-rollouts` | CRD controllers; must be ready before dependent resources |
+| -10 | `sealed-secrets`, `ingress-nginx`, `cert-manager`, `argo-rollouts`, `metrics-server` | CRD controllers and cluster add-ons; must be ready before dependent resources (the app's HPAs need metrics-server) |
 | 0 | `cert-manager-issuers`, `kube-prometheus-stack`, `loki-stack`, `otel-collector` | Require CRDs from wave -10 |
 
 ## Notes

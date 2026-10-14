@@ -189,6 +189,12 @@ if [ "$MAIN_BUILD" = 1 ]; then
   namespace_up "$production_rendered" || finish_stage
   deps_up production "$production_rendered" || finish_stage
   step "production ConfigMap and NetworkPolicies in place" env_state production "$production_rendered"
+  # The Pushgateway the production deploy reports DORA metrics to.
+  pushgateway_up() {
+    kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f - >/dev/null &&
+      kubectl apply -f "$REPO_ROOT/monitoring/pushgateway.yaml" >/dev/null
+  }
+  step "Pushgateway from monitoring/pushgateway.yaml" pushgateway_up
 fi
 
 push_images() {
@@ -551,6 +557,15 @@ if [ "$MAIN_BUILD" = 1 ]; then
     [ "$phase" = Healthy ] && [[ $image == "$REGISTRY/my-app:1-"* ]]
   }
   step "production Rollout healthy on the main build's image" production_released
+  # Deploy → Production pushed its DORA metrics (pushDoraMetric).
+  dora_pushed() {
+    local metrics
+    metrics=$(kubectl -n monitoring exec deploy/pushgateway -- wget -qO- http://127.0.0.1:9091/metrics) || return 1
+    grep -E '^(deployment_frequency_total|lead_time_seconds|mttr_seconds)\{' <<<"$metrics" | grep 'job="jenkins"' ||
+      { echo "no DORA metrics on the Pushgateway"; return 1; }
+    [ "$(grep -cE '^(deployment_frequency_total|lead_time_seconds|mttr_seconds)\{.*job="jenkins"' <<<"$metrics")" -eq 3 ]
+  }
+  step "DORA metrics reached the Pushgateway" dora_pushed
 fi
 
 # ── Every way of asking for an agent, run for real ──────────────────────────

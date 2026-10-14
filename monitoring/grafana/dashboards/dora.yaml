@@ -2,6 +2,11 @@
 # Deployment frequency, lead time for changes, change failure rate, MTTR.
 # Metrics are pushed to Prometheus via the Pushgateway from the Jenkinsfile
 # (see monitoring/pushgateway.yaml and docs/dora-metrics.md).
+# Every production build pushes its own group (instance=<JOB_NAME>-<BUILD_NUMBER>)
+# of gauges, value 1 for deployment_frequency_total / change_failure_total, so
+# the panels count groups instead of taking increase() of a counter. A
+# group's push_time_seconds dates it, which is how a panel picks the builds in
+# its window. Groups live until the Pushgateway restarts (no persistence).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -29,19 +34,19 @@ data:
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "targets": [
             {
-              "expr": "increase(deployment_frequency_total[24h])",
+              "expr": "(count(deployment_frequency_total and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 86400)) or vector(0))",
               "legendFormat": "last 24h",
               "refId": "A",
               "instant": true
             },
             {
-              "expr": "increase(deployment_frequency_total[7d])",
+              "expr": "(count(deployment_frequency_total and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 604800)) or vector(0))",
               "legendFormat": "last 7d",
               "refId": "B",
               "instant": true
             },
             {
-              "expr": "increase(deployment_frequency_total[30d])",
+              "expr": "(count(deployment_frequency_total and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 2592000)) or vector(0))",
               "legendFormat": "last 30d",
               "refId": "C",
               "instant": true
@@ -57,19 +62,19 @@ data:
         },
         {
           "id": 2,
-          "title": "Lead Time for Changes (p50/p95)",
+          "title": "Lead Time for Changes (p50/p95, 30d)",
           "type": "stat",
           "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "targets": [
             {
-              "expr": "histogram_quantile(0.50, sum(rate(lead_time_seconds_bucket[7d])) by (le))",
+              "expr": "quantile(0.5, lead_time_seconds and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 2592000))",
               "legendFormat": "p50",
               "refId": "A",
               "instant": true
             },
             {
-              "expr": "histogram_quantile(0.95, sum(rate(lead_time_seconds_bucket[7d])) by (le))",
+              "expr": "quantile(0.95, lead_time_seconds and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 2592000))",
               "legendFormat": "p95",
               "refId": "B",
               "instant": true
@@ -90,7 +95,7 @@ data:
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "targets": [
             {
-              "expr": "100 * increase(change_failure_total[30d]) / clamp_min(increase(deployment_frequency_total[30d]), 1)",
+              "expr": "100 * (count(change_failure_total and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 2592000)) or vector(0)) / clamp_min((count(deployment_frequency_total and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 2592000)) or vector(0)) + (count(change_failure_total and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 2592000)) or vector(0)), 1)",
               "legendFormat": "change failure %",
               "refId": "A",
               "instant": true
@@ -118,7 +123,7 @@ data:
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "targets": [
             {
-              "expr": "avg_over_time(mttr_seconds[30d])",
+              "expr": "avg(mttr_seconds > 0 and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 2592000))",
               "legendFormat": "MTTR (30d avg)",
               "refId": "A",
               "instant": true
@@ -146,8 +151,8 @@ data:
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "targets": [
             {
-              "expr": "increase(deployment_frequency_total[1d])",
-              "legendFormat": "deploys/day",
+              "expr": "(count(deployment_frequency_total and on(job, instance) (push_time_seconds{job=\"jenkins\"} > time() - 86400)) or vector(0))",
+              "legendFormat": "deploys in the previous 24h",
               "refId": "A"
             }
           ],

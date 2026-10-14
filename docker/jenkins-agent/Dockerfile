@@ -33,6 +33,7 @@ ENV NODE_VERSION=20.18.1 \
     DEPENDENCY_CHECK_VERSION=12.2.2 \
     K6_VERSION=v0.55.0 \
     GH_VERSION=2.63.2 \
+    PLAYWRIGHT_VERSION=1.64.0 \
     SONAR_SCANNER_VERSION=6.2.1.4610
 
 # ── Base packages ────────────────────────────────────────────────────────────
@@ -110,6 +111,18 @@ RUN curl -fsSLo /tmp/sonar.zip \
 # ── GitHub CLI (used by Release stage) ───────────────────────────────────────
 RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
         | tar -xzf - --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_amd64/bin/gh"
+
+# ── Playwright's Chromium (E2E Tests stage) ──────────────────────────────────
+# The browser's system libraries come from apt, which needs root, and the
+# pipeline runs as jenkins: they are installed here, with the browser for the
+# Playwright version app/package-lock.json pins (keep PLAYWRIGHT_VERSION in
+# step). If the app moves ahead, the stage downloads the newer browser into
+# PLAYWRIGHT_BROWSERS_PATH as jenkins; the libraries rarely change. Only the
+# headless shell, which headless runs use (the full browser adds ~400 MB).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps --only-shell chromium \
+    && chown -R jenkins:jenkins /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
 
 # ── Sanity check (fails the build if any tool is missing from PATH) ─────────
 RUN node --version \

@@ -518,12 +518,12 @@ EOF
         // Build 020: Playwright E2E tests run against the staging environment
         // after the staging deploy and performance tests succeed.
         //
-        // `playwright install --with-deps chromium` calls apt to install system
-        // dependencies (fonts, libnss3, etc.).  This works because the custom
-        // Jenkins agent image is Debian-based.  For air-gapped environments,
-        // bake the browser into the agent image:
-        //   RUN npx playwright install --with-deps chromium
-        // in docker/jenkins-agent/Dockerfile.
+        // The agent image carries Chromium's system libraries and the browser
+        // for the Playwright version the lockfile pins (docker/jenkins-agent/
+        // Dockerfile): installing the libraries needs apt and root, which the
+        // pipeline does not have. `playwright install --only-shell chromium` is
+        // then a no-op, or downloads a newer one if the app's Playwright moved
+        // ahead. Tests run headless, which needs only the headless shell.
         stage('E2E Tests') {
             when { branch 'develop' }
             steps {
@@ -531,7 +531,7 @@ EOF
                     sh '''
                         mkdir -p reports
                         npm ci --prefer-offline
-                        npx playwright install --with-deps chromium
+                        npx playwright install --only-shell chromium
                         BASE_URL="$STAGING_URL" npm run test:e2e
                     '''
                 }

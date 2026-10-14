@@ -34,9 +34,12 @@ spec:
         allowPrivilegeEscalation: false
         capabilities:
           drop: ["ALL"]
+      # Over TCP: on first boot the image runs a temporary server that listens
+      # only on the Unix socket, so a socket probe passes while clients that
+      # connect over the network (the migration pod) are still refused.
       readinessProbe:
         exec:
-          command: ["pg_isready", "-U", "appuser", "-d", "appdb"]
+          command: ["pg_isready", "-h", "127.0.0.1", "-U", "appuser", "-d", "appdb"]
         periodSeconds: 2
 ---
 apiVersion: v1

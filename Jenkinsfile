@@ -117,7 +117,10 @@ pipeline {
                                 if [ -n "${DEPENDENCY_CHECK_DATA:-}" ]; then
                                     set -- --data "$DEPENDENCY_CHECK_DATA" --noupdate
                                 else
-                                    set -- --nvdApiKey "$NVD_API_KEY"
+                                    # The key as NVD wants it (scripts/nvd-api-key.sh);
+                                    # untraced, since Jenkins masks only the stored value.
+                                    set +x
+                                    set -- --nvdApiKey "$(../scripts/nvd-api-key.sh)"
                                 fi
                                 # OWASP Dependency Check
                                 # Build 015: --failOnCVSS tightened from 8 to 7 to match

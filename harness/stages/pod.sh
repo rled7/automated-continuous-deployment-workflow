@@ -34,7 +34,7 @@ podman network exists "$NET" || podman network create "$NET" >/dev/null
 podman kube down "$DEPS" >/dev/null 2>&1
 step "start Postgres + Redis" podman kube play --network "$NET" "$DEPS" || finish_stage
 step "Postgres ready" timeout 90 bash -c \
-  'until podman exec app-db-postgres pg_isready -q -U appuser -d appdb; do sleep 2; done' || finish_stage
+  'until podman exec app-db-postgres pg_isready -q -h 127.0.0.1 -U appuser -d appdb; do sleep 2; done' || finish_stage
 
 # The staging ConfigMap + Deployment exactly as rendered for deploy, plus the
 # stand-in secret. Services/Ingress/NetworkPolicies need a real cluster.

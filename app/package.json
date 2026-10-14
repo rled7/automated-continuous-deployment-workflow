@@ -50,5 +50,8 @@
     "pino-pretty": "^13.2.0",
     "supertest": "^7.0.0"
   },
+  "engines": {
+    "node": ">=24"
+  },
   "type": "module"
 }

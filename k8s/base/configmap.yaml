@@ -7,6 +7,12 @@ data:
   PORT: "3000"
   LOG_LEVEL: "info"
   REDIS_URL: "redis://redis:6379"
-  # One proxy (ingress-nginx) in front of the app: the rate limit then applies
-  # per client address instead of to everyone behind the ingress controller.
+  # Trust exactly one proxy hop: the app takes the client address from the
+  # last X-Forwarded-For entry, which ingress-nginx sets, so the rate
+  # limit applies per client instead of to everyone behind the controller.
+  # That entry is the real client only because nothing else sits in front of
+  # ingress-nginx and its Service uses externalTrafficPolicy: Local (no SNAT;
+  # argocd/bootstrap/apps/ingress-nginx.yaml). With a CDN or L7 load balancer
+  # in front, raise this to the number of proxies; with an L4 load balancer
+  # that hides client IPs, enable PROXY protocol on it and ingress-nginx.
   TRUST_PROXY: "1"

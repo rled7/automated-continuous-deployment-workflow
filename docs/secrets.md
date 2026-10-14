@@ -45,7 +45,7 @@ For `docker-registry` typed secrets use `kubectl create secret docker-registry`
 piped directly through `kubeseal`:
 
 ```bash
-kubectl create secret docker-registry docker-registry-secret \
+kubectl create secret docker-registry registry-credentials \
     --docker-server=ghcr.io \
     --docker-username=<user> \
     --docker-password=<token> \

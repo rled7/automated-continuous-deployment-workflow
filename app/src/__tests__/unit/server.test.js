@@ -94,20 +94,72 @@ describe('start() and graceful shutdown', () => {
     expect(Object.keys(handlers)).toEqual(expect.arrayContaining(['SIGTERM', 'SIGINT']));
   });
 
-  test('on SIGTERM: fails readiness, drains DB and Redis, closes, exits 0', async () => {
+  test('on SIGTERM: fails readiness, closes the server, then drains DB and Redis, exits 0', async () => {
     server = start(0);
     await new Promise((resolve) => server.once('listening', resolve));
     db.shutdown.mockClear();
     redis.shutdown.mockClear();
+    // Whether the server was still listening when the DB pool was drained.
+    let listeningAtDbShutdown;
+    db.shutdown.mockImplementationOnce(async () => {
+      listeningAtDbShutdown = server.listening;
+    });
 
     await shutDown('SIGTERM');
 
     const ready = await request(app).get('/health/ready');
     expect(ready.status).toBe(503);
     expect(db.shutdown).toHaveBeenCalled();
+    expect(listeningAtDbShutdown).toBe(false);
     expect(redis.shutdown).toHaveBeenCalled();
     expect(server.listening).toBe(false);
     expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
+  test('waits for in-flight requests before draining the DB pool', async () => {
+    server = start(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    db.shutdown.mockClear();
+    let release;
+    db.query.mockImplementationOnce(() => new Promise((resolve) => {
+      release = () => resolve({ rows: [{ id: 1, name: 'slow' }], rowCount: 1 });
+    }));
+    const inFlight = request(server).get('/api/items').then((res) => res);
+    while (!release) await new Promise((resolve) => setImmediate(resolve));
+
+    await shutDown('SIGTERM');
+    expect(db.shutdown).not.toHaveBeenCalled();
+    expect(process.exit).not.toHaveBeenCalled();
+
+    release();
+    const res = await inFlight;
+    expect(res.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(db.shutdown).toHaveBeenCalled();
+    expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
+  test('forces exit 45 s after the signal if requests never finish', async () => {
+    server = start(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    let release;
+    db.query.mockImplementationOnce(() => new Promise((resolve) => {
+      release = () => resolve({ rows: [], rowCount: 0 });
+    }));
+    const inFlight = request(server).get('/api/items').then((res) => res);
+    while (!release) await new Promise((resolve) => setImmediate(resolve));
+
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    handlers.SIGTERM();
+    await jest.advanceTimersByTimeAsync(44_999);
+    expect(process.exit).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1);
+    expect(logger.error).toHaveBeenCalledWith('Forced exit after shutdown timeout');
+    expect(process.exit).toHaveBeenCalledWith(1);
+    jest.useRealTimers();
+
+    release();
+    await inFlight;
   });
 
   test('keeps shutting down when draining fails, and ignores a second signal', async () => {
@@ -123,5 +175,16 @@ describe('start() and graceful shutdown', () => {
     expect(logger.error).toHaveBeenCalledWith(expect.anything(), 'Error closing Redis connection');
     expect(process.exit).toHaveBeenCalledTimes(1);
     expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
+  test('exits 1 when the server fails to close', async () => {
+    server = start(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    await new Promise((resolve) => server.close(resolve));
+
+    await shutDown('SIGTERM');
+
+    expect(logger.error).toHaveBeenCalledWith(expect.anything(), 'Error during server.close');
+    expect(process.exit).toHaveBeenCalledWith(1);
   });
 });

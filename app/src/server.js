@@ -17,7 +17,11 @@ import healthRouter, { setShuttingDown } from './routes/health.js';
 
 export const app = express();
 const PORT = process.env.PORT || 3000;
-const SHUTDOWN_TIMEOUT_MS = 55_000;
+// Shutdown: readiness fails for READINESS_GRACE_MS before the server closes;
+// SHUTDOWN_TIMEOUT_MS after the signal the process exits regardless, well
+// inside the pod's terminationGracePeriodSeconds (60 s).
+const READINESS_GRACE_MS = 5_000;
+const SHUTDOWN_TIMEOUT_MS = 45_000;
 
 const positiveInt = (value, fallback) => {
   const n = Number.parseInt(value ?? '', 10);
@@ -121,7 +125,9 @@ export function start(port = PORT) {
     logger.info({ port }, 'Server running');
   });
 
-  // Graceful shutdown
+  // Graceful shutdown: fail readiness, wait for the endpoints to drop the pod,
+  // stop accepting connections and let in-flight requests finish, and only
+  // then close the DB pool and Redis, which those requests may still use.
   const shutdown = (signal) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
@@ -130,13 +136,25 @@ export function start(port = PORT) {
     // Flip the readiness flag so k8s stops routing new traffic
     setShuttingDown(true);
 
+    const forceExit = setTimeout(() => {
+      logger.error('Forced exit after shutdown timeout');
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS);
+    forceExit.unref();
+
     // Give in-flight readiness probes ~5s to observe the 503
     setTimeout(async () => {
-      const forceExit = setTimeout(() => {
-        logger.error('Forced exit after shutdown timeout');
-        process.exit(1);
-      }, SHUTDOWN_TIMEOUT_MS);
-      forceExit.unref();
+      let exitCode = 0;
+      try {
+        await new Promise((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve()));
+          server.closeIdleConnections?.();
+        });
+        logger.info('HTTP server closed');
+      } catch (err) {
+        logger.error({ err }, 'Error during server.close');
+        exitCode = 1;
+      }
 
       // Drain persistent connections — DB first (primary state), then Redis (cache)
       try {
@@ -152,15 +170,9 @@ export function start(port = PORT) {
         logger.error({ err }, 'Error closing Redis connection');
       }
 
-      server.close((err) => {
-        if (err) {
-          logger.error({ err }, 'Error during server.close');
-          process.exit(1);
-        }
-        logger.info('Process terminated cleanly');
-        process.exit(0);
-      });
-    }, 5_000);
+      if (exitCode === 0) logger.info('Process terminated cleanly');
+      process.exit(exitCode);
+    }, READINESS_GRACE_MS);
   };
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));

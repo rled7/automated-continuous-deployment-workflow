@@ -36,7 +36,7 @@ dependency-check-jenkins-plugin:latest
 
 # ── Test reporting ───────────────────────────────────────────────────────────
 junit:latest
-cobertura:latest
+coverage:latest
 htmlpublisher:latest
 
 # ── Notifications ────────────────────────────────────────────────────────────

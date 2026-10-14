@@ -252,10 +252,12 @@ pipeline {
                     post {
                         always {
                             junit 'app/reports/junit-unit.xml'
-                            cobertura coberturaReportFile: 'app/coverage/cobertura-coverage.xml',
-                                      failUnhealthy: true,
-                                      failUnstable: false,
-                                      lineCoverageTargets: '80, 70, 60'
+                            // Coverage plugin (the Cobertura plugin no longer runs
+                            // on current Jenkins). Fails the build below 70% line
+                            // coverage, as lineCoverageTargets '80, 70, 60' with
+                            // failUnhealthy did; jest's own thresholds are stricter.
+                            recordCoverage tools: [[parser: 'COBERTURA', pattern: 'app/coverage/cobertura-coverage.xml']],
+                                           qualityGates: [[metric: 'LINE', baseline: 'PROJECT', threshold: 70.0, criticality: 'FAILURE']]
                         }
                     }
                 }

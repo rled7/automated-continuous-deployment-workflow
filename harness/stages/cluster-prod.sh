@@ -27,7 +27,6 @@ source "$HARNESS_DIR/lib/kind.sh"
 
 CLUSTER=harness-prod
 NS=production
-ARGO_ROLLOUTS_VERSION=1.7.2
 WAIT_FOR_ROLLOUT="$REPO_ROOT/scripts/wait-for-rollout.sh"
 
 need_tools kind kubectl kustomize || exit 1
@@ -51,12 +50,6 @@ rollout_image() { kubectl -n "$NS" get rollout/my-app -o jsonpath='{.spec.templa
 
 kind_cluster_up "$CLUSTER" || finish_stage
 
-install_argo_rollouts() {
-  kubectl create namespace argo-rollouts >/dev/null 2>&1
-  kubectl apply -n argo-rollouts --server-side -f \
-    "https://github.com/argoproj/argo-rollouts/releases/download/v${ARGO_ROLLOUTS_VERSION}/install.yaml" >/dev/null &&
-    kubectl -n argo-rollouts rollout status deploy/argo-rollouts --timeout=180s
-}
 step "install Argo Rollouts controller v$ARGO_ROLLOUTS_VERSION" install_argo_rollouts || finish_stage
 
 rendered=$(render_overlay "$NS") || exit 1

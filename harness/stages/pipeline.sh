@@ -157,13 +157,15 @@ step "start SonarQube" sonar_start || finish_stage
 staging_rendered=$(DEPLOY_IMAGE="$REGISTRY/my-app:staging-setup" render_overlay staging pipeline-staging) || finish_stage
 namespace_up "$staging_rendered" || finish_stage
 deps_up staging "$staging_rendered" || finish_stage
-staging_state() {
-  apply_kinds "$staging_rendered" ConfigMap NetworkPolicy &&
+# env_state NAMESPACE RENDERED — the overlay's ConfigMap and NetworkPolicies,
+# plus a stand-in for the ingress path: the tests reach the app's Service
+# directly from the jenkins namespace.
+env_state() {
+  apply_kinds "$2" ConfigMap NetworkPolicy &&
     kubectl apply -f - <<EOF
-# Stand-in for the ingress path: the tests reach the app's Service directly.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: harness-allow-jenkins, namespace: staging}
+metadata: {name: harness-allow-jenkins, namespace: $1}
 spec:
   podSelector: {matchLabels: {app: my-app}}
   policyTypes: [Ingress]
@@ -172,7 +174,22 @@ spec:
       ports: [{protocol: TCP, port: 3000}]
 EOF
 }
-step "staging ConfigMap and NetworkPolicies in place" staging_state
+step "staging ConfigMap and NetworkPolicies in place" env_state staging "$staging_rendered"
+
+# ── Production, for a main build's Deploy → Production ──────────────────────
+# After the $BRANCH build, a main build runs the production path in Jenkins:
+# the approval gate (approved by the harness), migrations, the Argo Rollout,
+# smoke tests, the DORA pushes. PIPELINE_MAIN=0 skips it.
+MAIN_BUILD=0
+[ "$BRANCH" != main ] && [ "${PIPELINE_MAIN:-1}" = 1 ] && MAIN_BUILD=1
+if [ "$MAIN_BUILD" = 1 ]; then
+  ( install_argo_rollouts > "$work/argo.log" 2>&1; echo $? > "$work/argo.rc" ) &
+  argo_pid=$!
+  production_rendered=$(DEPLOY_IMAGE="$REGISTRY/my-app:production-setup" render_overlay production pipeline-production) || finish_stage
+  namespace_up "$production_rendered" || finish_stage
+  deps_up production "$production_rendered" || finish_stage
+  step "production ConfigMap and NetworkPolicies in place" env_state production "$production_rendered"
+fi
 
 push_images() {
   local src dst
@@ -398,21 +415,19 @@ println('created')" | tee /dev/stderr | grep -qx created
 }
 step "create multibranch job over the git server" create_job || finish_stage
 
-JOB="/job/verify/job/$BRANCH"
 branch_indexed() {
   local deadline=$(( $(date +%s) + 180 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     jenkins_get "$JOB/api/json" >/dev/null && return 0
     sleep 3
   done
-  echo "branch $BRANCH not found by indexing; indexing log:"
+  echo "branch $branch not found by indexing; indexing log:"
   jenkins_get /job/verify/indexing/consoleText | tail -30
   return 1
 }
-step "branch $BRANCH discovered" branch_indexed || finish_stage
 
-build_json() { jenkins_get "$JOB/1/api/json"; }
-console() { jenkins_get "$JOB/1/consoleText"; }
+build_json() { jenkins_get "$BUILD/api/json"; }
+console() { jenkins_get "$BUILD/consoleText"; }
 
 # One build; first it waits for an agent pod, then for the build to finish.
 run_build() {
@@ -428,8 +443,6 @@ dc_updated() {
   wait "$dc_pid"; grep -vE '^\s+at ' "$work/dc-update.log" | tail -n 20
   return "$(cat "$work/dc-update.rc" 2>/dev/null || echo 1)"
 }
-step "dependency-check database up to date (started with the cluster)" dc_updated
-step "start build of $BRANCH" run_build || finish_stage
 
 agent_connected() {
   local deadline=$(( $(date +%s) + AGENT_TIMEOUT ))
@@ -447,26 +460,20 @@ agent_connected() {
   done
   return 1
 }
-if ! step "an agent pod starts and connects" agent_connected; then
-  jenkins_post "$JOB/1/stop" >/dev/null
-  console > "$RESULTS_DIR/logs/pipeline-console.log" 2>/dev/null
-  finish_stage
-fi
 
 build_done() {
   local deadline=$(( $(date +%s) + PIPELINE_TIMEOUT )) last="" now
   while [ "$(date +%s)" -lt "$deadline" ]; do
     [ "$(build_json | jq -r .building)" = false ] && { build_json | jq -r '"result: \(.result)"'; return 0; }
-    now=$(jenkins_get "$JOB/1/wfapi/describe" | jq -r '[.stages[] | select(.status=="IN_PROGRESS") | .name] | join(", ")')
+    approve_inputs
+    now=$(jenkins_get "$BUILD/wfapi/describe" | jq -r '[.stages[] | select(.status=="IN_PROGRESS") | .name] | join(", ")')
     [ "$now" != "$last" ] && [ -n "$now" ] && { log "   running: $now"; last=$now; }
     sleep 10
   done
   echo "build still running after ${PIPELINE_TIMEOUT}s; stopping it"
-  jenkins_post "$JOB/1/stop" >/dev/null
+  jenkins_post "$BUILD/stop" >/dev/null
   return 1
 }
-step "build finishes" build_done
-console > "$RESULTS_DIR/logs/pipeline-console.log"
 
 # Each Jenkins stage as a step: pass, fail (with the end of its log), or skip
 # (its `when` condition, or an earlier failure, kept it from running). The
@@ -498,10 +505,53 @@ record_stages() {
     [ "$st" = fail ] && echo fail
   done
 }
-[ -n "$(record_stages "$JOB/1" "Jenkins stage")" ] && STEP_FAILURES=$((STEP_FAILURES + 1))
 
 result_success() { build_json | jq -e '.result == "SUCCESS"' >/dev/null || { build_json | jq -r .result; console | tail -40; return 1; }; }
-step "build result is SUCCESS" result_success
+
+# The production deploy waits for approval (input): approve it as a person
+# would, and say so in the log.
+approve_inputs() {
+  local id
+  for id in $(jenkins_get "$BUILD/wfapi/pendingInputActions" | jq -r '.[]?.id'); do
+    log "   approving input $id (as a release manager would)"
+    jenkins_post "$BUILD/input/$id/proceedEmpty" >/dev/null
+  done
+}
+
+# pipeline_build BRANCH LABEL — build BRANCH once and record every stage.
+pipeline_build() {
+  local branch=$1 label=$2
+  JOB="/job/verify/job/$branch"; BUILD="$JOB/1"
+  step "branch $branch discovered" branch_indexed || return 1
+  step "start build of $branch" run_build || return 1
+  if ! step "an agent pod starts and connects ($branch)" agent_connected; then
+    jenkins_post "$BUILD/stop" >/dev/null
+    console > "$RESULTS_DIR/logs/pipeline-console-$branch.log" 2>/dev/null
+    return 1
+  fi
+  step "build of $branch finishes" build_done
+  console > "$RESULTS_DIR/logs/pipeline-console-$branch.log"
+  [ -n "$(record_stages "$BUILD" "$label")" ] && STEP_FAILURES=$((STEP_FAILURES + 1))
+  step "build of $branch: result is SUCCESS" result_success
+}
+
+step "dependency-check database up to date (started with the cluster)" dc_updated
+pipeline_build "$BRANCH" "Jenkins stage" || finish_stage
+
+if [ "$MAIN_BUILD" = 1 ]; then
+  argo_ready() { wait "$argo_pid"; cat "$work/argo.log"; return "$(cat "$work/argo.rc" 2>/dev/null || echo 1)"; }
+  step "Argo Rollouts controller installed (started with production)" argo_ready || finish_stage
+  pipeline_build main "Jenkins stage (main)"
+  # What Deploy → Production left behind: a healthy Rollout on that build's image.
+  production_released() {
+    local phase image
+    phase=$(kubectl -n production get rollout/my-app -o jsonpath='{.status.phase}') || return 1
+    image=$(kubectl -n production get rollout/my-app -o jsonpath='{.spec.template.spec.containers[0].image}')
+    echo "rollout phase: $phase; image: $image"
+    [ "$phase" = Healthy ] && [[ $image == "$REGISTRY/my-app:1-"* ]]
+  }
+  step "production Rollout healthy on the main build's image" production_released
+fi
 
 # ── Every way of asking for an agent, run for real ──────────────────────────
 # fixtures/agent-forms.Jenkinsfile: one stage per syntax (inheritFrom, the

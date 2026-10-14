@@ -80,3 +80,13 @@ dump_cluster_state() {
   kubectl -n "$1" get rollouts,deploy,rs,pods -o wide >&2 2>/dev/null
   kubectl -n "$1" get events --sort-by=.lastTimestamp 2>/dev/null | tail -n 40 >&2
 }
+
+# install_argo_rollouts — the Argo Rollouts controller production's Rollout
+# needs (cluster-prod; the pipeline stage's main build).
+ARGO_ROLLOUTS_VERSION=1.7.2
+install_argo_rollouts() {
+  kubectl create namespace argo-rollouts >/dev/null 2>&1
+  kubectl apply -n argo-rollouts --server-side -f \
+    "https://github.com/argoproj/argo-rollouts/releases/download/v${ARGO_ROLLOUTS_VERSION}/install.yaml" >/dev/null &&
+    kubectl -n argo-rollouts rollout status deploy/argo-rollouts --timeout=180s
+}

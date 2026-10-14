@@ -9,7 +9,7 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 > - Phase D: cluster security (Build 016) — done
 > - Phase E: app data layer (Build 017) — done
 > - Phase F: operations (Build 018) — done
-> - **Phase G: verification (Builds 023–027) — in progress.** The local harness exercised the pipeline end to end for the first time and found 35 defects in phases B–F that blocked deploys, testing, rollback, Jenkins or its agents, plus 3 in its own changes; Builds 023–026 fix all of them. Remaining:
+> - **Phase G: verification (Builds 023–028) — in progress.** The local harness exercised the pipeline end to end for the first time and found 35 defects in phases B–F that blocked deploys, testing, rollback, Jenkins or its agents, plus 3 in its own changes; Builds 023–026 fix all of them. Remaining:
 >   - [x] Harness for manifests, app, image, pod, simulated cluster, Terraform (Build 023)
 >   - [x] Staging deploy on a real cluster in CI (Build 023)
 >   - [x] Production Rollout path on a real cluster: deploy, failed canary, rollback (`cluster-prod`, Build 024; passing in CI)
@@ -26,8 +26,73 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 >     - [x] The stages after the scan pass in CI: Build, Validate Manifests, Unit and Integration Tests, Docker Build & Push (multi-arch, Trivy, SBOM, signing and provenance), Scan SBOM, Deploy → Staging with migrations and smoke tests, Performance Tests, E2E Tests
 >     - [ ] Decisions: where the dependency-check database lives (shared volume + nightly job, or each build); signing key (`COSIGN_KEY`, e.g. KMS) or keyless; the real `STAGING_URL` / `PRODUCTION_URL`
 >   - [x] CI runs in about 6 minutes instead of 15.5 (parallel groups, cached layers and tools; Build 027)
+>   - [x] A `main` build runs Deploy → Production in Jenkins: approval, migrations, Rollout, smoke tests, DORA pushes (Build 028)
+>   - [x] Every path no build runs audited and fixed: tags, PRs, rollback, manifests, scripts, app (Build 028)
+>   - [ ] Real infrastructure: the repository has no Terraform for the cluster, database or network; only the harness's example module
 >   - [ ] Terraform stage pointed at the real infrastructure modules
 >   - [ ] Promote `require-pod-probes` to Enforce (now that it accepts valid probes)
+
+---
+
+## Build 028 — Every pipeline path run or audited; 50 defects fixed
+**Date:** 2026-10-14
+**Scope:** Build 027 ran the Jenkinsfile on a `develop` build. This build runs a `main` build too: Deploy → Production in Jenkins, with its approval gate, migrations, the Argo Rollout, smoke tests and DORA pushes. It also audits everything no build reaches: the tag, pull-request and failure paths, the manifests against a real cluster, the scripts, and the app. 50 defects were found and fixed. Each one was verified against the code, and most were reproduced first.
+
+### Fixed — would have failed in production
+- `k8s/overlays/production/analysis-template.yaml`, `rollout-patch.yaml` — **Every canary would have aborted.** The analysis queried `http_requests_total`, which the app doesn't export. It now queries `http_request_duration_ms_count{status_code}` for the canary's own pods (`podTemplateHashValue: Latest`), and handles the case where there is no traffic yet.
+- `argocd/bootstrap/apps/kube-prometheus-stack.yaml`, `monitoring/` — **Nothing scraped the app.** The alert and recording rules sat in ConfigMaps that nothing deployed, which the operator ignores anyway. Two of them also used metric names that don't exist. There is now a `my-app` scrape job (pods in staging and production, labelled with the Rollout's pod-template hash), the rules are loaded through `additionalPrometheusRulesMap` with the real metric names, the Pushgateway target is corrected, and the DORA dashboard queries what Jenkins pushes.
+- `Jenkinsfile` — **Auto-rollback never fired.** `PREVIOUS_IMAGE` was read without the deployer's kubeconfig, so it was always `none`. It is now read with the kubeconfig, from the Rollout's stable ReplicaSet. A build that ends ABORTED after the production deploy started also rolls back. The global timeout is 60 min, enough for the approval wait plus the canary.
+- `Jenkinsfile`, `docker/jenkins/jenkins.yaml`, `plugins.txt` — **Releases never built.** Tags were never discovered or built. This adds tag discovery and build strategies (`basic-branch-build-strategies`). `docker tag` also had no local image after `buildx --push`; it is replaced by `imagetools create`.
+- `Jenkinsfile`, `scripts/pr-preview-up.sh`, `jenkins/pr-preview-teardown.Jenkinsfile`, `jenkins.yaml` — **PR previews failed and were never torn down.**
+  - Previews deployed before the image existed, reused staging's host and had no secrets. The stage now runs after the push and deploys the build's image at `pr-<N>.$PREVIEW_DOMAIN`, with in-memory stores, then waits for the rollout.
+  - The teardown job had no checkout, JCasC blanked its PR number, and its action filter used an undefined variable. It now loads `jenkins/pr-preview-teardown.Jenkinsfile` from git, filters on `pull_request closed`, and validates the PR number.
+- `Jenkinsfile` — **DORA metrics never arrived.** The Service name was wrong, the body ended in a literal `\n`, and the instance contained a `/`. MTTR also counted past successes. The nightly cron fired on every branch, which parked `main` at the production approval each night; it now runs on `develop` only. `:latest` is pushed only from `main`.
+- `app/src/server.js` — **Shutdown ended the DB pool before the server stopped taking requests,** so in-flight requests got errors. Now: readiness off, grace period, server closed, then DB and Redis, with a force-exit well inside the 60 s grace period.
+- `app/src/routes/health.js` — **A Redis outage took every pod out of the Service,** though no route uses Redis. Redis down now reports `degraded` with 200; the database still gates readiness.
+- `policies/kyverno/require-resource-limits.yaml` — **The policy covered the whole cluster** and would have rejected the platform's own pods (ingress-nginx, Prometheus, Argo Rollouts…) on their next restart. It now applies to `production` and `staging` only.
+- `k8s/secrets/`, `scripts/setup.sh` — **The image pull secret's name didn't match** (`docker-registry-secret` vs `registry-credentials`), and staging had no `my-app-secrets`.
+- `argocd/Application-*.yaml` — **Argo CD and Jenkins would have fought.** Argo CD auto-synced `my-app:latest` with self-heal, which Kyverno rejects and which would revert every Jenkins deploy and rollback. Jenkins is now the deployer: the Applications are manual-sync and ignore the image and `version` label.
+- `k8s/overlays/production/quota-patch.yaml` — The quota now fits HPA `maxReplicas` plus a canary surge.
+- `argocd/bootstrap/apps/ingress-nginx.yaml` — `externalTrafficPolicy: Local`, so with `TRUST_PROXY=1` the app sees client addresses rather than a node's.
+- `argocd/bootstrap/apps/metrics-server.yaml` — metrics-server, without which the HPAs never scale.
+- `app/`, `k8s/overlays/production/configmap-patch.yaml` — The production database uses TLS (`DB_SSL=true`, `DB_SSL_CA` for a CA bundle such as RDS's). `DB_POOL_MAX` and `DB_POOL_MIN` size the pool against Postgres' connection limit, and `DB_STATEMENT_TIMEOUT_MS` stops a hung query from blocking shutdown. `knexfile.js` refuses to fall back to `localhost` in production.
+- `scripts/wait-for-rollout.sh` — A single failed `kubectl get` failed the 15-minute canary wait, which then triggered a rollback. It now retries until the deadline.
+- `scripts/setup.sh` — The Argo CD install couldn't work client-side (the CRD is too large); it is now server-side and pinned to v3.5.5. `kubectl apply -f monitoring/` failed on the OpenSLO file. The script now uses Compose v2 (2.24+) and checks only the tools each mode needs, with real readiness checks and timeouts.
+
+### Fixed — security and operations
+- App:
+  - credentials (`Authorization`, `Cookie`, `Set-Cookie`) redacted from logs;
+  - 5xx responses no longer echo internal errors;
+  - client `X-Request-Id` accepted only when it looks like an ID;
+  - the fake stores refused in staging and production;
+  - a bounded `route` label on the latency histogram (no raw 404 paths).
+- OpenTelemetry under ES modules: Express and ioredis weren't instrumented. The app now starts with `node --import ./dist/instrumentation.js`, and spans are flushed at the end of shutdown.
+- Node 20 reached end of life in April: the app image, the agent image (24.21.0), CI and the harness all move to Node 24.
+- docker-compose:
+  - SonarQube 10.7 (9.9 is frozen);
+  - Jenkins no longer runs as root, privileged, or with the host Docker socket;
+  - the docs say where builds actually run (Jenkins in a cluster).
+- Smaller fixes:
+  - probe timeouts that fit the health checks;
+  - a staging PDB that lets nodes drain;
+  - `ingressClassName`;
+  - the OTel endpoint set and the collector app made installable;
+  - Slack messages that name the branch, with the right colour;
+  - `seal-secret.sh` reads values from stdin.
+
+### Added — verification
+- `harness/stages/pipeline.sh`:
+  - a **`main` build** after the `develop` one. It approves the deploy gate through Jenkins' input API, then checks every stage, that the production Rollout ends Healthy on that build's image, and that the DORA metrics reached a Pushgateway;
+  - the harness's Postgres has no TLS, so `db_without_tls` turns `DB_SSL` off in its copies.
+- `harness/stages/cluster-real.sh` — runs `pr-preview-up.sh` and `pr-preview-down.sh` against the cluster, with smoke tests on the preview.
+- `harness/stages/jenkins.sh` — splits each Jenkinsfile's base64 into chunks, because Groovy literals stop at 65,535 characters.
+- App tests: 54 → 106. Coverage: 98% of lines, 95% of branches.
+
+### Not verifiable here (needs real infrastructure)
+- The canary analysis against a live Prometheus. The query and rules pass `promtool` unit tests.
+- Tag builds and the GitHub webhook (they need GitHub and a public Jenkins).
+- Database TLS against a managed database.
+- `externalTrafficPolicy` behind a cloud load balancer.
 
 ---
 

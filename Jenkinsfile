@@ -116,9 +116,15 @@ pipeline {
                                 # OWASP Dependency Check
                                 # Build 015: --failOnCVSS tightened from 8 to 7 to match
                                 # the Trivy HIGH threshold (CVSS 7.0 == HIGH boundary).
+                                # Dev dependencies (Jest, ESLint, Stryker…) never reach
+                                # the image (docker/Dockerfile installs production
+                                # dependencies only),
+                                # which Trivy scans as built.
                                 dependency-check.sh \
                                   --project "${APP_NAME}" \
                                   --scan . \
+                                  --nodeAuditSkipDevDependencies \
+                                  --nodePackageSkipDevDependencies \
                                   "$@" \
                                   --format "HTML" \
                                   --out reports/dependency-check \

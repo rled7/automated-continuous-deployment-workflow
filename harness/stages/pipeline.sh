@@ -13,8 +13,8 @@
 #   - SonarQube: a fresh server in the cluster, with a token and the quality
 #     gate webhook;
 #   - secrets: placeholder values, plus a kubeconfig for an in-cluster
-#     service account. NVD_API_KEY (optional) comes from the environment,
-#     for updating the vulnerability database through the NVD API;
+#     service account. NVD_API_KEY comes from the environment: the
+#     vulnerability database needs a real one;
 #   - staging: the namespace already set up the way a long-lived one is
 #     (Pod Security labels, throwaway Postgres and Redis, the app's Secret,
 #     ConfigMap and NetworkPolicies), with STAGING_URL the in-cluster Service
@@ -50,7 +50,7 @@ JENKINS_AUTH="admin:verify"
 source "$HARNESS_DIR/lib/jenkins.sh"
 
 need_tools kind kubectl kustomize || exit 1
-[ -n "${NVD_API_KEY:-}" ] || log "NVD_API_KEY is not set: the vulnerability database is built from NVD's public data feeds"
+[ -n "${NVD_API_KEY:-}" ] || log "NVD_API_KEY is not set: the Dependency Vulnerability Scan will fail"
 ensure_docker || exit 1
 
 work=$(mktemp -d)
@@ -134,9 +134,8 @@ step "build docker/jenkins-agent/Dockerfile" \
 # scripts/dependency-check-db-update.sh, as the nightly
 # dependency-check-db-update job does in production; the scan in the build
 # then reads it without downloading anything (--noupdate, since the pod
-# template sets DEPENDENCY_CHECK_DATA). It uses NVD_API_KEY when NVD accepts
-# it and NVD's public data feeds otherwise. Runs while the cluster and
-# Jenkins come up.
+# template sets DEPENDENCY_CHECK_DATA). Needs an NVD_API_KEY NVD accepts.
+# Runs while the cluster and Jenkins come up.
 ( timeout 2400 docker run --rm -e NVD_API_KEY -v "$DC_DATA:/data" -v "$REPO_ROOT/scripts:/scripts:ro" \
     --entrypoint bash harness-agent:local /scripts/dependency-check-db-update.sh /data > "$work/dc-update.log" 2>&1
   echo $? > "$work/dc-update.rc" ) &

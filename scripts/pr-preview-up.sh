@@ -92,7 +92,13 @@ patches:
 EOF
 kustomize build "$work" | kubectl apply -f -
 
-# 4. Ready when the rollout is.
-kubectl -n "${PREVIEW_NS}" rollout status deployment/my-app --timeout=300s
+# 4. Ready when the rollout is; if it is not, say why.
+if ! kubectl -n "${PREVIEW_NS}" rollout status deployment/my-app --timeout=300s; then
+  echo "[pr-preview-up] The preview did not become ready:" >&2
+  kubectl -n "${PREVIEW_NS}" get pods -o wide >&2 || true
+  kubectl -n "${PREVIEW_NS}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -n 25 >&2 || true
+  kubectl -n "${PREVIEW_NS}" logs deployment/my-app --tail=40 >&2 2>&1 || true
+  exit 1
+fi
 
 echo "[pr-preview-up] Preview for PR ${PR_NUMBER} is up: https://${HOST}"

@@ -4,6 +4,15 @@ This guide spins up a local Kubernetes cluster with
 [kind](https://kind.sigs.k8s.io/), bootstraps Argo CD, and installs all
 platform components via the app-of-apps pattern.
 
+It is separate from the Docker Compose stack (`scripts/setup.sh --local`),
+which runs the Jenkins controller, SonarQube and a registry for trying them
+out but cannot run builds: the controller has no executors, and the
+Kubernetes cloud in `docker/jenkins/jenkins.yaml` expects Jenkins to run
+inside the cluster. To run the pipeline, run Jenkins in namespace `jenkins` of
+this cluster the way `harness/fixtures/jenkins-in-cluster.yaml` and
+`harness/stages/pipeline.sh` do (see "Running builds" in the
+[README](../README.md#running-builds)).
+
 ## Prerequisites
 
 | Tool | Purpose | Install |

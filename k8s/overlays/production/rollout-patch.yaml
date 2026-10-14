@@ -90,6 +90,10 @@ spec:
         - analysis:
             templates:
               - templateName: success-rate
+            args:
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
         # Step 2: ramp to 50%
         - setWeight: 50
         - pause:
@@ -97,5 +101,9 @@ spec:
         - analysis:
             templates:
               - templateName: success-rate
+            args:
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
         # Step 3: promote to 100%
         - setWeight: 100

@@ -44,7 +44,8 @@ RUN apk upgrade --no-cache && \
 COPY --from=deps    /tmp/prod_modules     ./node_modules
 COPY --from=builder /app/dist             ./dist
 COPY --from=builder /app/package.json     ./package.json
-# Migrations run from this image (runMigrations() in the Jenkinsfile)
+# Migrations run from this image (runMigrations() in the Jenkinsfile); the app
+# also imports knexfile.js (lib/db.js shares its TLS options)
 COPY --from=builder /app/knexfile.js      ./knexfile.js
 COPY --from=builder /app/migrations       ./migrations
 

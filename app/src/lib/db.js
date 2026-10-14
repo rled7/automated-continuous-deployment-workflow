@@ -13,6 +13,13 @@
  *   DB_PASSWORD — Postgres password   (required in staging/production)
  *   DB_NAME     — Postgres database   (default: appdb)
  *   DB_SSL      — Set to "true" to enable SSL (default: off)
+ *   DB_SSL_CA   — With DB_SSL, path to a PEM CA bundle to verify the server
+ *                 against (default: Node's trust store); see knexfile.js
+ *   DB_POOL_MAX — Pool size (default: 10)
+ *   DB_POOL_MIN — Idle connections kept open (default: 2, at most DB_POOL_MAX)
+ *   DB_STATEMENT_TIMEOUT_MS — Server-side statement timeout (default: 15000);
+ *                 the client gives up on a query 1 s after that, so a hung
+ *                 query cannot hold a connection (or shutdown) indefinitely
  *   DB_FAKE     — Set to "1" to use an in-memory fake store (for tests without
  *                 a real Postgres instance; ESM Jest + pg-mem can be fiddly)
  *
@@ -25,6 +32,7 @@
 
 import pg from 'pg';
 import logger from './logger.js';
+import { sslOptions } from '../../knexfile.js';
 
 const { Pool } = pg;
 
@@ -35,7 +43,17 @@ const DB_PORT     = Number(process.env.DB_PORT || 5432);
 const DB_USER     = process.env.DB_USER     || 'appuser';
 const DB_PASSWORD = process.env.DB_PASSWORD;
 const DB_NAME     = process.env.DB_NAME     || 'appdb';
-const DB_SSL      = process.env.DB_SSL === 'true';
+
+// An integer >= min from the environment, or the default if unset or invalid.
+const intFromEnv = (name, fallback, min) => {
+  const raw = process.env[name];
+  const n = Number(raw);
+  return raw && Number.isInteger(n) && n >= min ? n : fallback;
+};
+
+const DB_POOL_MAX = intFromEnv('DB_POOL_MAX', 10, 1);
+const DB_POOL_MIN = Math.min(intFromEnv('DB_POOL_MIN', 2, 0), DB_POOL_MAX);
+const DB_STATEMENT_TIMEOUT_MS = intFromEnv('DB_STATEMENT_TIMEOUT_MS', 15_000, 1);
 
 // ── DB_FAKE escape hatch ─────────────────────────────────────────────────────
 //
@@ -72,9 +90,11 @@ if (!DB_FAKE && configured) {
     user:                   DB_USER,
     password:               DB_PASSWORD,
     database:               DB_NAME,
-    ssl:                    DB_SSL ? { rejectUnauthorized: true } : false,
-    min:                    2,
-    max:                    10,
+    ssl:                    sslOptions(),
+    min:                    DB_POOL_MIN,
+    max:                    DB_POOL_MAX,
+    statement_timeout:      DB_STATEMENT_TIMEOUT_MS,
+    query_timeout:          DB_STATEMENT_TIMEOUT_MS + 1_000,
     idleTimeoutMillis:      30_000,
     connectionTimeoutMillis: 5_000,
   });

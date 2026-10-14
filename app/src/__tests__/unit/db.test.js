@@ -1,9 +1,15 @@
 import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globals';
+import { mkdtempSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 // lib/db.js reads its configuration when it is first imported, so each test
 // sets the environment, mocks `pg`, and imports a fresh copy of the module.
 
-const ENV_KEYS = ['NODE_ENV', 'DB_FAKE', 'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'DB_SSL'];
+const ENV_KEYS = [
+  'NODE_ENV', 'DB_FAKE', 'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'DB_SSL',
+  'DB_SSL_CA', 'DB_POOL_MAX', 'DB_POOL_MIN', 'DB_STATEMENT_TIMEOUT_MS',
+];
 let savedEnv;
 
 beforeEach(() => {
@@ -70,8 +76,56 @@ describe('lib/db.js with a database configured', () => {
       password: 'secret',
       database: 'appdb',
       ssl: false,
+      min: 2,
       max: 10,
+      statement_timeout: 15000,
+      query_timeout: 16000,
     });
+  });
+
+  test('DB_POOL_MAX and DB_POOL_MIN size the pool', async () => {
+    const { pools } = await loadDb({
+      DB_HOST: 'db.internal', DB_PASSWORD: 'secret', DB_POOL_MAX: '25', DB_POOL_MIN: '5',
+    });
+    expect(pools[0].config).toMatchObject({ min: 5, max: 25 });
+  });
+
+  test('DB_POOL_MIN is capped at DB_POOL_MAX', async () => {
+    const { pools } = await loadDb({
+      DB_HOST: 'db.internal', DB_PASSWORD: 'secret', DB_POOL_MAX: '3', DB_POOL_MIN: '8',
+    });
+    expect(pools[0].config).toMatchObject({ min: 3, max: 3 });
+  });
+
+  test.each(['0', '-4', 'ten', '2.5', ''])('an invalid DB_POOL_MAX (%p) keeps the default', async (value) => {
+    const { pools } = await loadDb({ DB_HOST: 'db.internal', DB_PASSWORD: 'secret', DB_POOL_MAX: value });
+    expect(pools[0].config).toMatchObject({ min: 2, max: 10 });
+  });
+
+  test('DB_STATEMENT_TIMEOUT_MS sets the statement timeout; the client waits 1 s longer', async () => {
+    const { pools } = await loadDb({
+      DB_HOST: 'db.internal', DB_PASSWORD: 'secret', DB_STATEMENT_TIMEOUT_MS: '30000',
+    });
+    expect(pools[0].config).toMatchObject({ statement_timeout: 30000, query_timeout: 31000 });
+  });
+
+  test('DB_SSL_CA verifies the server against that CA bundle', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'db-ca-'));
+    const caPath = join(dir, 'global-bundle.pem');
+    writeFileSync(caPath, '-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n');
+    const { pools } = await loadDb({
+      DB_HOST: 'db.internal', DB_PASSWORD: 'secret', DB_SSL: 'true', DB_SSL_CA: caPath,
+    });
+    expect(pools[0].config.ssl).toEqual({
+      ca: '-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n',
+      rejectUnauthorized: true,
+    });
+  });
+
+  test('a missing DB_SSL_CA file fails at startup', async () => {
+    await expect(loadDb({
+      DB_HOST: 'db.internal', DB_PASSWORD: 'secret', DB_SSL: 'true', DB_SSL_CA: '/nonexistent/ca.pem',
+    })).rejects.toThrow(/ENOENT/);
   });
 
   test('honours DB_PORT, DB_USER, DB_NAME and DB_SSL', async () => {

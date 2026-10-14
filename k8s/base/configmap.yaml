@@ -7,3 +7,6 @@ data:
   PORT: "3000"
   LOG_LEVEL: "info"
   REDIS_URL: "redis://redis:6379"
+  # One proxy (ingress-nginx) in front of the app: the rate limit then applies
+  # per client address instead of to everyone behind the ingress controller.
+  TRUST_PROXY: "1"

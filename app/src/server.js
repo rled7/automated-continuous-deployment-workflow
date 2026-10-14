@@ -19,6 +19,19 @@ export const app = express();
 const PORT = process.env.PORT || 3000;
 const SHUTDOWN_TIMEOUT_MS = 55_000;
 
+const positiveInt = (value, fallback) => {
+  const n = Number.parseInt(value ?? '', 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+};
+
+// Behind the ingress controller every request arrives from the controller's
+// pod, so without this req.ip is that pod's address and all clients share one
+// rate limit. TRUST_PROXY is the number of proxies in front of the app (1
+// behind ingress-nginx): req.ip is then the address the nearest proxy saw,
+// and X-Forwarded-For entries a client adds itself are ignored.
+const trustProxy = positiveInt(process.env.TRUST_PROXY, 0);
+if (trustProxy) app.set('trust proxy', trustProxy);
+
 // 1. Security headers + JSON body parser
 app.use(helmet());
 app.use(express.json());
@@ -38,9 +51,11 @@ app.use(
 app.use(metricsMiddleware);
 
 // 5. Rate limiting — skip health and metrics endpoints
+// RATE_LIMIT_MAX: requests per client per minute (default 100); staging
+// raises it so a load test from one machine measures the app, not the limit.
 const limiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 100,
+  max: positiveInt(process.env.RATE_LIMIT_MAX, 100),
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) =>

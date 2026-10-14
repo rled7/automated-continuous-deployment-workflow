@@ -314,6 +314,9 @@ env = {
     "COSIGN_PASSWORD": "verify",
     # Plain HTTP, and no entries in the public Rekor log for a test registry.
     "COSIGN_EXTRA_ARGS": "--allow-http-registry --tlog-upload=false",
+    # The load test's 8-minute profile, cut to 30 s (k6 prefers K6_STAGES
+    # to the script's stages).
+    "K6_STAGES": "10s:5,15s:10,5s:0",
 }
 for cloud in casc["jenkins"]["clouds"]:
     for t in cloud.get("kubernetes", {}).get("templates", []):

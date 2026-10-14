@@ -206,14 +206,18 @@ pipeline {
             parallel {
                 stage('Unit Tests') {
                     steps {
+                        // jest-junit takes its file from JEST_JUNIT_* (it ignores
+                        // --outputFile); without the default reporter a failing
+                        // test leaves no explanation in the log.
                         sh '''
                             cd app
                             mkdir -p reports
+                            JEST_JUNIT_OUTPUT_DIR=reports JEST_JUNIT_OUTPUT_NAME=junit-unit.xml \
                             npm run test:unit -- \
                               --coverage \
                               --coverageReporters=cobertura \
-                              --reporters=jest-junit \
-                              --outputFile=reports/junit-unit.xml
+                              --reporters=default \
+                              --reporters=jest-junit
                         '''
                     }
                     post {
@@ -231,9 +235,10 @@ pipeline {
                         sh '''
                             cd app
                             mkdir -p reports
+                            JEST_JUNIT_OUTPUT_DIR=reports JEST_JUNIT_OUTPUT_NAME=junit-integration.xml \
                             npm run test:integration -- \
-                              --reporters=jest-junit \
-                              --outputFile=reports/junit-integration.xml
+                              --reporters=default \
+                              --reporters=jest-junit
                         '''
                     }
                     post {
@@ -772,9 +777,10 @@ def runSmokeTests(String env) {
         sh """
             npm ci --prefer-offline --no-audit --no-fund
             BASE_URL=${baseUrl} \
+            JEST_JUNIT_OUTPUT_DIR=reports JEST_JUNIT_OUTPUT_NAME=junit-smoke-${env}.xml \
             npm run test:smoke -- \
-              --reporters=jest-junit \
-              --outputFile=reports/junit-smoke-${env}.xml
+              --reporters=default \
+              --reporters=jest-junit
         """
     }
     junit "tests/reports/junit-smoke-${env}.xml"

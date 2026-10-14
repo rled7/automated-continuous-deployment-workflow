@@ -14,17 +14,17 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 >   - [x] Staging deploy on a real cluster in CI (Build 023)
 >   - [x] Production Rollout path on a real cluster: deploy, failed canary, rollback (`cluster-prod`, Build 024; passing in CI)
 >   - [ ] First production deploy with the Rollout-only overlay, watched (removes the stray Deployment)
->   - [ ] Whole Jenkinsfile run end to end (Jenkins controller + agent image in kind)
+>   - [x] Whole Jenkinsfile run end to end on a `develop` build (Jenkins controller + agent image in kind; `pipeline` stage passing in CI, commit 79f0bbf). Not run there: PR Preview (pull-request builds), Mutation Tests (nightly), Deploy → Production and Release (`main`; the production path is covered by `cluster-prod`)
 >     - [x] Jenkins starts from `docker/jenkins` with `jenkins.yaml`; credentials and declarative validation checked (`jenkins` stage, Build 025)
 >     - [x] The agent image builds and has every command the pipeline calls (Build 026)
 >     - [x] Every way of asking for an agent resolves to the `cicd-agent` pod, offline and in kind (Build 026)
 >     - [x] Jenkins runs the Jenkinsfile on kind (`pipeline` stage, Build 026): Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks pass
->     - [ ] Dependency Vulnerability Scan: fixed and checked locally against a full NVD database (production dependencies clean); first CI run waits on an activated NVD API key
+>     - [x] Dependency Vulnerability Scan passes in CI with the NVD API key and a cached database
 >     - [x] SonarQube webhook to Jenkins created by the real setup (`scripts/sonarqube-setup.sh`, Build 026)
 >     - [x] Unit Tests stage can pass (coverage thresholds met by real tests; junit reports where Jenkins reads them) — checked locally
 >     - [x] Mutation tests run (Stryker score 75%, break threshold 50%) — checked locally
->     - [ ] The stages after the scan, in CI: Build, tests, Docker Build & Push (dind, QEMU, plain-HTTP stand-in registry prepared), SBOM scan, Deploy → Staging (environment state prepared), perf/E2E, Release
->     - [ ] Decisions: where the dependency-check database lives; cosign keyless or key-based signing; how the staging smoke tests reach staging
+>     - [x] The stages after the scan pass in CI: Build, Validate Manifests, Unit and Integration Tests, Docker Build & Push (multi-arch, Trivy, SBOM, signing and provenance), Scan SBOM, Deploy → Staging with migrations and smoke tests, Performance Tests, E2E Tests
+>     - [ ] Decisions: where the dependency-check database lives (shared volume + nightly job, or each build); signing key (`COSIGN_KEY`, e.g. KMS) or keyless; the real `STAGING_URL` / `PRODUCTION_URL`
 >   - [x] CI runs in about 6 minutes instead of 15.5 (parallel groups, cached layers and tools; Build 027)
 >   - [ ] Terraform stage pointed at the real infrastructure modules
 >   - [ ] Promote `require-pod-probes` to Enforce (now that it accepts valid probes)

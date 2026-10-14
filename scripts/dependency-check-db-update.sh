@@ -25,7 +25,15 @@ mkdir -p "$data"
 status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -H "apiKey: $NVD_API_KEY" "$NVD_API?resultsPerPage=1" || true)
 case $status in
   200) ;;
-  404) echo "NVD rejected NVD_API_KEY (404 Invalid apiKey): is it activated (link in NVD's email)?" >&2; exit 1 ;;
+  404)
+    # Describe the value without printing it.
+    shape="${#NVD_API_KEY} characters"
+    [[ $NVD_API_KEY =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] &&
+      shape+=", shaped like an NVD key" || shape+=", not shaped like XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX (36 characters, with the hyphens)"
+    [[ $NVD_API_KEY =~ [[:space:]] ]] && shape+=", contains spaces or line breaks"
+    echo "NVD rejected NVD_API_KEY (404 Invalid apiKey). The value is $shape." >&2
+    echo "Use the key the NVD activation page shows, exactly, hyphens included." >&2
+    exit 1 ;;
   *) echo "NVD API answered HTTP $status to a test request" >&2; exit 1 ;;
 esac
 exec dependency-check.sh --updateonly --data "$data" --nvdApiKey "$NVD_API_KEY"

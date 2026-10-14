@@ -28,7 +28,11 @@ pipeline {
     }
 
     options {
-        timeout(time: 30, unit: 'MINUTES')
+        // Covers a main build end to end: ~10 min of build and scans, up to
+        // 15 min waiting for the production approval, up to 15 min of canary.
+        // A build stopped by this timeout ends ABORTED; post { aborted } rolls
+        // back a production deploy it interrupted.
+        timeout(time: 60, unit: 'MINUTES')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '10'))
         timestamps()
@@ -48,7 +52,9 @@ pipeline {
         pollSCM('H/5 * * * *')
         // Build 020: nightly cron triggers mutation testing at 3 am UTC (±hash window).
         // The H hash spreads concurrent jobs across the hour to avoid thundering-herd.
-        cron('H 3 * * *')
+        // develop only: in a multibranch job every branch gets this trigger, and
+        // a nightly main build would wait at the production approval and abort.
+        cron(env.BRANCH_NAME == 'develop' ? 'H 3 * * *' : '')
     }
 
     stages {
@@ -60,7 +66,8 @@ pipeline {
                 script {
                     env.GIT_AUTHOR     = sh(script: "git log -1 --format='%an'", returnStdout: true).trim()
                     env.GIT_MESSAGE    = sh(script: "git log -1 --format='%s'",  returnStdout: true).trim()
-                    env.GIT_BRANCH_NAME = sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
+                    // The checkout is a detached HEAD: take the branch from the multibranch job.
+                    env.GIT_BRANCH_NAME = env.BRANCH_NAME ?: sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
                     // Bug 1 fix: compute ENV here instead of in environment{} block
                     // to avoid mixing Groovy function calls with declarative env vars
                     env.ENV = getEnvironment()
@@ -281,30 +288,6 @@ pipeline {
             }
         }
 
-        // ─── STAGE 6: DEPLOY → PR PREVIEW ────────────────────────────────────
-        // Build 009 — point 29: wire scripts/pr-preview-up.sh (added in Build 011).
-        // This stage runs only on pull-request builds (changeRequest() condition).
-        // PR teardown lives in a separate Jenkins job triggered by the GitHub
-        // "pull_request closed" webhook — see scripts/pr-preview-down.sh.
-        stage('Deploy → PR Preview') {
-            when {
-                changeRequest()
-            }
-            steps {
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
-                    sh '''
-                        export KUBECONFIG=$KUBECONFIG_FILE
-                        ./scripts/pr-preview-up.sh ${CHANGE_ID}
-                    '''
-                }
-            }
-            post {
-                success {
-                    notifySlack("🌿 *PR Preview Ready* — PR #${CHANGE_ID}: https://preview-pr-${CHANGE_ID}.${APP_NAME}.internal")
-                }
-            }
-        }
-
         // ─── STAGE 7: DOCKER BUILD & PUSH ────────────────────────────────────
         // Build 019: replaced docker.build() with docker buildx to produce a
         // multi-arch manifest list (linux/amd64 + linux/arm64). The manifest
@@ -354,7 +337,7 @@ pipeline {
                               --push \
                               --metadata-file reports/build-metadata.json \
                               -t ${FULL_IMAGE} \
-                              -t ${DOCKER_REGISTRY}/${APP_NAME}:latest \
+                              ${env.BRANCH_NAME == 'main' ? "-t ${DOCKER_REGISTRY}/${APP_NAME}:latest" : ''} \
                               -f docker/Dockerfile \
                               --cache-from type=registry,ref=${DOCKER_REGISTRY}/${APP_NAME}:cache \
                               --cache-to   type=registry,ref=${DOCKER_REGISTRY}/${APP_NAME}:cache,mode=max \
@@ -465,6 +448,29 @@ EOF
             post {
                 always {
                     archiveArtifacts artifacts: 'reports/grype.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ─── STAGE 7c: DEPLOY → PR PREVIEW ───────────────────────────────────
+        // Build 009 — point 29: scripts/pr-preview-up.sh deploys this build's
+        // image into namespace preview-pr-<N>, reachable at
+        // pr-<N>.${PREVIEW_DOMAIN}. Runs on pull-request builds only, after the
+        // image is built, scanned and pushed. PR teardown lives in the
+        // pr-preview-teardown job, triggered by GitHub's "pull_request closed"
+        // webhook — see scripts/pr-preview-down.sh.
+        stage('Deploy → PR Preview') {
+            when {
+                changeRequest()
+            }
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh './scripts/pr-preview-up.sh "$CHANGE_ID" "$FULL_IMAGE" "pr-$CHANGE_ID.$PREVIEW_DOMAIN"'
+                }
+            }
+            post {
+                success {
+                    notifySlack("🌿 *PR Preview Ready* — PR #${CHANGE_ID}: https://pr-${CHANGE_ID}.${PREVIEW_DOMAIN}")
                 }
             }
         }
@@ -585,11 +591,23 @@ EOF
                     input message: "Deploy ${IMAGE_TAG} to PRODUCTION?", ok: 'Deploy Now'
                 }
                 script {
-                    // Save current image for potential rollback
-                    env.PREVIOUS_IMAGE = sh(
-                        script: "kubectl get ${workloadRef('production')} -n production -o jsonpath='{.spec.template.spec.containers[0].image}' || echo 'none'",
-                        returnStdout: true
-                    ).trim()
+                    // The release to roll back to: the image the Rollout's stable
+                    // ReplicaSet runs (its pod template may hold an aborted
+                    // release). Read with the deployer's kubeconfig; the agent
+                    // pod's own service account cannot see production.
+                    withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                        env.PREVIOUS_IMAGE = sh(
+                            script: '''
+                                stable=$(kubectl get rollout/"$APP_NAME" -n production -o jsonpath='{.status.stableRS}' 2>/dev/null || true)
+                                image=""
+                                [ -n "$stable" ] && image=$(kubectl get rs -n production -l rollouts-pod-template-hash="$stable" \\
+                                    -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || true)
+                                echo "${image:-none}"
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                    }
+                    echo "Previous production image: ${env.PREVIOUS_IMAGE}"
 
                     // Build 015 — DORA: capture build start epoch and git author date
                     // for lead-time computation in post.success below.
@@ -607,6 +625,8 @@ EOF
                         returnStdout: true
                     ).trim()
 
+                    // From here on a failed or aborted build rolls production back.
+                    env.PRODUCTION_DEPLOY_STARTED = 'true'
                     // Build 017: run migrations before deploy (expand-contract pattern)
                     runMigrations('production', FULL_IMAGE)
                     deployToKubernetes('production', FULL_IMAGE)
@@ -630,17 +650,15 @@ EOF
                         pushDoraMetric('lead_time_seconds', leadTime)
 
                         // ── DORA: MTTR ─────────────────────────────────────
-                        // Walk back through previousBuild history to find the
-                        // most recent failed production build and compute the
-                        // elapsed seconds from that failure to this success.
-                        // If no previous failure is found, push 0 (no outage).
+                        // Time from the first failure of the failure streak this
+                        // deploy ends to now: walk back over the builds since the
+                        // last success. No failure since then: push 0.
                         def prevBuild = currentBuild.previousBuild
                         def failedBuildTs = null
-                        while (prevBuild != null) {
+                        while (prevBuild != null && prevBuild.result != 'SUCCESS') {
                             if (prevBuild.result == 'FAILURE') {
                                 // getTimeInMillis() returns epoch-ms; convert to seconds
                                 failedBuildTs = (prevBuild.getTimeInMillis() / 1000).toLong()
-                                break
                             }
                             prevBuild = prevBuild.previousBuild
                         }
@@ -675,11 +693,11 @@ EOF
                 tag pattern: "v\\d+\\.\\d+\\.\\d+", comparator: "REGEXP"
             }
             steps {
-                // Re-tag the already-built image with the SemVer tag and push
-                sh '''
-                    docker tag ${FULL_IMAGE} ${DOCKER_REGISTRY}/${APP_NAME}:${TAG_NAME}
-                    docker push ${DOCKER_REGISTRY}/${APP_NAME}:${TAG_NAME}
-                '''
+                // Tag the image this build pushed with the SemVer tag, in the
+                // registry: buildx pushed a multi-arch manifest list that was
+                // never loaded into the local daemon, so `docker tag` has nothing
+                // to tag. imagetools copies the whole list, every platform.
+                sh 'docker buildx imagetools create -t "$DOCKER_REGISTRY/$APP_NAME:$TAG_NAME" "$FULL_IMAGE"'
                 // Create a GitHub Release via gh CLI.
                 // gh requires a GitHub token; wrap in withCredentials so the
                 // token is available as GH_TOKEN without leaking into the log.
@@ -704,12 +722,16 @@ EOF
         }
         failure {
             script {
-                notifySlack("🚨 *Pipeline FAILED* — ${APP_NAME} #${BUILD_NUMBER}\n*Stage:* ${env.STAGE_NAME}\n*Branch:* ${env.GIT_BRANCH_NAME}")
-                if (env.BRANCH_NAME == 'main' && env.PREVIOUS_IMAGE && env.PREVIOUS_IMAGE != 'none') {
-                    echo "⚠️  Production deploy failed — initiating automatic rollback to ${env.PREVIOUS_IMAGE}"
-                    rollback('production', env.PREVIOUS_IMAGE)
-                    notifySlack("🔁 *Auto-Rollback Completed* — ${APP_NAME} rolled back to `${env.PREVIOUS_IMAGE}`")
-                }
+                notifySlack("🚨 *Pipeline FAILED* — ${APP_NAME} #${BUILD_NUMBER}\n*Branch:* ${env.GIT_BRANCH_NAME}\n${env.BUILD_URL}")
+                rollbackInterruptedDeploy()
+            }
+        }
+        // The global timeout, or someone stopping the build, ends it ABORTED:
+        // a production deploy it interrupted is rolled back the same way.
+        aborted {
+            script {
+                notifySlack("⏹️ *Pipeline ABORTED* — ${APP_NAME} #${BUILD_NUMBER}\n*Branch:* ${env.GIT_BRANCH_NAME}\n${env.BUILD_URL}")
+                rollbackInterruptedDeploy()
             }
         }
         unstable {
@@ -723,6 +745,17 @@ EOF
 } // end pipeline
 
 // ─── SHARED FUNCTIONS ─────────────────────────────────────────────────────────
+
+// After a failed or aborted main build: if Deploy → Production had started,
+// put production back on the release it ran before.
+def rollbackInterruptedDeploy() {
+    if (env.BRANCH_NAME == 'main' && env.PRODUCTION_DEPLOY_STARTED == 'true' &&
+            env.PREVIOUS_IMAGE && env.PREVIOUS_IMAGE != 'none') {
+        echo "⚠️  Production deploy did not complete — rolling back to ${env.PREVIOUS_IMAGE}"
+        rollback('production', env.PREVIOUS_IMAGE)
+        notifySlack("🔁 *Auto-Rollback Completed* — ${APP_NAME} rolled back to `${env.PREVIOUS_IMAGE}`")
+    }
+}
 
 // Production runs an Argo Rollout (k8s/overlays/production replaces the base
 // Deployment with it); every other namespace runs the plain Deployment.
@@ -834,7 +867,7 @@ def runSmokeTests(String env) {
 def notifySlack(String message) {
     slackSend(
         channel: env.SLACK_CHANNEL,
-        color: currentBuild.result == 'SUCCESS' ? 'good' : 'danger',
+        color: currentBuild.currentResult == 'SUCCESS' ? 'good' : 'danger',
         message: message
     )
 }
@@ -888,9 +921,14 @@ def runMigrations(String namespace, String image) {
 //   job      = "jenkins"   (groups all Jenkins pushes together in Prometheus)
 //   instance = JOB_NAME-BUILD_NUMBER (unique per build for cardinality control)
 def pushDoraMetric(String metric, String value) {
-    sh """
-        curl -sf --data-binary '${metric}{job="jenkins",instance="${env.JOB_NAME}-${env.BUILD_NUMBER}"} ${value}\\n' \
-            http://prometheus-pushgateway.monitoring.svc.cluster.local:9091/metrics/job/jenkins/instance/${env.JOB_NAME}-${env.BUILD_NUMBER} \
-            || echo "WARN: pushgateway push failed for ${metric} — continuing"
-    """
+    // instance: app and build number; JOB_NAME of a multibranch job contains a
+    // slash, which would add a path segment to the grouping key.
+    withEnv(["DORA_METRIC=${metric}", "DORA_VALUE=${value}", "DORA_INSTANCE=${APP_NAME}-${BUILD_NUMBER}"]) {
+        sh '''
+            printf '%s{job="jenkins",instance="%s"} %s\n' "$DORA_METRIC" "$DORA_INSTANCE" "$DORA_VALUE" |
+              curl -sf --data-binary @- \
+                "http://pushgateway.monitoring.svc.cluster.local:9091/metrics/job/jenkins/instance/$DORA_INSTANCE" ||
+              echo "WARN: pushgateway push failed for $DORA_METRIC — continuing"
+        '''
+    }
 }

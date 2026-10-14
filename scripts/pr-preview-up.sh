@@ -1,34 +1,98 @@
 #!/usr/bin/env bash
-# pr-preview-up.sh — spin up a PR preview environment
+# pr-preview-up.sh — deploy a pull request's build as a preview environment
 #
-# Usage: ./scripts/pr-preview-up.sh <PR_NUMBER>
+# Usage: ./scripts/pr-preview-up.sh <PR_NUMBER> <IMAGE> <HOST>
+#   e.g. ./scripts/pr-preview-up.sh 42 registry.example.com/my-app:17-abc1234 pr-42.preview.example.com
 #
-# Creates namespace preview-pr-<PR_NUMBER> and deploys the staging overlay
-# into it (with the namespace rewritten). Requires kustomize and kubectl on
-# PATH and a working kubeconfig.
+# Deploys the staging overlay into namespace preview-pr-<PR_NUMBER> with:
+#   - IMAGE, the image this PR's build pushed;
+#   - the Ingress host HOST (and its own TLS secret);
+#   - in-memory stores instead of Postgres and Redis (DB_FAKE / REDIS_FAKE,
+#     NODE_ENV=preview): a preview has no database of its own, and its data
+#     lives only as long as the pod;
+#   - the registry pull secret copied from staging, when staging has one.
+# Then waits for the rollout. Requires kustomize and kubectl on PATH and a
+# kubeconfig allowed to create namespaces. Run from anywhere in the repo.
 
 set -euo pipefail
 
-PR_NUMBER="${1:?Usage: $0 <PR_NUMBER>}"
+PR_NUMBER="${1:?Usage: $0 <PR_NUMBER> <IMAGE> <HOST>}"
+IMAGE="${2:?Usage: $0 <PR_NUMBER> <IMAGE> <HOST>}"
+HOST="${3:?Usage: $0 <PR_NUMBER> <IMAGE> <HOST>}"
+[[ $PR_NUMBER =~ ^[0-9]+$ ]] || { echo "PR_NUMBER must be a number, got '$PR_NUMBER'" >&2; exit 1; }
 PREVIEW_NS="preview-pr-${PR_NUMBER}"
-OVERLAY_PATH="k8s/overlays/staging"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "[pr-preview-up] PR_NUMBER=${PR_NUMBER}  namespace=${PREVIEW_NS}"
+echo "[pr-preview-up] PR ${PR_NUMBER}: ${IMAGE} → namespace ${PREVIEW_NS}, https://${HOST}"
 
-# 1. Create namespace if it doesn't already exist
-kubectl get namespace "${PREVIEW_NS}" >/dev/null 2>&1 || \
-  kubectl create namespace "${PREVIEW_NS}"
-
-# 2. Label the namespace so the AppProject's preview-* destination matches
+# 1. The namespace, labelled so the AppProject's preview-* destination matches.
+kubectl create namespace "${PREVIEW_NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl label namespace "${PREVIEW_NS}" \
   app.kubernetes.io/managed-by=pr-preview \
   pr-number="${PR_NUMBER}" \
   --overwrite
 
-# 3. Build the staging overlay and rewrite the namespace, then apply
-kustomize build "${OVERLAY_PATH}" \
-  | sed "s/namespace: staging/namespace: ${PREVIEW_NS}/g" \
-  | kubectl apply -n "${PREVIEW_NS}" -f -
+# 2. Secrets. The Deployment reads my-app-secrets (unused with the in-memory
+#    store, but the pod cannot start without it); the pull secret comes from
+#    staging, if staging pulls from a private registry.
+kubectl -n "${PREVIEW_NS}" create secret generic my-app-secrets \
+  --from-literal=db-host=unused --from-literal=db-password=unused \
+  --dry-run=client -o yaml | kubectl apply -f -
+if kubectl -n staging get secret registry-credentials >/dev/null 2>&1; then
+  kubectl -n staging get secret registry-credentials -o json |
+    jq --arg ns "${PREVIEW_NS}" '{apiVersion, kind, type, data, metadata: {name: .metadata.name, namespace: $ns}}' |
+    kubectl apply -f -
+fi
 
-echo "[pr-preview-up] Done. Preview environment available in namespace ${PREVIEW_NS}."
-echo "[pr-preview-up] To watch rollout: kubectl rollout status deploy/my-app -n ${PREVIEW_NS}"
+# 3. The staging overlay, adapted for this PR, through a temporary overlay
+#    beside it (kustomize only accepts relative paths to a base).
+work=$(mktemp -d "${REPO_ROOT}/k8s/overlays/.preview-${PR_NUMBER}.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+cat > "$work/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ${PREVIEW_NS}
+resources:
+  - ../staging
+images:
+  - name: my-app
+    newName: ${IMAGE%:*}
+    newTag: ${IMAGE##*:}
+labels:
+  - pairs:
+      pr-number: "${PR_NUMBER}"
+patches:
+  - target: {kind: ConfigMap, name: my-app-config}
+    patch: |
+      - op: add
+        path: /data/NODE_ENV
+        value: preview
+      - op: add
+        path: /data/DB_FAKE
+        value: "1"
+      - op: add
+        path: /data/REDIS_FAKE
+        value: "1"
+  - target: {kind: Ingress, name: my-app}
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: ${HOST}
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: ${HOST}
+      - op: replace
+        path: /spec/tls/0/secretName
+        value: my-app-tls-${PREVIEW_NS}
+  - target: {kind: Deployment, name: my-app}
+    patch: |
+      - op: add
+        path: /spec/template/metadata/labels/version
+        value: "${IMAGE##*:}"
+EOF
+kustomize build "$work" | kubectl apply -f -
+
+# 4. Ready when the rollout is.
+kubectl -n "${PREVIEW_NS}" rollout status deployment/my-app --timeout=300s
+
+echo "[pr-preview-up] Preview for PR ${PR_NUMBER} is up: https://${HOST}"

@@ -9,6 +9,8 @@ pipeline-utility-steps:latest
 git:latest
 github:latest
 github-branch-source:latest
+# Build strategies for multibranch jobs: lets the my-app job build tags (Release).
+basic-branch-build-strategies:latest
 
 # ── Configuration as Code ────────────────────────────────────────────────────
 configuration-as-code:latest

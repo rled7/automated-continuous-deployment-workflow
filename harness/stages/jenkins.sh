@@ -98,8 +98,10 @@ step "every credential the Jenkinsfile uses is defined" credentials_defined
 # inline pipeline job. See docs/agent-resolution.md.
 agents_resolve() {
   local map="[" f out
+  # Each file as base64 in chunks: a Groovy string literal holds at most
+  # 65535 characters, and the Jenkinsfile's base64 is longer.
   for f in "$REPO_ROOT/Jenkinsfile" "$REPO_ROOT"/jenkins/*.Jenkinsfile "$HARNESS_DIR/fixtures/agent-forms.Jenkinsfile"; do
-    map+="'${f#"$REPO_ROOT"/}': '$(base64 -w0 "$f")', "
+    map+="'${f#"$REPO_ROOT"/}': [$(base64 -w0 "$f" | fold -w 60000 | sed "s/.*/'&'/" | paste -sd,)].join(''), "
   done
   map+="]"
   out=$(groovy "$(sed "s|__PIPELINES__|$map|" "$HARNESS_DIR/lib/agent-resolution.groovy")") || return 1

@@ -30,8 +30,14 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 
-# Security: non-root user
-RUN addgroup --system --gid 1001 appgroup && \
+# Security: non-root user. Alpine's security updates, and no package managers:
+# the app runs with node alone (migrations too: node_modules/knex/bin/cli.js),
+# and the npm, Yarn and Corepack bundled with the base image only add code
+# with known vulnerabilities for the image scans to find.
+RUN apk upgrade --no-cache && \
+    rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+           /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-* && \
+    addgroup --system --gid 1001 appgroup && \
     adduser  --system --uid 1001 appuser
 
 # Copy only what's needed at runtime

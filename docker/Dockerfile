@@ -61,4 +61,6 @@ EXPOSE 3000
 ENV NODE_ENV=production \
     PORT=3000
 
-CMD ["node", "dist/server.js"]
+# instrumentation.js registers OpenTelemetry's ESM loader hook and starts the
+# SDK before the app is imported (npm start runs the same command)
+CMD ["node", "--import", "./dist/instrumentation.js", "dist/server.js"]

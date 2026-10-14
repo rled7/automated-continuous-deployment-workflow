@@ -2,7 +2,7 @@ import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globa
 
 // lib/otel.js starts the OpenTelemetry SDK when it is imported, if
 // OTEL_EXPORTER_OTLP_ENDPOINT is set. Each test mocks the SDK and imports a
-// fresh copy; process.on is stubbed so no real signal handlers stay behind.
+// fresh copy; process.on is stubbed to check that no signal handlers are added.
 
 const ENV_KEYS = ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME'];
 let savedEnv;
@@ -50,8 +50,8 @@ async function loadOtel(env, shutdown = () => Promise.resolve()) {
   jest.unstable_mockModule('@opentelemetry/exporter-trace-otlp-http', () => ({ OTLPTraceExporter: FakeExporter }));
   jest.unstable_mockModule('@opentelemetry/resources', () => ({ resourceFromAttributes }));
   jest.unstable_mockModule('@opentelemetry/auto-instrumentations-node', () => ({ getNodeAutoInstrumentations }));
-  await import('../../lib/otel.js');
-  return { sdks, getNodeAutoInstrumentations };
+  const otel = await import('../../lib/otel.js');
+  return { otel, sdks, getNodeAutoInstrumentations };
 }
 
 describe('lib/otel.js', () => {
@@ -83,24 +83,42 @@ describe('lib/otel.js', () => {
     expect(Object.values(sdks[0].config.resource.attributes)).toContain('my-app');
   });
 
-  test('flushes spans on SIGTERM and SIGINT', async () => {
+  test('adds no signal handlers: server.js flushes at the end of its shutdown', async () => {
     const { sdks } = await loadOtel({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://otel-collector:4318' });
-    expect(Object.keys(signalHandlers).sort()).toEqual(['SIGINT', 'SIGTERM']);
-    signalHandlers.SIGTERM();
-    expect(sdks[0].shutdown).toHaveBeenCalledTimes(1);
-    signalHandlers.SIGINT();
-    expect(sdks[0].shutdown).toHaveBeenCalledTimes(2);
+    expect(onSpy).not.toHaveBeenCalled();
+    expect(sdks[0].shutdown).not.toHaveBeenCalled();
   });
 
-  test('logs a failed flush instead of throwing', async () => {
+  test('shutdown() flushes and stops the SDK', async () => {
+    const { otel, sdks } = await loadOtel({ OTEL_EXPORTER_OTLP_ENDPOINT: 'http://otel-collector:4318' });
+    await expect(otel.shutdown()).resolves.toBeUndefined();
+    expect(sdks[0].shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  test('shutdown() is a no-op when the SDK is off', async () => {
+    const { otel } = await loadOtel({});
+    await expect(otel.shutdown()).resolves.toBeUndefined();
+  });
+
+  test('shutdown() logs a failed flush instead of rejecting', async () => {
     const err = new Error('collector unreachable');
-    const { sdks } = await loadOtel(
+    const { otel } = await loadOtel(
       { OTEL_EXPORTER_OTLP_ENDPOINT: 'http://otel-collector:4318' },
       () => Promise.reject(err),
     );
-    signalHandlers.SIGTERM();
-    await sdks[0].shutdown.mock.results[0].value.catch(() => {});
-    await new Promise((resolve) => setImmediate(resolve));
+    await expect(otel.shutdown()).resolves.toBeUndefined();
     expect(console.error).toHaveBeenCalledWith('OTel SDK shutdown error:', err);
+  });
+
+  test('shutdown() gives up on a flush that does not finish in time', async () => {
+    const { otel } = await loadOtel(
+      { OTEL_EXPORTER_OTLP_ENDPOINT: 'http://otel-collector:4318' },
+      () => new Promise(() => {}),
+    );
+    await expect(otel.shutdown(10)).resolves.toBeUndefined();
+    expect(console.error).toHaveBeenCalledWith(
+      'OTel SDK shutdown error:',
+      expect.objectContaining({ message: 'timed out after 10 ms' }),
+    );
   });
 });

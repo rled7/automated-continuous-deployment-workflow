@@ -1,4 +1,4 @@
-import './lib/otel.js';
+import { shutdown as shutdownTracing } from './lib/otel.js';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import helmet from 'helmet';
@@ -130,7 +130,8 @@ export function start(port = PORT) {
 
   // Graceful shutdown: fail readiness, wait for the endpoints to drop the pod,
   // stop accepting connections and let in-flight requests finish, and only
-  // then close the DB pool and Redis, which those requests may still use.
+  // then close the DB pool and Redis, which those requests may still use, and
+  // flush the spans.
   const shutdown = (signal) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
@@ -172,6 +173,8 @@ export function start(port = PORT) {
       } catch (err) {
         logger.error({ err }, 'Error closing Redis connection');
       }
+      // Last, so spans from the drain are exported too
+      await shutdownTracing();
 
       if (exitCode === 0) logger.info('Process terminated cleanly');
       process.exit(exitCode);

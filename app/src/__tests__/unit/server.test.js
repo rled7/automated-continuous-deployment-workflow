@@ -21,8 +21,10 @@ const redis = {
   healthCheck: jest.fn(async () => 'ok'),
   shutdown: jest.fn(async () => {}),
 };
+const otel = { shutdown: jest.fn(async () => {}) };
 jest.unstable_mockModule('../../lib/db.js', () => db);
 jest.unstable_mockModule('../../lib/redis.js', () => redis);
+jest.unstable_mockModule('../../lib/otel.js', () => otel);
 
 const { app, start } = await import('../../server.js');
 const { default: logger } = await import('../../lib/logger.js');
@@ -106,11 +108,12 @@ describe('start() and graceful shutdown', () => {
     expect(Object.keys(handlers)).toEqual(expect.arrayContaining(['SIGTERM', 'SIGINT']));
   });
 
-  test('on SIGTERM: fails readiness, closes the server, then drains DB and Redis, exits 0', async () => {
+  test('on SIGTERM: fails readiness, closes the server, then drains DB and Redis, flushes spans, exits 0', async () => {
     server = start(0);
     await new Promise((resolve) => server.once('listening', resolve));
     db.shutdown.mockClear();
     redis.shutdown.mockClear();
+    otel.shutdown.mockClear();
     // Whether the server was still listening when the DB pool was drained.
     let listeningAtDbShutdown;
     db.shutdown.mockImplementationOnce(async () => {
@@ -124,6 +127,11 @@ describe('start() and graceful shutdown', () => {
     expect(db.shutdown).toHaveBeenCalled();
     expect(listeningAtDbShutdown).toBe(false);
     expect(redis.shutdown).toHaveBeenCalled();
+    expect(otel.shutdown).toHaveBeenCalled();
+    expect(otel.shutdown.mock.invocationCallOrder[0])
+      .toBeGreaterThan(redis.shutdown.mock.invocationCallOrder[0]);
+    expect(process.exit.mock.invocationCallOrder[0])
+      .toBeGreaterThan(otel.shutdown.mock.invocationCallOrder[0]);
     expect(server.listening).toBe(false);
     expect(process.exit).toHaveBeenCalledWith(0);
   });

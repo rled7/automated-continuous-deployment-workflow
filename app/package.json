@@ -7,7 +7,6 @@
     "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest",
     "test:unit": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --testPathPatterns=unit",
     "test:integration": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --testPathPatterns=integration",
-    "test:smoke": "jest smoke/smoke.test.js",
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install --with-deps chromium",
     "test:mutation": "stryker run",

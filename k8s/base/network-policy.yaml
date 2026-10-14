@@ -82,7 +82,10 @@ spec:
 
 ---
 # 5. Allow ingress to app pods on port 3000 from the monitoring namespace
-# (Prometheus scrapes the /metrics endpoint). Selector targets Prometheus pods.
+# (Prometheus scrapes the /metrics endpoint). Selector targets Prometheus pods:
+# the operator labels kube-prometheus-stack's Prometheus pods
+# app.kubernetes.io/name: prometheus; the my-app scrape job is in
+# argocd/bootstrap/apps/kube-prometheus-stack.yaml.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

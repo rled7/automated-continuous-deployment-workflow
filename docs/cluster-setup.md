@@ -62,8 +62,10 @@ kubectl cluster-info --context kind-cicd-demo
 ```bash
 # Create the argocd namespace and install Argo CD
 kubectl create namespace argocd
-kubectl apply -n argocd \
-  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# Server-side apply: the ApplicationSet CRD is too big for client-side
+# apply's last-applied annotation. Same version as scripts/setup.sh.
+kubectl apply --server-side --force-conflicts -n argocd \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.5/manifests/install.yaml
 
 # Wait for argocd-server to be ready
 kubectl rollout status -n argocd deployment/argocd-server --timeout=120s

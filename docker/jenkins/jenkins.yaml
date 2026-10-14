@@ -46,6 +46,11 @@ jenkins:
             value: "${STAGING_URL:-https://staging.my-app.internal}"
           - key: PRODUCTION_URL
             value: "${PRODUCTION_URL:-https://production.my-app.internal}"
+          # The key the Docker Build & Push stage signs images with (COSIGN_KEY
+          # in .env): a KMS URI or k8s://namespace/secret. Empty: keyless,
+          # which needs an OIDC identity the agents can present.
+          - key: COSIGN_KEY
+            value: "${COSIGN_KEY:-}"
 
   # ── Kubernetes cloud: spawns pods from the custom agent image (Build 013) ──
   # The image bundles every CLI the Jenkinsfile invokes. See docs/agent-image.md.

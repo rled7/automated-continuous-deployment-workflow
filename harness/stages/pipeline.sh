@@ -291,11 +291,17 @@ jenkins_up() {
   # jenkins.yaml with the stand-in agent image; the dependency-check
   # database mounted from the node where production would mount a volume;
   # and the stand-in registry, which speaks plain HTTP, allowed for the Docker
-  # daemon (dind), the buildx builder (BUILDKITD_CONFIG), Trivy and Syft.
+  # daemon (dind), the buildx builder (BUILDKITD_CONFIG), Trivy, Syft and cosign.
   sed "s|ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest|$AGENT_IMAGE|" "$REPO_ROOT/docker/jenkins/jenkins.yaml" > "$work/jenkins.yaml"
   grep -q "$AGENT_IMAGE" "$work/jenkins.yaml" || { echo "agent image not found in jenkins.yaml"; return 1; }
   printf '[registry."%s"]\n  http = true\n  insecure = true\n' "$REGISTRY" > "$work/buildkitd.toml"
   kubectl -n jenkins create configmap harness-buildkitd --from-file=buildkitd.toml="$work/buildkitd.toml" >/dev/null || return 1
+  # A throwaway signing key for cosign (COSIGN_KEY, set in jenkins-env below),
+  # where production names a KMS key or a key secret.
+  mkdir -p "$work/cosign"
+  docker run --rm --user "$(id -u)" -v "$work/cosign:/k" -w /k -e COSIGN_PASSWORD=verify \
+    --entrypoint cosign harness-agent:local generate-key-pair >/dev/null 2>&1 || return 1
+  kubectl -n jenkins create secret generic harness-cosign --from-file=cosign.key="$work/cosign/cosign.key" >/dev/null || return 1
   python3 - "$work/jenkins.yaml" "$DC_NODE_PATH" "$REGISTRY" <<'PY2' || return 1
 import sys, yaml
 path, data, registry = sys.argv[1:]
@@ -305,6 +311,9 @@ env = {
     "BUILDKITD_CONFIG": "/etc/harness-buildkitd/buildkitd.toml",
     "TRIVY_INSECURE": "true",
     "SYFT_REGISTRY_INSECURE_USE_HTTP": "true",
+    "COSIGN_PASSWORD": "verify",
+    # Plain HTTP, and no entries in the public Rekor log for a test registry.
+    "COSIGN_EXTRA_ARGS": "--allow-http-registry --tlog-upload=false",
 }
 for cloud in casc["jenkins"]["clouds"]:
     for t in cloud.get("kubernetes", {}).get("templates", []):
@@ -313,6 +322,7 @@ for cloud in casc["jenkins"]["clouds"]:
         t.setdefault("volumes", []).extend([
             {"hostPathVolume": {"hostPath": data, "mountPath": data}},
             {"configMapVolume": {"configMapName": "harness-buildkitd", "mountPath": "/etc/harness-buildkitd"}},
+            {"secretVolume": {"secretName": "harness-cosign", "mountPath": "/etc/harness-cosign"}},
         ])
         t.setdefault("envVars", []).extend({"envVar": {"key": k, "value": v}} for k, v in env.items())
         for c in t["containers"]:
@@ -328,6 +338,7 @@ PY2
     --from-literal=SONAR_TOKEN="$SONAR_TOKEN" --from-literal=NVD_API_KEY="${NVD_API_KEY:-}" \
     --from-literal=STAGING_URL=http://my-app.staging.svc.cluster.local \
     --from-literal=PRODUCTION_URL=http://my-app.production.svc.cluster.local \
+    --from-literal=COSIGN_KEY=/etc/harness-cosign/cosign.key \
     --from-literal=SLACK_TOKEN=verify --from-literal=SLACK_WORKSPACE=verify \
     --from-literal=GITHUB_USER=verify --from-literal=GITHUB_TOKEN=verify >/dev/null || return 1
 

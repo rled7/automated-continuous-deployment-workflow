@@ -346,9 +346,13 @@ pipeline {
                             # --push streams layers directly to the registry without a local load;
                             # this is required for multi-platform images (they cannot be loaded
                             # into the local Docker daemon simultaneously).
+                            # --metadata-file records the pushed manifest list's
+                            # digest, which the image is signed by below.
+                            mkdir -p reports
                             docker buildx build \
                               --platform linux/amd64,linux/arm64 \
                               --push \
+                              --metadata-file reports/build-metadata.json \
                               -t ${FULL_IMAGE} \
                               -t ${DOCKER_REGISTRY}/${APP_NAME}:latest \
                               -f docker/Dockerfile \
@@ -374,23 +378,22 @@ pipeline {
                         syft "${FULL_IMAGE}" -o cyclonedx-json > reports/sbom.cdx.json
                     """
 
-                    // Build 019: Keyless cosign signing of the manifest list digest.
-                    // cosign sign targets the digest (immutable) rather than the mutable tag.
-                    // OIDC issuer: depends on the OIDC provider configured for the Jenkins agent.
-                    //   - GitHub Actions: https://token.actions.githubusercontent.com
-                    //   - On-prem Jenkins with Keycloak: your Keycloak realm OIDC URL
-                    //   - COSIGN_EXPERIMENTAL=1 is legacy; cosign v2+ uses keyless by default
-                    //     when no --key flag is provided and OIDC is available.
-                    sh """
-                        COSIGN_EXPERIMENTAL=1 cosign sign --yes "${FULL_IMAGE}"
-                    """
-
-                    // Build 019: SLSA provenance attestation.
-                    // Attaches a SLSA Build L2 provenance predicate to the image as a
-                    // cosign attestation. The attestation is stored in the same registry
-                    // OCI repository alongside the image (using the cosign tag convention).
+                    // Build 019: sign the image and attach SLSA provenance, by the
+                    // manifest list's digest (immutable) rather than the tag.
                     //
-                    // IMPORTANT — real vs. demo fields:
+                    // Signing identity:
+                    //   - COSIGN_KEY set (pod template or global env): a key
+                    //     reference cosign understands, e.g. awskms://alias/my-app-signing,
+                    //     gcpkms://…, hashivault://…, k8s://jenkins/cosign, or a key file
+                    //     (with COSIGN_PASSWORD). The usual choice for Jenkins.
+                    //   - unset: keyless (Fulcio + Rekor), which needs an OIDC token the
+                    //     agent can present (cloud workload identity, or a provider
+                    //     cosign detects). A plain Jenkins agent has none.
+                    // COSIGN_EXTRA_ARGS (optional) is added to both commands, e.g.
+                    // --tlog-upload=false for a private registry whose image names
+                    // should stay out of the public Rekor log.
+                    //
+                    // Provenance, real vs. demo fields:
                     //   - buildType: demo placeholder; a real SLSA L3 builder would use a
                     //     URI registered with slsa.dev and the identity would come from the
                     //     OIDC token, not be self-attested.
@@ -400,9 +403,16 @@ pipeline {
                     //     byte-for-byte due to timestamps in npm artefacts.
                     //   - For a verifiable SLSA L3 builder, replace this with a build service
                     //     that mints the provenance from an OIDC token it controls.
+                    //
+                    // The predicate is written to a file: the agent's /bin/sh is dash,
+                    // which has no <(…) process substitution.
                     sh '''
-                        cosign attest --yes --type slsaprovenance \
-                          --predicate <(cat <<EOF
+                        digest=$(jq -r '."containerimage.digest" // empty' reports/build-metadata.json)
+                        [ -n "$digest" ] || { echo "buildx recorded no image digest"; exit 1; }
+                        IMAGE_REF="${FULL_IMAGE%:*}@$digest"
+                        echo "$IMAGE_REF" > reports/image-ref.txt
+
+                        cat > reports/provenance.json <<EOF
 {
   "buildType": "https://jenkins.io/buildType/v1",
   "builder": {"id": "${JENKINS_URL}"},
@@ -424,10 +434,14 @@ pipeline {
   }
 }
 EOF
-) ${FULL_IMAGE}
+                        if [ -n "${COSIGN_KEY:-}" ]; then set -- --key "$COSIGN_KEY"; else set --; fi
+                        # COSIGN_EXTRA_ARGS is a list of flags: split on purpose.
+                        cosign sign --yes "$@" ${COSIGN_EXTRA_ARGS:-} "$IMAGE_REF"
+                        cosign attest --yes "$@" ${COSIGN_EXTRA_ARGS:-} \
+                          --type slsaprovenance --predicate reports/provenance.json "$IMAGE_REF"
                     '''
 
-                    archiveArtifacts artifacts: 'reports/sbom.cdx.json', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'reports/sbom.cdx.json, reports/provenance.json, reports/image-ref.txt', allowEmptyArchive: true
                 }
             }
         }

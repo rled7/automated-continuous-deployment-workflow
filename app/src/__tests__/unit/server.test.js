@@ -42,6 +42,18 @@ describe('API routes', () => {
     expect(res.status).toBe(400);
   });
 
+  test('POST /api/items with malformed JSON returns 400 with a request ID', async () => {
+    jest.spyOn(logger, 'error').mockImplementation(() => {});
+    const res = await request(app)
+      .post('/api/items')
+      .set('Content-Type', 'application/json')
+      .set('x-request-id', 'bad-json-1')
+      .send('{"name": ');
+    expect(res.status).toBe(400);
+    expect(res.headers['x-request-id']).toBe('bad-json-1');
+    expect(res.body.error.requestId).toBe('bad-json-1');
+  });
+
   test('GET /api/items passes database errors to the error handler', async () => {
     jest.spyOn(logger, 'error').mockImplementation(() => {});
     db.query.mockRejectedValueOnce(new Error('connection refused'));

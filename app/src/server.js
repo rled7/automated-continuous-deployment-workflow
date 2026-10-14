@@ -36,11 +36,11 @@ const positiveInt = (value, fallback) => {
 const trustProxy = positiveInt(process.env.TRUST_PROXY, 0);
 if (trustProxy) app.set('trust proxy', trustProxy);
 
-// 1. Security headers + JSON body parser
+// 1. Security headers
 app.use(helmet());
-app.use(express.json());
 
-// 2. Request ID (before logging so the logger can include it)
+// 2. Request ID (before logging so the logger can include it, and before the
+// body parser so a malformed body's 400 carries it too)
 app.use(requestIdMiddleware);
 
 // 3. Structured request logging
@@ -67,7 +67,10 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// 6. /api/items — persisted via Postgres
+// 6. JSON body parser (a request over the rate limit is not parsed)
+app.use(express.json());
+
+// 7. /api/items — persisted via Postgres
 const createItemSchema = z.object({
   name: z.string().min(1).max(100),
 });
@@ -98,7 +101,7 @@ app.post('/api/items', async (req, res, next) => {
   }
 });
 
-// 7. Prometheus metrics endpoint
+// 8. Prometheus metrics endpoint
 app.get('/metrics', async (req, res) => {
   try {
     res.set('Content-Type', register.contentType);
@@ -108,10 +111,10 @@ app.get('/metrics', async (req, res) => {
   }
 });
 
-// 8. Health router
+// 9. Health router
 app.use('/health', healthRouter);
 
-// 9. Error handler (must be last)
+// 10. Error handler (must be last)
 app.use(errorHandler);
 
 /**

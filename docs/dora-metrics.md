@@ -21,7 +21,7 @@ Metrics are pushed to the **Prometheus Pushgateway**
 the `post` block of the production deploy stage.
 
 Each production build pushes its own group,
-`/metrics/job/jenkins/instance/<JOB_NAME>-<BUILD_NUMBER>`, so every series
+`/metrics/job/jenkins/instance/my-app-<BUILD_NUMBER>`, so every series
 carries `job="jenkins"` and a per-build `instance`. All four are plain gauges:
 
 | Metric | Pushed when | Value |

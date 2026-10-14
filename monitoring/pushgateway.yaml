@@ -3,7 +3,7 @@
 # The Pushgateway receives short-lived metrics pushed from CI/CD jobs (Jenkinsfile
 # stages) that cannot be scraped directly.  DORA metrics are the primary use-case.
 # pushDoraMetric() in the Jenkinsfile pushes one group per production build
-# (job="jenkins", instance="<JOB_NAME>-<BUILD_NUMBER>"), each metric a gauge:
+# (job="jenkins", instance="my-app-<BUILD_NUMBER>"), each metric a gauge:
 #   - deployment_frequency_total 1  → successful deploy
 #   - change_failure_total 1        → failed deploy
 #   - lead_time_seconds             → commit to deploy, in seconds

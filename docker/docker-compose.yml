@@ -146,7 +146,7 @@ services:
     # knex migrate:latest is idempotent — safe to run on every container start.
     # The image has node but no npm: the same commands as `npm run migrate` and
     # `npm start`.
-    command: sh -c "node node_modules/knex/bin/cli.js migrate:latest --knexfile=knexfile.js && node dist/server.js"
+    command: sh -c "node node_modules/knex/bin/cli.js migrate:latest --knexfile=knexfile.js && node --import ./dist/instrumentation.js dist/server.js"
     networks:
       - cicd
 

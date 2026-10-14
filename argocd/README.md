@@ -33,7 +33,10 @@ This directory contains Argo CD `AppProject` and `Application` manifests for `my
 
 ```bash
 kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# Server-side apply (the ApplicationSet CRD is too big for client-side apply),
+# pinned to the version scripts/setup.sh installs.
+kubectl apply --server-side --force-conflicts -n argocd \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.5/manifests/install.yaml
 ```
 
 Wait for pods to become ready:

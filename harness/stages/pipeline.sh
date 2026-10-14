@@ -235,6 +235,9 @@ git_up() {
   (cd "$REPO_ROOT" && git ls-files -z --cached --others --exclude-standard |
     while IFS= read -r -d '' f; do [ -e "$f" ] && printf '%s\0' "$f"; done |
     tar --null -T - -cf -) | tar -xf - -C "$tree" || return 1
+  # Jenkins deploys this tree's overlays: production without database TLS,
+  # which the harness's Postgres does not have (db_without_tls).
+  db_without_tls "$tree/k8s"
   git -C "$tree" init -q -b "$BRANCH" &&
     git -C "$tree" add -A &&
     git -C "$tree" -c user.name=harness -c user.email=harness@verify.local \

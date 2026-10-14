@@ -49,7 +49,10 @@ automated-continuous-deployment-workflow/
 │   ├── overlays/production/     # Production: Argo Rollout (canary + analysis)
 │   └── migrations/              # Pod spec runMigrations() uses
 ├── monitoring/
-│   └── prometheus.yaml          # Prometheus scrape + alert rules
+│   ├── pushgateway.yaml         # Pushgateway for the DORA metrics Jenkins pushes
+│   ├── slo.yaml                 # SLO definitions (OpenSLO; not applied to the cluster)
+│   └── grafana/                 # Dashboards (scrape config and alert rules live in
+│                                #   argocd/bootstrap/apps/kube-prometheus-stack.yaml)
 ├── tests/
 │   ├── performance/load-test.js # k6 load test (ramp → spike → ramp down)
 │   └── smoke/smoke.test.js      # Post-deploy smoke tests

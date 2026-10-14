@@ -116,11 +116,19 @@ DEPLOY_IMAGE="${DEPLOY_IMAGE:-my-app:verify-$(git -C "$REPO_ROOT" rev-parse --sh
 # deployToKubernetes() deploys it (image set to $DEPLOY_IMAGE, version label
 # from its tag) into the results dir as OUT_NAME.yaml and prints the path.
 # Works on a temp copy so the repo's kustomization.yaml is never modified.
+# db_without_tls K8S_DIR — production connects to Postgres over TLS
+# (DB_SSL=true); the harness's throwaway Postgres has no TLS. Switches it off
+# in a copy of the manifests, never in the repository's.
+db_without_tls() {
+  sed -i 's/^\(  DB_SSL:\) "true"/\1 "false"/' "$1/overlays/production/configmap-patch.yaml"
+}
+
 render_overlay() {
   local out="$RESULTS_DIR/rendered/${2:-$1}.yaml" tmp rc
   mkdir -p "$RESULTS_DIR/rendered"
   tmp=$(mktemp -d)
   cp -R "$REPO_ROOT/k8s" "$tmp/k8s"
+  db_without_tls "$tmp/k8s"
   (cd "$tmp/k8s/overlays/$1" &&
     kustomize edit set image "my-app=$DEPLOY_IMAGE" &&
     kustomize edit add label "version:${DEPLOY_IMAGE##*:}" --without-selector --include-templates &&

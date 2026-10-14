@@ -3,7 +3,7 @@ import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globa
 // lib/db.js reads its configuration when it is first imported, so each test
 // sets the environment, mocks `pg`, and imports a fresh copy of the module.
 
-const ENV_KEYS = ['DB_FAKE', 'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'DB_SSL'];
+const ENV_KEYS = ['NODE_ENV', 'DB_FAKE', 'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'DB_SSL'];
 let savedEnv;
 
 beforeEach(() => {
@@ -147,5 +147,24 @@ describe('lib/db.js with DB_FAKE=1', () => {
     await db.shutdown();
     const list = await db.query('SELECT id, name, created_at FROM items');
     expect(list.rows).toEqual([]);
+  });
+});
+
+describe('lib/db.js DB_FAKE guard', () => {
+  test.each(['production', 'staging'])('refuses to load with DB_FAKE=1 when NODE_ENV is %s', async (env) => {
+    await expect(loadDb({ DB_FAKE: '1', NODE_ENV: env })).rejects.toThrow(
+      `DB_FAKE must not be set when NODE_ENV is ${env}`,
+    );
+  });
+
+  test('loads with DB_FAKE=1 in test and development', async () => {
+    await expect(loadDb({ DB_FAKE: '1', NODE_ENV: 'test' })).resolves.toBeDefined();
+    jest.resetModules();
+    await expect(loadDb({ DB_FAKE: '1', NODE_ENV: 'development' })).resolves.toBeDefined();
+  });
+
+  test('a real database in production is fine', async () => {
+    const { pools } = await loadDb({ NODE_ENV: 'production', DB_HOST: 'db.internal', DB_PASSWORD: 'secret' });
+    expect(pools).toHaveLength(1);
   });
 });

@@ -46,9 +46,13 @@ const DB_SSL      = process.env.DB_SSL === 'true';
 // awaits in server.js.  The DB_FAKE flag is a pragmatic escape hatch that
 // keeps tests green without fighting the ESM mocking layer.
 //
-// DO NOT set DB_FAKE in staging or production.
+// DO NOT set DB_FAKE in staging or production: the module refuses to load.
 
 const DB_FAKE = process.env.DB_FAKE === '1';
+
+if (DB_FAKE && ['production', 'staging'].includes(process.env.NODE_ENV)) {
+  throw new Error(`DB_FAKE must not be set when NODE_ENV is ${process.env.NODE_ENV}`);
+}
 
 let fakeStore = [];
 let fakeNextId = 1;

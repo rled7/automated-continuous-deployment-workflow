@@ -3,7 +3,7 @@ import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globa
 // lib/redis.js reads its configuration when it is first imported, so each
 // test sets the environment, mocks `ioredis`, and imports a fresh copy.
 
-const ENV_KEYS = ['REDIS_URL', 'REDIS_FAKE'];
+const ENV_KEYS = ['NODE_ENV', 'REDIS_URL', 'REDIS_FAKE'];
 let savedEnv;
 
 beforeEach(() => {
@@ -95,5 +95,17 @@ describe('lib/redis.js with REDIS_FAKE=1', () => {
     expect(clients).toHaveLength(0);
     await expect(redis.healthCheck()).resolves.toBe('ok');
     await expect(redis.shutdown()).resolves.toBeUndefined();
+  });
+});
+
+describe('lib/redis.js REDIS_FAKE guard', () => {
+  test.each(['production', 'staging'])('refuses to load with REDIS_FAKE=1 when NODE_ENV is %s', async (env) => {
+    await expect(loadRedis({ REDIS_FAKE: '1', NODE_ENV: env })).rejects.toThrow(
+      `REDIS_FAKE must not be set when NODE_ENV is ${env}`,
+    );
+  });
+
+  test('loads with REDIS_FAKE=1 in test', async () => {
+    await expect(loadRedis({ REDIS_FAKE: '1', NODE_ENV: 'test' })).resolves.toBeDefined();
   });
 });

@@ -108,6 +108,12 @@ pipeline {
                             sh '''
                                 cd app
                                 mkdir -p reports/dependency-check
+                                # The production dependencies, installed in a directory of
+                                # their own: the Lint stage installs into app/ at the
+                                # same time.
+                                rm -rf ../dependency-check-src && mkdir ../dependency-check-src
+                                cp package.json package-lock.json ../dependency-check-src/
+                                (cd ../dependency-check-src && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
                                 if [ -n "${DEPENDENCY_CHECK_DATA:-}" ]; then
                                     set -- --data "$DEPENDENCY_CHECK_DATA" --noupdate
                                 else
@@ -118,13 +124,17 @@ pipeline {
                                 # the Trivy HIGH threshold (CVSS 7.0 == HIGH boundary).
                                 # Dev dependencies (Jest, ESLint, Stryker…) never reach
                                 # the image (docker/Dockerfile installs production
-                                # dependencies only),
-                                # which Trivy scans as built.
+                                # dependencies only), which Trivy scans as built. The
+                                # project uses npm: the Yarn and pnpm analyzers would
+                                # fail the scan for want of those tools.
                                 dependency-check.sh \
                                   --project "${APP_NAME}" \
-                                  --scan . \
+                                  --scan ../dependency-check-src \
+                                  --scan src \
                                   --nodeAuditSkipDevDependencies \
                                   --nodePackageSkipDevDependencies \
+                                  --disableYarnAudit \
+                                  --disablePnpmAudit \
                                   "$@" \
                                   --format "HTML" \
                                   --out reports/dependency-check \
@@ -145,10 +155,15 @@ pipeline {
                 }
                 stage('Lint') {
                     steps {
+                        // Nothing has installed dependencies yet at this point of
+                        // the pipeline, so without npm ci ESLint is not there to
+                        // run. ESLint exits non-zero on errors, which fails the
+                        // stage; warnings only show in the report.
                         sh '''
                             cd app
                             mkdir -p reports
-                            npm run lint -- --format checkstyle --output-file reports/eslint.xml || true
+                            npm ci --prefer-offline --no-audit --no-fund
+                            npm run lint -- --format checkstyle --output-file reports/eslint.xml
                         '''
                         recordIssues(tools: [esLint(pattern: 'app/reports/eslint.xml')])
                     }

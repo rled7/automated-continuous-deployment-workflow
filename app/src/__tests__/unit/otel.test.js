@@ -44,13 +44,11 @@ async function loadOtel(env, shutdown = () => Promise.resolve()) {
   class FakeExporter {
     constructor(options) { this.options = options; }
   }
-  class FakeResource {
-    constructor(attributes) { this.attributes = attributes; }
-  }
+  const resourceFromAttributes = jest.fn((attributes) => ({ attributes }));
   const getNodeAutoInstrumentations = jest.fn((config) => ({ config }));
   jest.unstable_mockModule('@opentelemetry/sdk-node', () => ({ NodeSDK: FakeNodeSDK }));
   jest.unstable_mockModule('@opentelemetry/exporter-trace-otlp-http', () => ({ OTLPTraceExporter: FakeExporter }));
-  jest.unstable_mockModule('@opentelemetry/resources', () => ({ Resource: FakeResource }));
+  jest.unstable_mockModule('@opentelemetry/resources', () => ({ resourceFromAttributes }));
   jest.unstable_mockModule('@opentelemetry/auto-instrumentations-node', () => ({ getNodeAutoInstrumentations }));
   await import('../../lib/otel.js');
   return { sdks, getNodeAutoInstrumentations };

@@ -207,12 +207,12 @@ tool:
     installations:
       # The NodeJS plugin takes the version as an installer, not a `version:`
       # attribute (which JCasC rejects, and Jenkins then refuses to start).
-      - name: NodeJS-20
+      - name: NodeJS-24
         properties:
           - installSource:
               installers:
                 - nodeJSInstaller:
-                    id: "20.0.0"
+                    id: "24.21.0"
 
 unclassified:
   slackNotifier:

@@ -22,7 +22,7 @@ FROM jenkins/inbound-agent:latest-trixie-jdk17
 USER root
 
 # ── Tool versions (bumped via Dependabot/Renovate when ready) ────────────────
-ENV NODE_VERSION=20.18.1 \
+ENV NODE_VERSION=24.21.0 \
     KUBECTL_VERSION=v1.31.4 \
     KUSTOMIZE_VERSION=v5.5.0 \
     KUBECONFORM_VERSION=v0.6.7 \

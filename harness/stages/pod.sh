@@ -89,7 +89,7 @@ log "app container $ctr at $app_ip"
 # IPs aren't reachable from the host.
 podman rm -f verify-client >/dev/null 2>&1
 podman run -d --name verify-client --network "$NET" -v "$REPO_ROOT/tests:/tests" -w /tests \
-  "$IMAGE_MIRROR/node:20-alpine" sleep 3600 >/dev/null || { log "could not start client container"; exit 1; }
+  "$IMAGE_MIRROR/node:24-alpine" sleep 3600 >/dev/null || { log "could not start client container"; exit 1; }
 
 # wait_http_in_net URL TIMEOUT_SECS — like wait_http, from inside the network.
 wait_http_in_net() {

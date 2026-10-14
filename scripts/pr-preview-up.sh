@@ -84,11 +84,25 @@ patches:
       - op: replace
         path: /spec/tls/0/secretName
         value: my-app-tls-${PREVIEW_NS}
+  # The staging Deployment sets NODE_ENV on the container, which wins over the
+  # ConfigMap; the app refuses the in-memory stores under NODE_ENV=staging.
   - target: {kind: Deployment, name: my-app}
     patch: |
-      - op: add
-        path: /spec/template/metadata/labels/version
-        value: "${IMAGE##*:}"
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: my-app
+      spec:
+        template:
+          metadata:
+            labels:
+              version: "${IMAGE##*:}"
+          spec:
+            containers:
+              - name: my-app
+                env:
+                  - name: NODE_ENV
+                    value: preview
 EOF
 kustomize build "$work" | kubectl apply -f -
 

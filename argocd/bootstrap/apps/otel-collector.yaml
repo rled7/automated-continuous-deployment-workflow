@@ -17,6 +17,12 @@ spec:
     targetRevision: "0.111.0"
     helm:
       valuesObject:
+        # Chart 0.88+ has no default image and refuses to render without one.
+        # The k8s distribution has the otlp receiver/exporter, batch and
+        # memory_limiter used below.
+        image:
+          repository: otel/opentelemetry-collector-k8s
+
         # Deploy as a Deployment (single replica) rather than DaemonSet.
         # Switch to daemonset mode if you want per-node collection.
         mode: deployment
@@ -63,16 +69,22 @@ spec:
                 receivers: [otlp]
                 processors: [memory_limiter, batch]
                 exporters: [otlp]
+              # Tempo stores traces only; it rejects OTLP metrics and logs.
+              # The app sends traces only, so these go to the debug exporter
+              # until a metrics/logs backend is wired in.
               metrics:
                 receivers: [otlp]
                 processors: [memory_limiter, batch]
-                exporters: [otlp]
+                exporters: [debug]
               logs:
                 receivers: [otlp]
                 processors: [memory_limiter, batch]
-                exporters: [otlp]
+                exporters: [debug]
 
         # Expose OTLP ports as a ClusterIP service so in-cluster apps can reach the collector.
+        # The Service is named <release>-opentelemetry-collector:
+        # otel-collector-opentelemetry-collector.monitoring.svc.cluster.local,
+        # which OTEL_EXPORTER_OTLP_ENDPOINT in k8s/base/configmap.yaml points at.
         service:
           enabled: true
 

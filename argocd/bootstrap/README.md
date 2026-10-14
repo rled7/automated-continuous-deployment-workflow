@@ -138,6 +138,8 @@ kubectl port-forward svc/argo-rollouts-dashboard -n argo-rollouts 3100:3100
 - For cloud deployments, update the `cert-manager.io/cluster-issuer` annotation
   in `k8s/overlays/*/ingress-patch.yaml` from `selfsigned-issuer` to
   `letsencrypt-staging` or `letsencrypt-prod`.
-- OTel collector currently exports to the `logging` exporter (traces appear in
-  collector logs).  Replace with an `otlp` exporter pointing at Grafana Tempo
-  when Tempo is added to the stack.
+- OTel collector exports traces over OTLP to Grafana Tempo (`tempo.yaml`); OTLP
+  metrics and logs go to the `debug` exporter (collector logs). The app sends
+  its traces to the collector Service
+  `otel-collector-opentelemetry-collector.monitoring.svc.cluster.local:4318`
+  (`OTEL_EXPORTER_OTLP_ENDPOINT` in `k8s/base/configmap.yaml`).

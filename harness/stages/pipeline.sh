@@ -14,7 +14,12 @@
 #     gate webhook;
 #   - secrets: placeholder values, plus a kubeconfig for an in-cluster
 #     service account. NVD_API_KEY comes from the environment: the
-#     Dependency Vulnerability Scan needs a real one.
+#     Dependency Vulnerability Scan needs a real one;
+#   - staging: the namespace already set up the way a long-lived one is
+#     (Pod Security labels, throwaway Postgres and Redis, the app's Secret,
+#     ConfigMap and NetworkPolicies), with STAGING_URL the in-cluster Service
+#     and a NetworkPolicy letting the jenkins namespace in, in place of the
+#     ingress path.
 #
 # Needs a host where kind works (your machine, GitHub Actions). KEEP=1 leaves
 # the cluster up, with Jenkins on localhost:18081 (admin / verify).
@@ -44,7 +49,7 @@ SONAR_TOKEN=""
 JENKINS_AUTH="admin:verify"
 source "$HARNESS_DIR/lib/jenkins.sh"
 
-need_tools kind kubectl || exit 1
+need_tools kind kubectl kustomize || exit 1
 [ -n "${NVD_API_KEY:-}" ] || log "NVD_API_KEY is not set: the Dependency Vulnerability Scan will fail"
 ensure_docker || exit 1
 
@@ -152,6 +157,28 @@ sonar_start() {
     kubectl apply -f "$HARNESS_DIR/fixtures/sonarqube.yaml"
 }
 step "start SonarQube" sonar_start || finish_stage
+
+# ── Staging as a long-lived environment has it, for Deploy → Staging ──────
+# (as cluster-real sets it up). Postgres and Redis start while SonarQube does.
+staging_rendered=$(DEPLOY_IMAGE="$REGISTRY/my-app:staging-setup" render_overlay staging pipeline-staging) || finish_stage
+namespace_up "$staging_rendered" || finish_stage
+deps_up staging "$staging_rendered" || finish_stage
+staging_state() {
+  apply_kinds "$staging_rendered" ConfigMap NetworkPolicy &&
+    kubectl apply -f - <<EOF
+# Stand-in for the ingress path: the tests reach the app's Service directly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: harness-allow-jenkins, namespace: staging}
+spec:
+  podSelector: {matchLabels: {app: my-app}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: jenkins}}}]
+      ports: [{protocol: TCP, port: 3000}]
+EOF
+}
+step "staging ConfigMap and NetworkPolicies in place" staging_state
 
 push_images() {
   local src dst

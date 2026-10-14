@@ -29,6 +29,10 @@ patches:
     target:
       kind: HorizontalPodAutoscaler
       name: my-app
+  - path: pdb-patch.yaml
+    target:
+      kind: PodDisruptionBudget
+      name: my-app-pdb
 
 # require-labels (Kyverno, Enforce) needs app, env and version on every pod
 # template. env is fixed per overlay; version is the image tag, added at deploy

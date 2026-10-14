@@ -59,4 +59,15 @@ kubectl -n "$NS" get pods -o wide >&2
 step "smoke test deps (npm ci, as Jenkins)" bash -c 'cd "$1/tests" && npm ci --no-audit --no-fund' _ "$REPO_ROOT"
 smoke_through_service "$NS" 13000
 
+# Deploy → PR Preview (pull-request builds) and the pr-preview-teardown job:
+# the scripts they run, against this cluster, with the image just deployed.
+step "pr-preview-up.sh deploys a preview" \
+  "$REPO_ROOT/scripts/pr-preview-up.sh" 1 "$DEPLOY_IMAGE" pr-1.preview.verify.local
+preview_host() { [ "$(kubectl -n preview-pr-1 get ingress my-app -o jsonpath='{.spec.rules[0].host}')" = pr-1.preview.verify.local ]; }
+step "the preview has its own host" preview_host
+smoke_through_service preview-pr-1 13003 "PR preview"
+step "pr-preview-down.sh removes it" "$REPO_ROOT/scripts/pr-preview-down.sh" 1
+preview_gone() { kubectl wait --for=delete namespace/preview-pr-1 --timeout=180s; }
+step "preview namespace deleted" preview_gone
+
 finish_stage

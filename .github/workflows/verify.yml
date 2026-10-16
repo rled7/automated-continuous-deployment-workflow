@@ -46,6 +46,9 @@ jobs:
   # updated from NVD here, once, and saved to the cache (one copy a day), so
   # the pipeline jobs only read it. Several updates at once with one NVD key
   # get throttled; from an empty cache each one is a full download of NVD.
+  # Only complete databases are saved: the update script marks one when it
+  # finishes (update-complete), and Save runs only after it succeeded. (v1
+  # keys could hold a half-downloaded copy, saved by any job.)
   nvd-db:
     name: dependency-check database
     runs-on: ubuntu-24.04
@@ -58,7 +61,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Today's key
         id: key
-        run: echo "key=dependency-check-${{ runner.os }}-$(date -u +%F)" >> "$GITHUB_OUTPUT"
+        run: echo "key=dependency-check-v2-${{ runner.os }}-$(date -u +%F)" >> "$GITHUB_OUTPUT"
       - name: Already updated today?
         id: today
         uses: actions/cache/restore@v4
@@ -73,7 +76,7 @@ jobs:
         with:
           path: ${{ env.DC_DATA }}
           key: ${{ steps.key.outputs.key }}
-          restore-keys: dependency-check-${{ runner.os }}-
+          restore-keys: dependency-check-v2-${{ runner.os }}-
       # The version the agent image scans with: the database schema must match.
       - name: Install dependency-check
         if: steps.today.outputs.cache-hit != 'true'
@@ -236,7 +239,7 @@ jobs:
         with:
           path: harness/.cache/dependency-check
           key: ${{ needs.nvd-db.outputs.key || 'none' }}
-          restore-keys: dependency-check-${{ runner.os }}-
+          restore-keys: dependency-check-v2-${{ runner.os }}-
 
       # Docker layer caching: a BuildKit builder that can export to the
       # Actions cache, with Docker Hub pulls going through Google's mirror

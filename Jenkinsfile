@@ -106,11 +106,17 @@ pipeline {
                         // Two ways to get the vulnerability database:
                         //   - DEPENDENCY_CHECK_DATA set (a volume on the pod
                         //     template, see jenkins.yaml): a database the
-                        //     dependency-check-db-update job keeps current; the
-                        //     scan reads it and downloads nothing (--noupdate).
-                        //   - otherwise the scan updates its own copy from the
+                        //     dependency-check-db-update job keeps current.
+                        //   - otherwise this build updates its own copy from the
                         //     NVD API with the nvd-api-key credential (without a
-                        //     key, NVD rate-limits it too hard to finish).
+                        //     key, NVD rate-limits it too hard to finish), with
+                        //     the same script.
+                        // Either way the scan itself downloads nothing
+                        // (--noupdate), and refuses a database whose last update
+                        // did not finish, or finished more than
+                        // DEPENDENCY_CHECK_MAX_AGE_DAYS (default 3) days ago:
+                        // scanning against part of NVD, or an old copy, passes
+                        // packages with known vulnerabilities.
                         withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
                             sh '''
                                 cd app
@@ -121,14 +127,23 @@ pipeline {
                                 rm -rf ../dependency-check-src && mkdir ../dependency-check-src
                                 cp package.json package-lock.json ../dependency-check-src/
                                 (cd ../dependency-check-src && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
-                                if [ -n "${DEPENDENCY_CHECK_DATA:-}" ]; then
-                                    set -- --data "$DEPENDENCY_CHECK_DATA" --noupdate
-                                else
-                                    # The key as NVD wants it (scripts/nvd-api-key.sh);
-                                    # untraced, since Jenkins masks only the stored value.
-                                    set +x
-                                    set -- --nvdApiKey "$(../scripts/nvd-api-key.sh)"
+                                data=${DEPENDENCY_CHECK_DATA:-}
+                                if [ -z "$data" ]; then
+                                    data=/opt/dependency-check/data
+                                    ../scripts/dependency-check-db-update.sh "$data"
                                 fi
+                                # update-complete: written by the update script when
+                                # an update finishes, removed when one starts.
+                                if [ ! -s "$data/update-complete" ]; then
+                                    echo "The dependency-check database in $data is incomplete: its last update did not finish." >&2
+                                    exit 1
+                                fi
+                                age=$(( ($(date -u +%s) - $(cat "$data/update-complete")) / 86400 ))
+                                if [ "$age" -gt "${DEPENDENCY_CHECK_MAX_AGE_DAYS:-3}" ]; then
+                                    echo "The dependency-check database in $data was last updated $age days ago (limit ${DEPENDENCY_CHECK_MAX_AGE_DAYS:-3}): is the dependency-check-db-update job running?" >&2
+                                    exit 1
+                                fi
+                                echo "dependency-check database: last updated $age day(s) ago"
                                 # OWASP Dependency Check
                                 # Build 015: --failOnCVSS tightened from 8 to 7 to match
                                 # the Trivy HIGH threshold (CVSS 7.0 == HIGH boundary).
@@ -145,7 +160,8 @@ pipeline {
                                   --nodePackageSkipDevDependencies \
                                   --disableYarnAudit \
                                   --disablePnpmAudit \
-                                  "$@" \
+                                  --data "$data" \
+                                  --noupdate \
                                   --format "HTML" \
                                   --out reports/dependency-check \
                                   --failOnCVSS 7

@@ -151,12 +151,14 @@ step "build docker/jenkins-agent/Dockerfile" \
 # DC_UPDATE=0 uses the database as it is, without NVD: CI updates it once, in
 # its own job, for all the pipeline jobs (several updates at once with one NVD
 # key are throttled, and from an empty cache each is a full download).
-dc_have_db() { [ -n "$(find "$DC_DATA" -name odc.mv.db -size +1M 2>/dev/null)" ]; }
+# update-complete: written by scripts/dependency-check-db-update.sh when an
+# update finishes (a half-downloaded database has none).
+dc_have_db() { [ -s "$DC_DATA/update-complete" ]; }
 if [ "${DC_UPDATE:-1}" = 0 ]; then
   ( if dc_have_db; then
       echo "DC_UPDATE=0: using the database in $DC_DATA as it is"; echo 0 > "$work/dc-update.rc"
     else
-      echo "DC_UPDATE=0, but there is no database in $DC_DATA (in CI: did the nvd-db job fail?)"
+      echo "DC_UPDATE=0, but there is no complete database in $DC_DATA (in CI: did the nvd-db job fail?)"
       echo 1 > "$work/dc-update.rc"
     fi ) > "$work/dc-update.log" &
 else

@@ -52,7 +52,9 @@ jobs:
   nvd-db:
     name: dependency-check database
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # A full download of NVD (an empty cache, after a week unused) took 41.5
+    # minutes; a daily update takes one or two.
+    timeout-minutes: 90
     outputs:
       key: ${{ steps.key.outputs.key }}
     env:

@@ -28,7 +28,7 @@ teardown() {
 trap teardown EXIT
 
 base=$(awk '/^FROM/{print $2; exit}' "$REPO_ROOT/docker/jenkins/Dockerfile")
-step "pull $base" pull_official "$base"
+step "pull $base" pull_base "$base"
 step "build docker/jenkins/Dockerfile (plugins.txt)" \
   docker_build "$REPO_ROOT/docker/jenkins/Dockerfile" "$REPO_ROOT/docker/jenkins" -t "$IMAGE" || finish_stage
 
@@ -70,7 +70,7 @@ step "Jenkins boots with jenkins.yaml applied" booted || finish_stage
 jobs_exist() {
   local jobs; jobs=$(groovy 'println(jenkins.model.Jenkins.instance.allItems*.fullName.join(" "))')
   echo "jobs: $jobs"
-  for j in my-app pr-preview-teardown; do grep -qw "$j" <<<"$jobs" || { echo "missing job $j"; return 1; }; done
+  for j in my-app pr-preview-teardown dependency-check-db-update; do grep -qw "$j" <<<"$jobs" || { echo "missing job $j"; return 1; }; done
 }
 step "jobs from jenkins.yaml exist" jobs_exist
 
@@ -98,8 +98,10 @@ step "every credential the Jenkinsfile uses is defined" credentials_defined
 # inline pipeline job. See docs/agent-resolution.md.
 agents_resolve() {
   local map="[" f out
-  for f in "$REPO_ROOT/Jenkinsfile" "$HARNESS_DIR/fixtures/agent-forms.Jenkinsfile"; do
-    map+="'${f#"$REPO_ROOT"/}': '$(base64 -w0 "$f")', "
+  # Each file as base64 in chunks: a Groovy string literal holds at most
+  # 65535 characters, and the Jenkinsfile's base64 is longer.
+  for f in "$REPO_ROOT/Jenkinsfile" "$REPO_ROOT"/jenkins/*.Jenkinsfile "$HARNESS_DIR/fixtures/agent-forms.Jenkinsfile"; do
+    map+="'${f#"$REPO_ROOT"/}': [$(base64 -w0 "$f" | fold -w 60000 | sed "s/.*/'&'/" | paste -sd,)].join(''), "
   done
   map+="]"
   out=$(groovy "$(sed "s|__PIPELINES__|$map|" "$HARNESS_DIR/lib/agent-resolution.groovy")") || return 1
@@ -121,7 +123,7 @@ step "Jenkinsfile passes Jenkins' declarative validation" validate_jenkinsfile
 # The agent image every stage runs in (the cicd container of the pod template).
 AGENT_IMAGE="harness-agent:local"
 for img in $(awk '/^FROM/{print $2}' "$REPO_ROOT/docker/jenkins-agent/Dockerfile"); do
-  step "pull $img" pull_official "$img"
+  step "pull $img" pull_base "$img"
 done
 step "build docker/jenkins-agent/Dockerfile" \
   docker_build "$REPO_ROOT/docker/jenkins-agent/Dockerfile" "$REPO_ROOT/docker/jenkins-agent" -t "$AGENT_IMAGE" || finish_stage

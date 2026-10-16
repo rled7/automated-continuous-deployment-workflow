@@ -75,6 +75,25 @@ cosign verify --key awskms:///arn:aws:kms:us-east-1:123456789012:key/MY_KEY_ID I
 cosign verify --key azurekms://MY_VAULT.vault.azure.net/MY_KEY IMAGE
 ```
 
+### Switching the pipeline to a key
+
+The Docker Build & Push stage signs keyless unless `COSIGN_KEY` is set
+(`.env` → `jenkins.yaml` global environment). Set it to any key reference
+cosign accepts (`awskms://…`, `gcpkms://…`, `azurekms://…`, `hashivault://…`,
+or `k8s://jenkins/cosign` for a secret created with
+`cosign generate-key-pair k8s://jenkins/cosign`), and give the agents access to
+it. A plain Jenkins agent has no OIDC identity, so on Jenkins this is usually
+the path that works.
+
+Both the signature and the SLSA provenance attestation are made over the
+manifest list digest that `docker buildx build --metadata-file` records. The
+optional `COSIGN_EXTRA_ARGS` adds flags to both commands; `--tlog-upload=false`
+keeps a private registry's image names out of the public Rekor log.
+
+With a key, the Kyverno `verify-image-signatures` policy must check that key
+instead of a Fulcio identity: replace its `keyless` attestor with
+`keys: {publicKeys: "<cosign.pub contents>"}` (or `kms: <the same URI>`).
+
 ---
 
 ## Why this pipeline chose keyless

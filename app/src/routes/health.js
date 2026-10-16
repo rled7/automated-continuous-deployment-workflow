@@ -42,7 +42,9 @@ router.get('/live', (req, res) => {
   res.json({ status: 'alive' });
 });
 
-// GET /health/ready — returns 503 during shutdown or if a dependency is down
+// GET /health/ready — 503 during shutdown or when the database is down.
+// No route uses Redis, so a Redis outage reports "degraded" but keeps the pod
+// in the Service: failing readiness would take every pod out at once.
 router.get('/ready', async (req, res) => {
   if (shuttingDown) {
     return res.status(503).json({ status: 'shutting_down' });
@@ -56,17 +58,20 @@ router.get('/ready', async (req, res) => {
 
   const db    = dbResult.status    === 'fulfilled' ? dbResult.value    : { ok: false };
   const redis = redisResult.status === 'fulfilled' ? redisResult.value : { ok: false };
-  const allOk = db.ok && redis.ok;
+
+  let status = 'ready';
+  if (!db.ok) status = 'unavailable';
+  else if (!redis.ok) status = 'degraded';
 
   const body = {
-    status: allOk ? 'ready' : 'degraded',
+    status,
     checks: {
       database: db.ok ? 'ok' : 'error',
       redis: redis.ok ? 'ok' : 'error',
     },
   };
 
-  return res.status(allOk ? 200 : 503).json(body);
+  return res.status(db.ok ? 200 : 503).json(body);
 });
 
 export default router;

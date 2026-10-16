@@ -21,5 +21,11 @@ jenkins_post() {
   esac
 }
 
-# Groovy run by Jenkins' script console, as admin.
-groovy() { jenkins_post /scriptText --data-urlencode "script=$1"; }
+# Groovy run by Jenkins' script console, as admin. Sent from a file: a
+# script with embedded pipelines can exceed the 128 KB limit on one argument.
+groovy() {
+  local f rc
+  f=$(mktemp); printf '%s' "$1" > "$f"
+  jenkins_post /scriptText --data-urlencode "script@$f"; rc=$?
+  rm -f "$f"; return $rc
+}

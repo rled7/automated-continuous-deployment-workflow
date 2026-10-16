@@ -72,6 +72,15 @@ pull_official() {
   docker pull -q "$src" >/dev/null && docker tag "$src" "$img"
 }
 
+# pull_base IMAGE — a Dockerfile's base image, for docker_build. The CI
+# builder (HARNESS_DOCKER_CACHE=gha, a BuildKit container with its own
+# registry mirror) pulls bases itself, often only their manifests when the
+# layers are cached, so there it is skipped.
+pull_base() {
+  [ "${HARNESS_DOCKER_CACHE:-}" = gha ] && { echo "the BuildKit builder pulls $1 itself"; return 0; }
+  pull_official "$1"
+}
+
 # ensure_docker — succeeds if a Docker daemon is reachable. In throwaway
 # sandboxes (running as root, dockerd installed but not started) it starts one.
 ensure_docker() {
@@ -107,11 +116,19 @@ DEPLOY_IMAGE="${DEPLOY_IMAGE:-my-app:verify-$(git -C "$REPO_ROOT" rev-parse --sh
 # deployToKubernetes() deploys it (image set to $DEPLOY_IMAGE, version label
 # from its tag) into the results dir as OUT_NAME.yaml and prints the path.
 # Works on a temp copy so the repo's kustomization.yaml is never modified.
+# db_without_tls K8S_DIR — production connects to Postgres over TLS
+# (DB_SSL=true); the harness's throwaway Postgres has no TLS. Switches it off
+# in a copy of the manifests, never in the repository's.
+db_without_tls() {
+  sed -i 's/^\(  DB_SSL:\) "true"/\1 "false"/' "$1/overlays/production/configmap-patch.yaml"
+}
+
 render_overlay() {
   local out="$RESULTS_DIR/rendered/${2:-$1}.yaml" tmp rc
   mkdir -p "$RESULTS_DIR/rendered"
   tmp=$(mktemp -d)
   cp -R "$REPO_ROOT/k8s" "$tmp/k8s"
+  db_without_tls "$tmp/k8s"
   (cd "$tmp/k8s/overlays/$1" &&
     kustomize edit set image "my-app=$DEPLOY_IMAGE" &&
     kustomize edit add label "version:${DEPLOY_IMAGE##*:}" --without-selector --include-templates &&
@@ -165,9 +182,19 @@ fi
 # `docker buildx build --load`. With the sandbox trust above, every shell-form
 # RUN gets it as a bind mount plus the variables curl, npm and Java read, so
 # it works in single-stage images too and never lands in a layer.
+#
+# With HARNESS_DOCKER_CACHE=gha (set by the CI workflow) layers are also read
+# from and written to the GitHub Actions cache, so unchanged layers are not
+# rebuilt on the next run. Needs a docker-container buildx builder and the
+# Actions runtime variables, which the workflow sets up.
 docker_build() {
   local dockerfile=$1 context=$2; shift 2
-  local args=() trust env=""
+  local args=() trust env="" scope
+  if [ "${HARNESS_DOCKER_CACHE:-}" = gha ]; then
+    # One cache per Dockerfile, shared by every job that builds it.
+    scope=$(realpath --relative-to="$REPO_ROOT" "$dockerfile" | tr '/.' '--')
+    args+=(--cache-from "type=gha,scope=$scope" --cache-to "type=gha,mode=max,scope=$scope")
+  fi
   if [ -n "${HARNESS_CA_BUNDLE:-}${HARNESS_JAVA_TRUSTSTORE:-}" ]; then
     trust=$(mktemp -d)
     if [ -n "${HARNESS_CA_BUNDLE:-}" ]; then

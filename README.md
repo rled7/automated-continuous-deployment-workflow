@@ -30,7 +30,7 @@ Developer Push
 ## Project Structure
 
 ```
-jenkins-cicd/
+automated-continuous-deployment-workflow/
 ├── Jenkinsfile                  # Full pipeline definition
 ├── .env.example                 # Environment variables template
 ├── app/
@@ -49,7 +49,10 @@ jenkins-cicd/
 │   ├── overlays/production/     # Production: Argo Rollout (canary + analysis)
 │   └── migrations/              # Pod spec runMigrations() uses
 ├── monitoring/
-│   └── prometheus.yaml          # Prometheus scrape + alert rules
+│   ├── pushgateway.yaml         # Pushgateway for the DORA metrics Jenkins pushes
+│   ├── slo.yaml                 # SLO definitions (OpenSLO; not applied to the cluster)
+│   └── grafana/                 # Dashboards (scrape config and alert rules live in
+│                                #   argocd/bootstrap/apps/kube-prometheus-stack.yaml)
 ├── tests/
 │   ├── performance/load-test.js # k6 load test (ramp → spike → ramp down)
 │   └── smoke/smoke.test.js      # Post-deploy smoke tests
@@ -68,22 +71,39 @@ jenkins-cicd/
 ### 1. Clone & Configure
 
 ```bash
-git clone https://github.com/YOUR_ORG/my-app
-cd jenkins-cicd
+git clone https://github.com/rled7/automated-continuous-deployment-workflow
+cd automated-continuous-deployment-workflow
 cp .env.example .env
 # Edit .env with your credentials
 ```
 
 ### 2. Start Local CI Stack
 
+The Docker Compose stack in `docker/` is for trying the Jenkins controller
+(its plugins, `jenkins.yaml` and credentials), SonarQube and the registry. It
+does not run builds: see [Running builds](#running-builds). It needs Docker
+Compose v2.24 or newer (`docker compose version`).
+
 ```bash
 chmod +x scripts/setup.sh
 ./scripts/setup.sh --local
 ```
 
-Opens:
+It waits until each service answers (Jenkins `/login`, SonarQube
+`/api/system/status` UP), failing after a timeout, and opens:
 - Jenkins  → http://localhost:8080
 - SonarQube → http://localhost:9000
+- Registry → http://localhost:5000
+
+Upgrading a stack you started before: Jenkins now runs as the image's
+`jenkins` user instead of root, so give it back the files root wrote in its
+volume; SonarQube moved from 9.9 to 10.7, so open http://localhost:9000/setup
+once to upgrade its database (`setup.sh` stops and says so when it is needed).
+
+```bash
+docker compose -f docker/docker-compose.yml run --rm --no-deps --user root jenkins \
+    find /var/jenkins_home -xdev -user root -exec chown jenkins:jenkins {} +
+```
 
 ### 3. Configure Jenkins
 
@@ -101,13 +121,56 @@ Jenkins is built with the plugins in `docker/jenkins/plugins.txt` and configures
 
 After changing `.env` or `plugins.txt`, recreate Jenkins: `docker compose up -d --build jenkins`.
 
+#### Connect SonarQube to Jenkins
+
+The SonarQube Analysis stage needs a token for Jenkins, and its quality gate needs SonarQube to send results back to Jenkins through a webhook. Without the webhook, `waitForQualityGate` waits its 5 minutes and fails every build. Log in to SonarQube (http://localhost:9000) as `admin` / `admin`, set a new password, then:
+
+```bash
+SONAR_ADMIN_PASSWORD=<new password> scripts/sonarqube-setup.sh
+```
+
+It creates the webhook to `http://jenkins:8080/sonarqube-webhook/` (set `JENKINS_WEBHOOK_URL` for another Jenkins address) and a token, and prints `SONAR_TOKEN=...` once; put that in `.env` and recreate Jenkins. Running it again changes nothing. The `pipeline` harness stage sets up its SonarQube with the same script.
+
+#### Running builds
+
+The Compose Jenkins cannot run the pipeline: it has no executors
+(`numExecutors: 0`), and the only cloud in `docker/jenkins/jenkins.yaml` is a
+Kubernetes cloud that expects Jenkins inside the cluster (API server
+`https://kubernetes.default.svc`, controller
+`http://jenkins.jenkins.svc.cluster.local:8080`, agents connecting back to
+`jenkins-agent.jenkins.svc:50000`, SonarQube at `http://sonarqube:9000`). To
+run builds, run the same image (built from `docker/jenkins/Dockerfile`) in
+namespace `jenkins` of your cluster:
+
+- [`harness/fixtures/jenkins-in-cluster.yaml`](harness/fixtures/jenkins-in-cluster.yaml)
+  is a working example: the namespace, service accounts and RBAC for agent
+  pods, the `jenkins` and `jenkins-agent` Services, and a Deployment that reads
+  `jenkins.yaml` from the `jenkins-casc` ConfigMap, the `.env` variables from
+  the `jenkins-env` Secret and the kubeconfig credential from the
+  `jenkins-kubeconfig` Secret.
+- [`harness/stages/pipeline.sh`](harness/stages/pipeline.sh) does the whole
+  setup on a kind cluster, SonarQube included, and runs the Jenkinsfile
+  (`harness/verify.sh pipeline`).
+
+The fixture is made for a throwaway cluster: for one that lasts, give Jenkins a
+persistent volume for `/var/jenkins_home` and the deployer narrower rights
+than cluster-admin. [`docs/cluster-setup.md`](docs/cluster-setup.md) sets up
+a kind cluster with Argo CD for the app itself.
+
 ### 4. Set Up Kubernetes (Production)
 
 ```bash
 ./scripts/setup.sh --k8s
 ```
 
+It creates the `production`, `staging` and `monitoring` namespaces, the
+`registry-credentials` pull secret and `my-app-secrets` (from `DOCKER_*`,
+`DB_HOST` and `DB_PASSWORD` in `.env`) in both app namespaces, and the
+Prometheus Pushgateway.
+
 ### 5. Push to Trigger the Pipeline
+
+With Jenkins running in a cluster (see [Running builds](#running-builds)):
 
 ```bash
 git checkout -b develop
@@ -226,7 +289,7 @@ Packages the app and all its dependencies into a portable, reproducible image. C
 Multi-stage Dockerfile
 A specific Docker pattern used to keep the final production image small. The build tools and dev dependencies are used in earlier stages and thrown away — only the compiled output and production node_modules end up in the final image. Alternatives like single-stage builds produce images 3–5x larger.
 Docker Compose
-Used to run the local development infrastructure (Jenkins, SonarQube, PostgreSQL, Redis, local registry) as a single stack. Chosen over running everything manually because one command (docker-compose up) boots the entire CI environment reproducibly.
+Used to run the local development infrastructure (Jenkins, SonarQube, PostgreSQL, Redis, local registry) as a single stack. Chosen over running everything manually because one command (`docker compose up`) boots it reproducibly. Builds run on Jenkins inside a Kubernetes cluster instead (see [Running builds](#running-builds)).
 
 Container Orchestration
 Kubernetes

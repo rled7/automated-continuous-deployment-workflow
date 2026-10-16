@@ -40,15 +40,49 @@ spec:
             # Retain 24 h of data in kind (default 10d consumes too much disk).
             retention: 24h
 
-            # ── Pushgateway scrape config (Build 015) ─────────────────────────
-            # honor_labels: true preserves the job/instance labels pushed by
-            # Jenkins so Prometheus does not overwrite them with its own values.
-            # This is required for DORA metrics pushed from the Jenkinsfile.
             additionalScrapeConfigs:
+              # ── my-app ────────────────────────────────────────────────────
+              # The app's pods in production and staging, on container port
+              # 3000 at /metrics. A plain scrape job rather than a
+              # PodMonitor, so the app's overlays carry no Prometheus
+              # operator CRDs. The job name is what AppDown matches
+              # (up{job="my-app"}); rollouts_pod_template_hash is what the
+              # canary analysis (k8s/overlays/production/analysis-template.yaml)
+              # selects the canary's pods by. The allow-prometheus-scrape
+              # NetworkPolicy in k8s/base lets these scrapes in.
+              - job_name: my-app
+                metrics_path: /metrics
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names: [production, staging]
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_label_app]
+                    action: keep
+                    regex: my-app
+                  - source_labels: [__meta_kubernetes_pod_container_port_number]
+                    action: keep
+                    regex: "3000"
+                  # Completed and pending pods have nothing to scrape.
+                  - source_labels: [__meta_kubernetes_pod_phase]
+                    action: keep
+                    regex: Running
+                  - source_labels: [__meta_kubernetes_namespace]
+                    target_label: namespace
+                  - source_labels: [__meta_kubernetes_pod_name]
+                    target_label: pod
+                  - source_labels: [__meta_kubernetes_pod_label_rollouts_pod_template_hash]
+                    target_label: rollouts_pod_template_hash
+
+              # ── Pushgateway (Build 015) ───────────────────────────────────
+              # The Service in monitoring/pushgateway.yaml.
+              # honor_labels: true preserves the job/instance labels pushed by
+              # Jenkins so Prometheus does not overwrite them with its own values.
+              # This is required for DORA metrics pushed from the Jenkinsfile.
               - job_name: pushgateway
                 honor_labels: true
                 static_configs:
-                  - targets: ['prometheus-pushgateway.monitoring.svc.cluster.local:9091']
+                  - targets: ['pushgateway.monitoring.svc.cluster.local:9091']
 
               # ── Jenkins Prometheus plugin (Build 018) ─────────────────────
               # Requires the Jenkins Prometheus plugin (prometheus:latest) which
@@ -58,6 +92,120 @@ spec:
                 metrics_path: /prometheus
                 static_configs:
                   - targets: ['jenkins.jenkins.svc.cluster.local:8080']
+
+        # ── Alert and recording rules for my-app ─────────────────────────────
+        # Rendered as PrometheusRule objects in the monitoring namespace with
+        # the release label the operator's ruleSelector matches. The series
+        # come from the my-app scrape job above: the app's prom-client
+        # histogram http_request_duration_ms (labels method, route,
+        # status_code), plus the namespace and pod labels the job adds.
+        additionalPrometheusRulesMap:
+          my-app-alerts:
+            groups:
+              - name: my-app
+                rules:
+                  - alert: AppDown
+                    expr: up{job="my-app"} == 0
+                    for: 1m
+                    labels:
+                      severity: critical
+                    annotations:
+                      summary: "App pod is down"
+                      description: "{{ $labels.namespace }}/{{ $labels.pod }} has been down for > 1 minute"
+
+                  - alert: HighErrorRate
+                    expr: |
+                      sum by (namespace) (rate(http_request_duration_ms_count{job="my-app",status_code=~"5.."}[5m]))
+                      /
+                      sum by (namespace) (rate(http_request_duration_ms_count{job="my-app"}[5m]))
+                      > 0.05
+                    for: 2m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "High HTTP error rate"
+                      description: "5xx responses in {{ $labels.namespace }} are {{ $value | humanizePercentage }} of all requests"
+
+                  - alert: HighResponseTime
+                    # The histogram is in milliseconds.
+                    expr: |
+                      histogram_quantile(0.95,
+                        sum by (namespace, le) (rate(http_request_duration_ms_bucket{job="my-app"}[5m]))
+                      ) > 500
+                    for: 5m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "High P95 response time"
+                      description: "P95 latency in {{ $labels.namespace }} is {{ $value | humanize }} ms"
+
+                  - alert: PodRestartingFrequently
+                    expr: increase(kube_pod_container_status_restarts_total{namespace="production"}[1h]) > 3
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "Pod restarting frequently"
+
+              # Multi-window multi-burn-rate SLO alerts (99.9% availability SLO)
+              # burn_rate = (1 - SLI) / (1 - 0.999) = error_rate / 0.001
+              - name: slo-burn-rate
+                rules:
+                  # Fast burn: >14.4× error budget consumption over 1 h — page immediately
+                  - alert: AvailabilitySLOFastBurn
+                    expr: |
+                      (
+                        1 - http_requests:availability:ratio_rate5m
+                      ) / (1 - 0.999) > 14.4
+                    for: 1m
+                    labels:
+                      severity: page
+                      slo: availability
+                    annotations:
+                      summary: "SLO fast burn: availability error budget burning >14.4×"
+                      description: >-
+                        Availability burn rate is {{ $value | humanize }}× the budget
+                        consumption rate. At this rate the 30-day error budget will be
+                        exhausted in < 2 hours. Immediate action required.
+
+                  # Slow burn: >6× error budget consumption over 6 h — warning
+                  - alert: AvailabilitySLOSlowBurn
+                    expr: |
+                      (
+                        1 - http_requests:availability:ratio_rate5m
+                      ) / (1 - 0.999) > 6
+                    for: 6h
+                    labels:
+                      severity: warning
+                      slo: availability
+                    annotations:
+                      summary: "SLO slow burn: availability error budget burning >6×"
+                      description: >-
+                        Availability burn rate is {{ $value | humanize }}× the budget
+                        consumption rate for the past 6 h. At this rate the 30-day
+                        error budget will be exhausted in < 5 days. Investigate soon.
+
+          # SLIs for the SLOs in monitoring/slo.yaml, used by the burn-rate
+          # alerts above and the SLO dashboard. Production only: staging's load
+          # tests would otherwise count against the production error budget.
+          my-app-recording-rules:
+            groups:
+              - name: sli-recording-rules
+                interval: 60s
+                rules:
+                  # SLI: 5-minute rolling availability ratio (non-5xx / total)
+                  - record: http_requests:availability:ratio_rate5m
+                    expr: |
+                      sum(rate(http_request_duration_ms_count{job="my-app",namespace="production",status_code!~"5.."}[5m]))
+                      /
+                      sum(rate(http_request_duration_ms_count{job="my-app",namespace="production"}[5m]))
+
+                  # SLI: 5-minute rolling P95 latency (milliseconds)
+                  - record: http_requests:latency:p95_5m
+                    expr: |
+                      histogram_quantile(
+                        0.95,
+                        sum(rate(http_request_duration_ms_bucket{job="my-app",namespace="production"}[5m])) by (le)
+                      )
 
         # ── Alertmanager ─────────────────────────────────────────────────────
         alertmanager:

@@ -34,7 +34,7 @@ podman network exists "$NET" || podman network create "$NET" >/dev/null
 podman kube down "$DEPS" >/dev/null 2>&1
 step "start Postgres + Redis" podman kube play --network "$NET" "$DEPS" || finish_stage
 step "Postgres ready" timeout 90 bash -c \
-  'until podman exec app-db-postgres pg_isready -q -U appuser -d appdb; do sleep 2; done' || finish_stage
+  'until podman exec app-db-postgres pg_isready -q -h 127.0.0.1 -U appuser -d appdb; do sleep 2; done' || finish_stage
 
 # The staging ConfigMap + Deployment exactly as rendered for deploy, plus the
 # stand-in secret. Services/Ingress/NetworkPolicies need a real cluster.
@@ -89,7 +89,7 @@ log "app container $ctr at $app_ip"
 # IPs aren't reachable from the host.
 podman rm -f verify-client >/dev/null 2>&1
 podman run -d --name verify-client --network "$NET" -v "$REPO_ROOT/tests:/tests" -w /tests \
-  "$IMAGE_MIRROR/node:20-alpine" sleep 3600 >/dev/null || { log "could not start client container"; exit 1; }
+  "$IMAGE_MIRROR/node:24-alpine" sleep 3600 >/dev/null || { log "could not start client container"; exit 1; }
 
 # wait_http_in_net URL TIMEOUT_SECS — like wait_http, from inside the network.
 wait_http_in_net() {

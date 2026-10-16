@@ -15,127 +15,97 @@ DORA (DevOps Research and Assessment) metrics measure software delivery performa
 
 ## How Metrics Are Emitted from This Pipeline
 
-Metrics are pushed to the **Prometheus Pushgateway** (`pushgateway:9091`) at key
-Jenkinsfile stage transitions.  The Pushgateway is deployed in the `monitoring`
-namespace via `monitoring/pushgateway.yaml`.
+Metrics are pushed to the **Prometheus Pushgateway**
+(`pushgateway.monitoring.svc.cluster.local:9091`, the Service in
+`monitoring/pushgateway.yaml`) by `pushDoraMetric()` in the Jenkinsfile, from
+the `post` block of the production deploy stage.
 
-### Deployment Frequency & MTTR anchor
+Each production build pushes its own group,
+`/metrics/job/jenkins/instance/my-app-<BUILD_NUMBER>`, so every series
+carries `job="jenkins"` and a per-build `instance`. All four are plain gauges:
 
-After a successful production deploy (sketch — do not edit Jenkinsfile):
+| Metric | Pushed when | Value |
+|--------|-------------|-------|
+| `deployment_frequency_total` | deploy succeeded | `1` |
+| `lead_time_seconds` | deploy succeeded | seconds from the HEAD commit to the deploy |
+| `mttr_seconds` | deploy succeeded | seconds since the last failed build, `0` if none |
+| `change_failure_total` | deploy failed | `1` |
 
-```groovy
-// Jenkinsfile — "Deploy to Production" post { success { ... } }
-sh """
-  DEPLOY_TS=\$(date +%s)
-  cat <<PROM | curl -s --data-binary @- \
-      http://pushgateway:9091/metrics/job/cicd/instance/\${env.BUILD_TAG}
-deployment_timestamp_seconds{env="production",version="\${IMAGE_TAG}"} \${DEPLOY_TS}
-deployment_result{env="production",version="\${IMAGE_TAG}",result="success"} 1
-PROM
-"""
-```
-
-On a rollback or incident-closure event:
-
-```groovy
-sh """
-  RESTORE_TS=\$(date +%s)
-  cat <<PROM | curl -s --data-binary @- \
-      http://pushgateway:9091/metrics/job/cicd/instance/\${env.BUILD_TAG}
-deployment_result{env="production",version="\${IMAGE_TAG}",result="failure"} 1
-restore_timestamp_seconds{env="production",version="\${IMAGE_TAG}"} \${RESTORE_TS}
-PROM
-"""
-```
-
-### Lead Time for Changes
-
-Lead time is recorded at the end of the pipeline using the timestamp of the
-first commit on the branch and the production deploy timestamp:
-
-```groovy
-sh """
-  FIRST_COMMIT_TS=\$(git log --reverse --format='%ct' origin/main..HEAD | head -1)
-  DEPLOY_TS=\$(date +%s)
-  LEAD_TIME=\$((DEPLOY_TS - FIRST_COMMIT_TS))
-  cat <<PROM | curl -s --data-binary @- \
-      http://pushgateway:9091/metrics/job/cicd/instance/\${env.BUILD_TAG}
-lead_time_seconds{env="production",version="\${IMAGE_TAG}"} \${LEAD_TIME}
-PROM
-"""
-```
+Despite the `_total` suffix nothing is a counter: a deploy is one group with a
+`1` in it, so queries **count groups** rather than taking `increase()`. The
+Pushgateway adds `push_time_seconds` to every group; comparing it with
+`time()` selects the builds in a window. Groups stay until they are deleted or
+the Pushgateway restarts (it runs without a persistence file).
 
 ---
 
 ## Prometheus Scrape Config
 
-Add the following job to `prometheus.yml` `scrape_configs` so Prometheus polls
-the Pushgateway:
+The `pushgateway` job in kube-prometheus-stack's
+`prometheus.prometheusSpec.additionalScrapeConfigs`
+(`argocd/bootstrap/apps/kube-prometheus-stack.yaml`) scrapes it:
 
 ```yaml
-- job_name: 'pushgateway'
-  honor_labels: true           # preserve job/instance labels set by the pusher
+- job_name: pushgateway
+  honor_labels: true           # keep job/instance as Jenkins pushed them
   static_configs:
-    - targets: ['pushgateway:9091']
+    - targets: ['pushgateway.monitoring.svc.cluster.local:9091']
 ```
-
-This is included as a comment at the top of `monitoring/pushgateway.yaml` for
-reference.
 
 ---
 
 ## Querying DORA Metrics in Prometheus / Grafana
 
-### Deployment Frequency (deploys per day, 30-day window)
+These are the queries in the DORA dashboard
+(`monitoring/grafana/dashboards/dora.yaml`). `2592000` is 30 days in seconds.
+
+### Deployment Frequency (deploys in the last 30 days)
 
 ```promql
-count_over_time(
-  deployment_timestamp_seconds{env="production"}[30d]
-) / 30
+count(
+  deployment_frequency_total
+  and on(job, instance) (push_time_seconds{job="jenkins"} > time() - 2592000)
+) or vector(0)
 ```
 
-### Lead Time for Changes (P50 and P95 over last 30 days)
+### Lead Time for Changes (P50 and P95 over the last 30 days)
 
 ```promql
-# P50
-histogram_quantile(0.50,
-  sum(rate(lead_time_seconds_bucket{env="production"}[30d])) by (le)
-)
-
-# P95
-histogram_quantile(0.95,
-  sum(rate(lead_time_seconds_bucket{env="production"}[30d])) by (le)
+quantile(0.5,
+  lead_time_seconds
+  and on(job, instance) (push_time_seconds{job="jenkins"} > time() - 2592000)
 )
 ```
 
-> **Note:** For `lead_time_seconds` to be queryable as a histogram the push
-> payload should use the `_bucket`/`_count`/`_sum` convention.  For a simpler
-> gauge-style push, use `avg_over_time` instead.
+Use `0.95` for P95, or `avg(...)` for the mean.
 
-### Change Failure Rate
+### Change Failure Rate (%)
+
+Failed deploys over all deploys (successful + failed):
 
 ```promql
-sum(deployment_result{env="production", result="failure"})
-/
-sum(deployment_result{env="production"})
+100 * (count(change_failure_total and on(job, instance) (push_time_seconds{job="jenkins"} > time() - 2592000)) or vector(0))
+/ clamp_min(
+    (count(deployment_frequency_total and on(job, instance) (push_time_seconds{job="jenkins"} > time() - 2592000)) or vector(0))
+  + (count(change_failure_total and on(job, instance) (push_time_seconds{job="jenkins"} > time() - 2592000)) or vector(0)),
+  1)
 ```
 
 ### MTTR (mean restore duration)
 
+Successful builds with no earlier failure push `0`; leave them out:
+
 ```promql
-avg(
-  restore_timestamp_seconds{env="production"}
-  - on(version) deployment_timestamp_seconds{env="production"}
-)
+avg(mttr_seconds > 0 and on(job, instance) (push_time_seconds{job="jenkins"} > time() - 2592000))
 ```
 
 ---
 
-## Grafana Dashboard Sketch
+## Grafana Dashboard
 
-Import the "DORA Metrics" community dashboard (ID **10128**) and point it at
-your Prometheus data source.  Override the label selectors to match the
-`env="production"` label used above.
+`monitoring/grafana/dashboards/dora.yaml` is imported by the Grafana sidecar
+(Argo CD app `grafana-dashboards`). Community DORA dashboards expect different
+metric shapes and will not work against these gauges unchanged.
 
 ---
 
@@ -144,4 +114,5 @@ your Prometheus data source.  Override the label selectors to match the
 - [DORA State of DevOps Report](https://dora.dev/research/)
 - [Prometheus Pushgateway](https://github.com/prometheus/pushgateway)
 - `monitoring/pushgateway.yaml` — Kubernetes Deployment + Service
-- `monitoring/prometheus.yaml` — scrape config comment
+- `argocd/bootstrap/apps/kube-prometheus-stack.yaml` — the `pushgateway` scrape job
+- `monitoring/grafana/dashboards/dora.yaml` — the DORA dashboard

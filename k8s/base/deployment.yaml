@@ -92,12 +92,17 @@ spec:
               port: 3000
             initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 2
           readinessProbe:
             httpGet:
               path: /health/ready
               port: 3000
             initialDelaySeconds: 5
             periodSeconds: 5
+            # /health/ready waits up to ~1.5 s for its database check; the
+            # default 1 s timeout would mark a healthy pod unready whenever
+            # the database is slightly slow.
+            timeoutSeconds: 3
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

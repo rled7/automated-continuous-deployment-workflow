@@ -22,7 +22,7 @@ FROM jenkins/inbound-agent:latest-trixie-jdk17
 USER root
 
 # ── Tool versions (bumped via Dependabot/Renovate when ready) ────────────────
-ENV NODE_VERSION=20.18.1 \
+ENV NODE_VERSION=24.21.0 \
     KUBECTL_VERSION=v1.31.4 \
     KUSTOMIZE_VERSION=v5.5.0 \
     KUBECONFORM_VERSION=v0.6.7 \
@@ -30,9 +30,10 @@ ENV NODE_VERSION=20.18.1 \
     SYFT_VERSION=v1.18.1 \
     COSIGN_VERSION=v2.4.1 \
     GRYPE_VERSION=v0.85.0 \
-    DEPENDENCY_CHECK_VERSION=11.1.1 \
+    DEPENDENCY_CHECK_VERSION=12.2.2 \
     K6_VERSION=v0.55.0 \
     GH_VERSION=2.63.2 \
+    PLAYWRIGHT_VERSION=1.64.0 \
     SONAR_SCANNER_VERSION=6.2.1.4610
 
 # ── Base packages ────────────────────────────────────────────────────────────
@@ -86,8 +87,10 @@ RUN curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
 # otherwise. The agent runs as jenkins, so that directory must be jenkins's:
 # otherwise every scan fails with "Unable to connect to the dependency-check
 # database".
+# 11.x cannot store some current NVD records (reference URLs longer than its
+# 1000-character column). Releases since 12 are published on Maven Central.
 RUN curl -fsSLo /tmp/dc.zip \
-        "https://github.com/jeremylong/DependencyCheck/releases/download/v${DEPENDENCY_CHECK_VERSION}/dependency-check-${DEPENDENCY_CHECK_VERSION}-release.zip" \
+        "https://repo1.maven.org/maven2/org/owasp/dependency-check-cli/${DEPENDENCY_CHECK_VERSION}/dependency-check-cli-${DEPENDENCY_CHECK_VERSION}-release.zip" \
     && unzip -q /tmp/dc.zip -d /opt \
     && ln -s /opt/dependency-check/bin/dependency-check.sh /usr/local/bin/dependency-check.sh \
     && mkdir -p /opt/dependency-check/data \
@@ -108,6 +111,18 @@ RUN curl -fsSLo /tmp/sonar.zip \
 # ── GitHub CLI (used by Release stage) ───────────────────────────────────────
 RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
         | tar -xzf - --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_amd64/bin/gh"
+
+# ── Playwright's Chromium (E2E Tests stage) ──────────────────────────────────
+# The browser's system libraries come from apt, which needs root, and the
+# pipeline runs as jenkins: they are installed here, with the browser for the
+# Playwright version app/package-lock.json pins (keep PLAYWRIGHT_VERSION in
+# step). If the app moves ahead, the stage downloads the newer browser into
+# PLAYWRIGHT_BROWSERS_PATH as jenkins; the libraries rarely change. Only the
+# headless shell, which headless runs use (the full browser adds ~400 MB).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps --only-shell chromium \
+    && chown -R jenkins:jenkins /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
 
 # ── Sanity check (fails the build if any tool is missing from PATH) ─────────
 RUN node --version \

@@ -26,3 +26,6 @@ reports/
 .claude/*
 !.claude/settings.json
 !.claude/hooks/
+
+# Temporary overlays of scripts/pr-preview-up.sh
+k8s/overlays/.preview-*/

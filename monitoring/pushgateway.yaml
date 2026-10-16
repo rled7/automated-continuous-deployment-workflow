@@ -1,18 +1,19 @@
 ---
 # ─── Prometheus Pushgateway ────────────────────────────────────────────────────
 # The Pushgateway receives short-lived metrics pushed from CI/CD jobs (Jenkinsfile
-# stages) that cannot be scraped directly.  DORA metrics are the primary use-case:
-#   - deployment_timestamp_seconds{env, version}  → deployment frequency / MTTR
-#   - deployment_result{env, version, result}     → change failure rate
-#   - lead_time_seconds{env, version}             → lead time for changes
+# stages) that cannot be scraped directly.  DORA metrics are the primary use-case.
+# pushDoraMetric() in the Jenkinsfile pushes one group per production build
+# (job="jenkins", instance="my-app-<BUILD_NUMBER>"), each metric a gauge:
+#   - deployment_frequency_total 1  → successful deploy
+#   - change_failure_total 1        → failed deploy
+#   - lead_time_seconds             → commit to deploy, in seconds
+#   - mttr_seconds                  → last failure to this success (0 if none)
+# See docs/dora-metrics.md for the queries.
 #
-# Prometheus scrapes the Pushgateway at /metrics like any other target.
-# Add the following job to prometheus.yml scrape_configs to collect these metrics:
-#
-#   - job_name: 'pushgateway'
-#     honor_labels: true
-#     static_configs:
-#       - targets: ['pushgateway:9091']
+# Prometheus scrapes the Pushgateway at /metrics like any other target: the
+# `pushgateway` job in kube-prometheus-stack's additionalScrapeConfigs
+# (argocd/bootstrap/apps/kube-prometheus-stack.yaml) targets this Service,
+# pushgateway.monitoring.svc.cluster.local:9091, with honor_labels: true.
 
 apiVersion: apps/v1
 kind: Deployment

@@ -17,11 +17,17 @@ spec:
     server: https://kubernetes.default.svc
     namespace: staging
 
+  # Manual sync only. Jenkins deploys the app (migrations, `kustomize edit
+  # set image` + a version label, `kubectl apply -k`, rollback on failure);
+  # git holds my-app:latest and no version label. Auto-sync with selfHeal
+  # would revert every Jenkins deploy and rollback to that, which the Kyverno
+  # require-labels policy rejects anyway. Argo CD shows the diff against git;
+  # a manual sync is for non-image changes. See argocd/README.md.
   syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
     syncOptions:
+      # A sync keeps the live values of the fields ignored below (the image
+      # and version label Jenkins set) instead of writing git's.
+      - RespectIgnoreDifferences=true
       - CreateNamespace=true
       - PrunePropagationPolicy=foreground
       - PruneLast=true
@@ -31,3 +37,26 @@ spec:
         duration: 30s
         factor: 2
         maxDuration: 5m
+
+  # Set by Jenkins at deploy time, not in git: the image and the version
+  # label (`kustomize edit add label version:<tag> --include-templates` puts
+  # it on every object and pod template). Replicas belong to the HPA.
+  ignoreDifferences:
+    - group: "*"
+      kind: "*"
+      jqPathExpressions:
+        - .metadata.labels.version
+    - group: apps
+      kind: Deployment
+      jqPathExpressions:
+        - .spec.template.spec.containers[].image
+        - .spec.template.metadata.labels.version
+      jsonPointers:
+        - /spec/replicas
+    - group: argoproj.io
+      kind: Rollout
+      jqPathExpressions:
+        - .spec.template.spec.containers[].image
+        - .spec.template.metadata.labels.version
+      jsonPointers:
+        - /spec/replicas

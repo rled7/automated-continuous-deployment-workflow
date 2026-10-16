@@ -87,15 +87,24 @@ jobs:
             "https://repo1.maven.org/maven2/org/owasp/dependency-check-cli/$v/dependency-check-cli-$v-release.zip"
           unzip -q "$RUNNER_TEMP/dc.zip" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/dependency-check/bin" >> "$GITHUB_PATH"
+      # Without the key (forks; Dependabot, unless it has the secret too) the
+      # newest complete copy is used as it is; the scan's age limit decides
+      # whether it is recent enough.
       - name: Update from NVD
+        id: update
         if: steps.today.outputs.cache-hit != 'true'
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
+          if [ -z "$NVD_API_KEY" ] && [ -s "$DC_DATA/update-complete" ]; then
+            echo "::warning::NVD_API_KEY is not available: using the cached database from $(date -u -d @"$(cat "$DC_DATA/update-complete")" +%F) without an update"
+            exit 0
+          fi
           scripts/dependency-check-db-update.sh "$DC_DATA" 2>&1 | grep -vE '^\s+at '
           du -sh "$DC_DATA"
+          echo "updated=true" >> "$GITHUB_OUTPUT"
       - name: Save
-        if: steps.today.outputs.cache-hit != 'true'
+        if: steps.update.outputs.updated == 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ env.DC_DATA }}

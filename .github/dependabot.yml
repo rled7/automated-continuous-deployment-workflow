@@ -1,3 +1,12 @@
+# Dependabot opens pull requests; it never merges them. When its pull
+# requests sit unanswered (one open for more than 90 days with no merge, close
+# or @dependabot command), GitHub pauses it: no new pull requests, no rebases.
+# It resumes on any of those actions or a change to this file.
+#
+# Its pull requests run the verify workflow without the repository's Actions
+# secrets: the nvd-db job needs NVD_API_KEY as a Dependabot secret too
+# (Settings → Secrets and variables → Dependabot), or it falls back to the
+# newest cached database.
 version: 2
 
 updates:
@@ -23,24 +32,31 @@ updates:
           - minor
           - patch
 
-  # Docker base-image updates
+  # Docker base images: the app, the Jenkins controller and the agent.
   - package-ecosystem: docker
-    directory: /docker
+    directories:
+      - /docker
+      - /docker/jenkins
+      - /docker/jenkins-agent
     schedule:
       interval: weekly
+    ignore:
+      # Node majors are chosen by hand: the app runs on an LTS line, and every
+      # other major (25, 27, ...) is never one.
+      - dependency-name: node
+        update-types: [version-update:semver-major]
     groups:
       minor-and-patch:
         update-types:
           - minor
           - patch
 
-  # GitHub Actions workflow dependencies
+  # GitHub Actions workflow dependencies, majors included, in one pull
+  # request: the verify workflow tests them together.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     groups:
-      minor-and-patch:
-        update-types:
-          - minor
-          - patch
+      actions:
+        patterns: ["*"]

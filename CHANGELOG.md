@@ -41,6 +41,10 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 ### Added
 - `docs/go-live.md` — **Go-live runbook** for one VM with k3s: what to set up, in order, with a check for each step. It also lists what the repo still lacks for a lasting cluster: persistent Postgres and Redis, Jenkins and SonarQube manifests for real use, a multi-arch agent image, a bootstrap script.
 
+### Fixed — dependency updates
+- `.github/dependabot.yml` — **Dependabot was paused**, not broken: none of its 22 pull requests was ever merged, so GitHub stopped it after one sat open for 90 days (its last pull request is from 5 August). Changing this file resumes it. Its Docker updates now cover the Jenkins controller and agent images too; Node majors are left to a deliberate choice of LTS line (it proposed Node 25, a non-LTS release); and every GitHub Actions bump, majors included, arrives as one pull request (the actions still run on the deprecated Node 20).
+- `.github/workflows/verify.yml` — Pull requests without the NVD key (Dependabot's, unless the key is also a Dependabot secret; forks) use the newest complete cached database instead of failing in `nvd-db`; the scan's age limit still applies.
+
 ### Fixed — security
 - `Jenkinsfile`, `scripts/dependency-check-db-update.sh` — **The Dependency Vulnerability Scan no longer passes against an incomplete or stale database.** An update that crashed partway left a partial database, and the scan, which reads it without updating (`--noupdate`), reported SUCCESS against it: the first parallel CI run did exactly that with 12–29% of NVD. The update script now writes `update-complete` when an update finishes (and removes it when one starts); the scan stage fails without it, or when it is older than `DEPENDENCY_CHECK_MAX_AGE_DAYS` (default 3). Builds that update their own copy go through the same script and the same check.
 - `.github/workflows/verify.yml` — The CI cache could hold such a partial database (any job saved any copy over 1 MB). Only the `nvd-db` job saves now, after a finished update, under new `dependency-check-v2-` keys.

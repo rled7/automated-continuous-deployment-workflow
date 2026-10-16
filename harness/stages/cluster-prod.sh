@@ -165,10 +165,15 @@ promql() {
 
 # About 4 requests a second to GET /api/items, spread by the Service over the
 # stable and canary pods (well under the per-client rate limit on each pod).
+# A new connection per request (agent: false): the Service balances
+# connections, not requests, so a kept-alive connection would send every
+# request to one pod and the canary would see only its probes.
 traffic_up() {
   kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f - >/dev/null &&
     kubectl -n ingress-nginx run traffic --image="$DEPLOY_IMAGE" --restart=Never --command -- \
-      node -e 'setInterval(() => fetch("http://my-app.production.svc.cluster.local/api/items").catch(() => {}), 250)' >/dev/null &&
+      node -e 'const http = require("http");
+        setInterval(() => http.get({host: "my-app.production.svc.cluster.local", path: "/api/items", agent: false},
+          (res) => res.resume()).on("error", () => {}), 250)' >/dev/null &&
     kubectl -n ingress-nginx wait --for=condition=Ready pod/traffic --timeout=120s
 }
 step "traffic to the app from a stand-in for the ingress controller" traffic_up || finish_stage
@@ -224,6 +229,15 @@ canary_scraped() {
   [ "${n:-0}" -gt 0 ]
 }
 step "Prometheus scraped the new pods with their template hash" canary_scraped
+# The canary served the generated traffic, not only its probes: otherwise a
+# passing analysis proves nothing.
+canary_served() {
+  local n
+  n=$(promql "sum(http_request_duration_ms_count{namespace=\"production\",rollouts_pod_template_hash=\"$good_hash\",route=\"/api/items\"})")
+  echo "GET /api/items requests on the new pods: ${n:-none}"
+  [ -n "$n" ] && awk -v n="$n" 'BEGIN { exit !(n > 0) }'
+}
+step "the new pods served real traffic during the canary" canary_served
 on_image() { local got; got=$(rollout_image); log "rollout image: $got"; [ "$got" = "$1" ]; }
 step "running the healthy release" on_image "$good_image"
 smoke_through_service "$NS" 13002 "healthy release"
@@ -266,6 +280,10 @@ bad_hash=$(kubectl -n "$NS" get rs -l app=my-app -o json |
 canary_failed_on_errors() {
   local runs
   runs=$(analysis_runs "$bad_hash"); echo "$runs"
+  echo "requests on the broken pods by route and status:"
+  kubectl -n monitoring exec deploy/prometheus -- wget -qO- \
+    "http://127.0.0.1:9090/api/v1/query?query=$(jq -rn --arg q "sum by (route, status_code) (http_request_duration_ms_count{rollouts_pod_template_hash=\"$bad_hash\"})" '$q|@uri')" |
+    jq -r '.data.result[] | "  \(.metric.route) \(.metric.status_code): \(.value[1])"' 2>/dev/null
   # Failed (not Error): a measured success rate below the 0.99 threshold.
   grep -q '^Failed ' <<<"$runs"
 }

@@ -692,23 +692,33 @@ EOF
                 buildingTag()
                 tag pattern: "v\\d+\\.\\d+\\.\\d+", comparator: "REGEXP"
             }
-            steps {
-                // Tag the image this build pushed with the SemVer tag, in the
-                // registry: buildx pushed a multi-arch manifest list that was
-                // never loaded into the local daemon, so `docker tag` has nothing
-                // to tag. imagetools copies the whole list, every platform.
-                sh 'docker buildx imagetools create -t "$DOCKER_REGISTRY/$APP_NAME:$TAG_NAME" "$FULL_IMAGE"'
-                // Create a GitHub Release via gh CLI.
-                // gh requires a GitHub token; wrap in withCredentials so the
-                // token is available as GH_TOKEN without leaking into the log.
-                // github-credentials is a username + PAT (the branch source
-                // needs that type), so read the token as its password.
-                withCredentials([usernamePassword(credentialsId: 'github-credentials', usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
-                    sh '''
-                        gh release create ${TAG_NAME} \
-                          --title "Release ${TAG_NAME}" \
-                          --notes "Automated release for ${TAG_NAME}. See CHANGELOG.md for details."
-                    '''
+            // Two steps, so a failure says which half broke: the image in the
+            // registry, or the release page on GitHub.
+            stages {
+                stage('Tag the image') {
+                    steps {
+                        // Tag the image this build pushed with the SemVer tag, in
+                        // the registry: buildx pushed a multi-arch manifest list
+                        // that was never loaded into the local daemon, so `docker
+                        // tag` has nothing to tag. imagetools copies the whole
+                        // list, every platform.
+                        sh 'docker buildx imagetools create -t "$DOCKER_REGISTRY/$APP_NAME:$TAG_NAME" "$FULL_IMAGE"'
+                    }
+                }
+                stage('GitHub release') {
+                    steps {
+                        // gh requires a GitHub token; wrap in withCredentials so the
+                        // token is available as GH_TOKEN without leaking into the log.
+                        // github-credentials is a username + PAT (the branch source
+                        // needs that type), so read the token as its password.
+                        withCredentials([usernamePassword(credentialsId: 'github-credentials', usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
+                            sh '''
+                                gh release create ${TAG_NAME} \\
+                                  --title "Release ${TAG_NAME}" \\
+                                  --notes "Automated release for ${TAG_NAME}. See CHANGELOG.md for details."
+                            '''
+                        }
+                    }
                 }
             }
         }

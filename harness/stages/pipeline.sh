@@ -29,6 +29,7 @@ source "$HARNESS_DIR/lib/kind.sh"
 
 CLUSTER=harness-pipeline
 BRANCH="${PIPELINE_BRANCH:-develop}"
+RELEASE_TAG=v0.0.1                 # the tag the served repository carries (Release)
 REGISTRY=kind-registry:5000        # how the cluster and the pipeline address it
 HOST_REGISTRY=localhost:5001       # how this host pushes to it
 JENKINS_IMAGE="$REGISTRY/jenkins-cicd:verify"
@@ -243,6 +244,8 @@ git_up() {
     git -C "$tree" -c user.name=harness -c user.email=harness@verify.local \
       commit -q -m "$(git -C "$REPO_ROOT" log -1 --format=%s 2>/dev/null || echo 'working tree')" &&
     git -C "$tree" branch -f main &&
+    git -C "$tree" -c user.name=harness -c user.email=harness@verify.local \
+      tag -a "$RELEASE_TAG" -m "harness release" &&
     git clone -q --bare "$tree" "$bare" &&
     git -C "$bare" update-server-info || return 1
   chmod -R a+rX "$work/srv"
@@ -409,12 +412,13 @@ create_job() {
 import jenkins.branch.*
 import jenkins.plugins.git.GitSCMSource
 import jenkins.plugins.git.traits.BranchDiscoveryTrait
+import jenkins.plugins.git.traits.TagDiscoveryTrait
 import org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject
 def j = jenkins.model.Jenkins.get()
 def mb = j.createProject(WorkflowMultiBranchProject, 'verify')
 def src = new GitSCMSource('$GIT_URL')
 src.id = 'verify'
-src.traits = [new BranchDiscoveryTrait()]
+src.traits = [new BranchDiscoveryTrait(), new TagDiscoveryTrait()]
 def bs = new BranchSource(src)
 bs.strategy = new DefaultBranchPropertyStrategy([new NoTriggerBranchProperty()] as BranchProperty[])
 mb.sourcesList.add(bs)
@@ -489,7 +493,7 @@ build_done() {
 # stage API reports a stage skipped after a failure as FAILED; the console
 # says which ones were skipped and why.
 record_stages() {
-  local build=$1 prefix=$2 describe skipped
+  local build=$1 prefix=$2 expected=${3:-} describe skipped
   describe=$(jenkins_get "$build/wfapi/describe") || return 1
   skipped=$(jenkins_get "$build/consoleText" | sed -n 's/^.*Stage "\(.*\)" skipped due to \(.*\)$/\1\t\2/p')
   jq -c '.stages[] | {name, status, ms: .durationMillis, id}' <<<"$describe" | while read -r s; do
@@ -499,9 +503,17 @@ record_stages() {
     [ -n "$why" ] && status="SKIPPED ($why)"
     case $status in
       SUCCESS) st=pass ;;
+      # expected: a regex of stage names allowed to fail (a nested stage's
+      # parent fails with it).
+      FAILED) if [ -n "$expected" ] && [[ $name =~ ^($expected)$ ]]; then
+                st=skip; status="FAILED as expected here (no GitHub)"
+              else st=fail; fi ;;
       NOT_EXECUTED|SKIPPED*) st=skip ;;
       # A stage's output lives on its step nodes.
-      *) st=fail
+      *) st=fail ;;
+    esac
+    case $st in
+      fail)
          tail=$(for n in $(jenkins_get "$build/execution/node/$id/wfapi/describe" | jq -r '.stageFlowNodes[]?.id'); do
                   jenkins_get "$build/execution/node/$n/wfapi/log" | jq -r '.text // ""'
                 done | sed 's/<[^>]*>//g' | tail -n "$STEP_TAIL_LINES") ;;
@@ -529,7 +541,7 @@ approve_inputs() {
 
 # pipeline_build BRANCH LABEL — build BRANCH once and record every stage.
 pipeline_build() {
-  local branch=$1 label=$2
+  local branch=$1 label=$2 expected=${3:-}
   JOB="/job/verify/job/$branch"; BUILD="$JOB/1"
   step "branch $branch discovered" branch_indexed || return 1
   step "start build of $branch" run_build || return 1
@@ -540,8 +552,14 @@ pipeline_build() {
   fi
   step "build of $branch finishes" build_done
   console > "$RESULTS_DIR/logs/pipeline-console-$branch.log"
-  [ -n "$(record_stages "$BUILD" "$label")" ] && STEP_FAILURES=$((STEP_FAILURES + 1))
-  step "build of $branch: result is SUCCESS" result_success
+  [ -n "$(record_stages "$BUILD" "$label" "$expected")" ] && STEP_FAILURES=$((STEP_FAILURES + 1))
+  if [ -z "$expected" ]; then
+    step "build of $branch: result is SUCCESS" result_success
+  else
+    # Failed, and only in the expected stage (record_stages counts any other).
+    only_expected_failed() { build_json | jq -e '.result == "FAILURE"' >/dev/null; }
+    step "build of $branch: failed only where expected ($expected)" only_expected_failed
+  fi
 }
 
 step "dependency-check database up to date (started with the cluster)" dc_updated
@@ -569,6 +587,29 @@ if [ "$MAIN_BUILD" = 1 ]; then
     [ "$(grep -cE '^(deployment_frequency_total|lead_time_seconds|mttr_seconds)\{.*job="jenkins"' <<<"$metrics")" -eq 3 ]
   }
   step "DORA metrics reached the Pushgateway" dora_pushed
+fi
+
+# ── A release: a build of the tag runs Release ──────────────────────────────
+# Tag the image must pass. GitHub release needs GitHub, which the harness does
+# not have, so it is expected to fail (with its parent stage, Release) and
+# nothing else may. PIPELINE_RELEASE=0 skips it.
+if [ "${PIPELINE_RELEASE:-1}" = 1 ]; then
+  pipeline_build "$RELEASE_TAG" "Jenkins stage (tag)" "Release|GitHub release"
+  # The registry's digest for a tag (a multi-arch manifest list).
+  manifest_digest() {
+    curl -sI -H 'Accept: application/vnd.oci.image.index.v1+json' \
+      -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+      "http://$HOST_REGISTRY/v2/my-app/manifests/$1" |
+      tr -d '\r' | awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}'
+  }
+  release_tagged() {
+    local short want got
+    short=$(git -C "$work/tree" rev-parse --short HEAD)
+    want=$(manifest_digest "1-$short"); got=$(manifest_digest "$RELEASE_TAG")
+    echo "my-app:1-$short = ${want:-missing}; my-app:$RELEASE_TAG = ${got:-missing}"
+    [ -n "$want" ] && [ "$want" = "$got" ]
+  }
+  step "the registry's $RELEASE_TAG is the image the tag build pushed" release_tagged
 fi
 
 # ── Every way of asking for an agent, run for real ──────────────────────────

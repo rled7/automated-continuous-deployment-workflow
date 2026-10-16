@@ -851,10 +851,12 @@ def runSmokeTests(String env) {
     // STAGING_URL / PRODUCTION_URL: where the agents reach each environment
     // (Jenkins global environment, from .env).
     def baseUrl = (env == 'production') ? PRODUCTION_URL : STAGING_URL
+    // Production: read-only (SMOKE_WRITES=false), so deploys leave no test rows.
+    def writes = (env == 'production') ? 'false' : 'true'
     dir('tests') {
         sh """
             npm ci --prefer-offline --no-audit --no-fund
-            BASE_URL=${baseUrl} \
+            BASE_URL=${baseUrl} SMOKE_WRITES=${writes} \
             JEST_JUNIT_OUTPUT_DIR=reports JEST_JUNIT_OUTPUT_NAME=junit-smoke-${env}.xml \
             npm run test:smoke -- \
               --reporters=default \

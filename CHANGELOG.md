@@ -38,6 +38,10 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 **Date:** 2026-10-16
 **Scope:** Items left open after Build 028.
 
+### Changed
+- `.github/workflows/verify.yml`, `harness/stages/pipeline.sh` — **The pipeline group is three parallel jobs:** `pipeline-develop` (the develop build and the agent-forms job), `pipeline-main` (Deploy → Production) and `pipeline-tag` (Release), each on its own Jenkins. They ran one after another on one Jenkins. `PIPELINE_BUILDS` picks the builds; by default the harness still runs all four. Every pipeline job gets `NVD_API_KEY`, including a manual run of the `pipeline` stage.
+- `harness/stages/pipeline.sh` — `PIPELINE_BRANCH=main` works: the production namespace is set up for it, and the served repository no longer tries to re-point the branch it is on.
+
 ### Fixed
 - `app/src/lib/rate-limit-store.js`, `app/src/server.js` — **The rate limit is per client across all replicas.** It was counted in each pod's memory, so the real limit was `RATE_LIMIT_MAX` × replicas (up to 20 × in production with the HPA). It is now counted in Redis (one `MULTI`: `SET NX PX`, `INCR`, `PTTL`). While Redis is not connected, or a command fails, the pod counts in memory instead, so requests never wait on a Redis that is down. `rate-limit-redis` was not used: with Redis down at startup it leaves an unhandled rejection, which ends the process on Node 24. Checked against a real Redis: two clients share one count, and an outage falls back immediately and recovers.
 - `monitoring/grafana/dashboards/pipeline.yaml` — **The pipeline dashboard shows data.** Its queries used metric names the Jenkins Prometheus plugin does not export. They now use `default_jenkins_builds_*` with the `jenkins_job` label, read from a running Jenkins.

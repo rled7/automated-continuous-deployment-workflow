@@ -95,6 +95,10 @@ jobs:
       STAGES: ${{ inputs.stages || matrix.stages }}
       PIPELINE_BRANCH: ${{ inputs.pipeline_branch || 'develop' }}
       PIPELINE_BUILDS: ${{ matrix.builds }}   # empty (a manual run): all of them
+      # Only one job updates dependency-check's database from NVD: the pipeline
+      # jobs share one NVD key, which NVD throttles when several update at once.
+      # The others scan the cached copy as it is.
+      DC_UPDATE: ${{ (!matrix.builds || contains(matrix.builds, 'branch')) && '1' || '0' }}
       HARNESS_DOCKER_CACHE: gha
       COMMON_INPUTS: .github/workflows/verify.yml harness/verify.sh harness/lib
       # For the Dependency Vulnerability Scan (repo secret; empty on forks).
@@ -208,12 +212,14 @@ jobs:
           # shellcheck disable=SC2086
           TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" harness/verify.sh $STAGES
 
-      # Saved even when the build fails later on: the scan has updated it.
+      # Saved even when the build fails later on: the update has run. Only by
+      # the job that updated it (DC_UPDATE), so a copy that was not updated
+      # never takes the day's key.
       # Agent pods write it as another user; stale lock files would make the
       # next scan wait.
       - name: Prepare the dependency-check database for the cache
         id: dc-prepare
-        if: always() && steps.dc-restore.outcome == 'success' && steps.dc-restore.outputs.cache-hit != 'true'
+        if: always() && env.DC_UPDATE == '1' && steps.dc-restore.outcome == 'success' && steps.dc-restore.outputs.cache-hit != 'true'
         run: |
           dir=harness/.cache/dependency-check
           if [ -n "$(sudo find "$dir" -name 'odc.mv.db' -size +1M 2>/dev/null)" ]; then

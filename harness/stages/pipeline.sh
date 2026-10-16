@@ -146,9 +146,20 @@ step "build docker/jenkins-agent/Dockerfile" \
 # then reads it without downloading anything (--noupdate, since the pod
 # template sets DEPENDENCY_CHECK_DATA). Needs an NVD_API_KEY NVD accepts.
 # Runs while the cluster and Jenkins come up.
-( timeout 2400 docker run --rm -e NVD_API_KEY -v "$DC_DATA:/data" -v "$REPO_ROOT/scripts:/scripts:ro" \
-    --entrypoint bash harness-agent:local /scripts/dependency-check-db-update.sh /data > "$work/dc-update.log" 2>&1
-  echo $? > "$work/dc-update.rc" ) &
+#
+# DC_UPDATE=0 uses the database as it is, when there is one: parallel CI jobs
+# share one NVD key, and NVD throttles a key that several updates use at once,
+# so only one of them updates.
+dc_have_db() { [ -n "$(find "$DC_DATA" -name odc.mv.db -size +1M 2>/dev/null)" ]; }
+if [ "${DC_UPDATE:-1}" = 0 ] && dc_have_db; then
+  ( echo "DC_UPDATE=0: using the database in $DC_DATA as it is, without an update from NVD"
+    echo 0 > "$work/dc-update.rc" ) > "$work/dc-update.log" &
+else
+  [ "${DC_UPDATE:-1}" = 0 ] && log "DC_UPDATE=0, but there is no database in $DC_DATA yet: updating it"
+  ( timeout 2400 docker run --rm -e NVD_API_KEY -v "$DC_DATA:/data" -v "$REPO_ROOT/scripts:/scripts:ro" \
+      --entrypoint bash harness-agent:local /scripts/dependency-check-db-update.sh /data > "$work/dc-update.log" 2>&1
+    echo $? > "$work/dc-update.rc" ) &
+fi
 dc_pid=$!
 
 cluster_ready() { wait "$cluster_pid"; cat "$work/cluster.log"; return "$(cat "$work/cluster.rc" 2>/dev/null || echo 1)"; }

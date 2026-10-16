@@ -1,0 +1,12 @@
+# Staging runs a single replica (deployment-patch.yaml, HPA minReplicas 1).
+# The base PDB's minAvailable: 1 would then allow zero voluntary disruptions,
+# so draining or upgrading the node that runs it blocks forever. Allow one pod
+# down instead: a drain evicts it and the Deployment reschedules it elsewhere.
+# minAvailable: null removes the base value (a PDB takes one or the other).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-app-pdb
+spec:
+  minAvailable: null
+  maxUnavailable: 1

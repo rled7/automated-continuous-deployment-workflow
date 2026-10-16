@@ -4,7 +4,7 @@
 # the image is built with `docker buildx build` (BuildKit is the default backend).
 # For multi-arch builds (linux/amd64,linux/arm64) each platform gets its own
 # cache namespace automatically via the platform-specific build context.
-FROM node:20-alpine AS deps
+FROM node:24-alpine AS deps
 WORKDIR /app
 
 # Install only production dependencies first (layer cache optimization)
@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --ignore-scripts
 
 # ─── Stage 2: Build ───────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
@@ -27,18 +27,25 @@ COPY app/ .
 RUN npm run build
 
 # ─── Stage 3: Production Image ────────────────────────────────────────────────
-FROM node:20-alpine AS runner
+FROM node:24-alpine AS runner
 WORKDIR /app
 
-# Security: non-root user
-RUN addgroup --system --gid 1001 appgroup && \
+# Security: non-root user. Alpine's security updates, and no package managers:
+# the app runs with node alone (migrations too: node_modules/knex/bin/cli.js),
+# and the npm, Yarn and Corepack bundled with the base image only add code
+# with known vulnerabilities for the image scans to find.
+RUN apk upgrade --no-cache && \
+    rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+           /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-* && \
+    addgroup --system --gid 1001 appgroup && \
     adduser  --system --uid 1001 appuser
 
 # Copy only what's needed at runtime
 COPY --from=deps    /tmp/prod_modules     ./node_modules
 COPY --from=builder /app/dist             ./dist
 COPY --from=builder /app/package.json     ./package.json
-# Migrations run from this image (runMigrations() in the Jenkinsfile)
+# Migrations run from this image (runMigrations() in the Jenkinsfile); the app
+# also imports knexfile.js (lib/db.js shares its TLS options)
 COPY --from=builder /app/knexfile.js      ./knexfile.js
 COPY --from=builder /app/migrations       ./migrations
 
@@ -54,4 +61,6 @@ EXPOSE 3000
 ENV NODE_ENV=production \
     PORT=3000
 
-CMD ["node", "dist/server.js"]
+# instrumentation.js registers OpenTelemetry's ESM loader hook and starts the
+# SDK before the app is imported (npm start runs the same command)
+CMD ["node", "--import", "./dist/instrumentation.js", "dist/server.js"]

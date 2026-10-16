@@ -1,0 +1,45 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metrics-server
+  namespace: argocd
+  annotations:
+    # Wave -10: the app's HorizontalPodAutoscalers (k8s/base/hpa.yaml and the
+    # overlays' patches) read CPU/memory from the resource metrics API, which
+    # only metrics-server serves; without it they report <unknown> and never
+    # scale. Install it before anything that depends on it.
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://kubernetes-sigs.github.io/metrics-server/
+    chart: metrics-server
+    targetRevision: "3.12.2"
+    helm:
+      valuesObject:
+        # ── kind / local cluster ──────────────────────────────────────────
+        # kind's kubelets serve self-signed certificates that metrics-server
+        # cannot verify. Remove this on a cloud cluster with properly signed
+        # kubelet certificates. Managed clusters that already ship
+        # metrics-server (GKE, AKS) do not need this Application at all.
+        args:
+          - --kubelet-insecure-tls
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

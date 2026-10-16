@@ -1,3 +1,4 @@
+import { STATUS_CODES } from 'http';
 import { ZodError } from 'zod';
 import logger from '../lib/logger.js';
 
@@ -6,6 +7,8 @@ import logger from '../lib/logger.js';
  * - ZodError → 400 with issues list
  * - err.statusCode → that status
  * - otherwise → 500
+ * 5xx responses say only "Internal Server Error": the message of an
+ * unexpected error (a driver error, say) is logged, not sent to the client.
  */
 // eslint-disable-next-line no-unused-vars
 const errorHandler = (err, req, res, next) => {
@@ -27,7 +30,7 @@ const errorHandler = (err, req, res, next) => {
 
   return res.status(status).json({
     error: {
-      message: err.message || 'Internal Server Error',
+      message: status >= 500 ? 'Internal Server Error' : err.message || STATUS_CODES[status],
       requestId,
     },
   });

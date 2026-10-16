@@ -1,0 +1,55 @@
+# SonarQube for the pipeline stage: the server jenkins.yaml names
+# (http://sonarqube:9000, resolved inside namespace jenkins), so the
+# SonarQube Analysis stage and its quality gate run for real. Data is thrown
+# away with the cluster.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sonarqube
+  namespace: jenkins
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: sonarqube}
+  template:
+    metadata:
+      labels: {app: sonarqube}
+    spec:
+      containers:
+        - name: sonarqube
+          image: sonarqube:10.7.0-community
+          ports:
+            - containerPort: 9000
+          env:
+            # Embedded Elasticsearch without the host's vm.max_map_count check.
+            - {name: SONAR_ES_BOOTSTRAP_CHECKS_DISABLE, value: "true"}
+            - {name: SONAR_SEARCH_JAVAADDITIONALOPTS, value: "-Dnode.store.allow_mmap=false"}
+          readinessProbe:
+            httpGet: {path: /api/system/status, port: 9000}
+            periodSeconds: 5
+            failureThreshold: 120
+          resources:
+            requests: {memory: 2Gi}
+            limits: {memory: 4Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sonarqube
+  namespace: jenkins
+spec:
+  selector: {app: sonarqube}
+  ports:
+    - {port: 9000, targetPort: 9000}
+---
+# Reached from the host to create the token and webhook.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sonarqube-harness
+  namespace: jenkins
+spec:
+  type: NodePort
+  selector: {app: sonarqube}
+  ports:
+    - {port: 9000, targetPort: 9000, nodePort: 30090}

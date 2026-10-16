@@ -205,7 +205,9 @@ accidental `terraform destroy`, etc.).
 2. Install Argo CD:
    ```bash
    kubectl create namespace argocd
-   kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+   # Server-side, pinned to the version scripts/setup.sh installs.
+   kubectl apply --server-side --force-conflicts -n argocd \
+     -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.5/manifests/install.yaml
    ```
 3. Apply the Argo CD bootstrap App-of-Apps:
    ```bash

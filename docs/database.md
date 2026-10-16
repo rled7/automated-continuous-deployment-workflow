@@ -136,7 +136,8 @@ Then roll back the application image.
 | `DB_USER`     | No       | `appuser` | Postgres username                |
 | `DB_PASSWORD` | Yes*     | —         | Postgres password                |
 | `DB_NAME`     | No       | `appdb`   | Database name                    |
-| `DB_SSL`      | No       | `false`   | Set `true` to enable TLS         |
+| `DB_SSL`      | No       | `false`   | Set `true` to enable TLS (server certificate verified); `true` in production |
+| `DB_SSL_CA`   | No       | —         | Path to a PEM CA bundle to verify the server against, with `DB_SSL=true` |
 | `DB_FAKE`     | No       | `false`   | Set `1` for in-memory test store |
 
 *Required in staging/production. For local dev with Docker Compose these are
@@ -163,3 +164,56 @@ default `GET /api/items` query (ORDER BY created_at DESC LIMIT 100).
 
 `DB_PORT`, `DB_USER`, `DB_NAME` are non-sensitive and live in the per-overlay
 ConfigMap (`k8s/overlays/{production,staging}/configmap-patch.yaml`).
+
+## Production: TLS and where the database lives
+
+Nothing in this repo deploys Postgres or Redis for staging or production;
+they are expected to be managed services (e.g. RDS, ElastiCache) or installed
+separately. Two things have to match that choice:
+
+**TLS.** The production ConfigMap sets `DB_SSL: "true"`: the app and the
+migration pod connect over TLS and verify the server certificate. If the
+database's CA is not in Node's default bundle (Amazon RDS, most self-signed
+setups), set `DB_SSL_CA` to the path of a PEM CA bundle inside the pod, e.g.
+the RDS global bundle (`global-bundle.pem`) stored in a ConfigMap and mounted
+read-only:
+
+```yaml
+# Rollout pod template (k8s/overlays/production/rollout-patch.yaml)
+volumes:
+  - name: db-ca
+    configMap:
+      name: db-ca            # kubectl create configmap db-ca --from-file=global-bundle.pem
+containers:
+  - name: my-app
+    volumeMounts:
+      - name: db-ca
+        mountPath: /etc/db-ca
+        readOnly: true
+# ConfigMap (configmap-patch.yaml)
+DB_SSL_CA: /etc/db-ca/global-bundle.pem
+```
+
+The migration pod (`k8s/migrations/migrate-pod-overrides.json`) needs the same
+volume when `DB_SSL_CA` is set.
+
+**Network.** The `allow-app-egress-db-redis` and `allow-migrate-egress-db`
+NetworkPolicies (`k8s/base/network-policy.yaml`) only allow egress to pods in
+the same namespace labelled `app=app-db` (5432) and `app=redis` (6379). A
+database or cache outside the cluster is blocked by the default-deny policy
+until those policies also allow its address, e.g.:
+
+```yaml
+    - to:
+        - ipBlock:
+            cidr: 10.20.0.0/16     # the database/cache subnet (owner input)
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379
+```
+
+Use the narrowest CIDR that covers the endpoints (the VPC subnets of the
+database and cache); `0.0.0.0/0` restricted to these ports works but lets the
+app reach any host on them.

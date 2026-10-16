@@ -6,6 +6,9 @@ data:
   NODE_ENV: "staging"
   LOG_LEVEL: "debug"
   REDIS_URL: "redis://redis-staging:6379"
+  # The Performance Tests stage sends up to 100 virtual users from one agent
+  # pod; the default 100 requests a minute per client would fail it.
+  RATE_LIMIT_MAX: "100000"
   # Build 017: Postgres connection config (host + password come from SealedSecret)
   DB_PORT: "5432"
   DB_USER: "appuser"

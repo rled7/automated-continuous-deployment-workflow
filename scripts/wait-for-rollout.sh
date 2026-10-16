@@ -7,6 +7,7 @@
 # Exits 0 once the controller has observed the latest spec and reports
 # Healthy; 1 if Argo aborted the rollout (e.g. a failed canary analysis), if
 # it stays Degraded for three checks in a row, or if the timeout passes.
+# A kubectl call that fails is retried until the timeout.
 # A Degraded phase that clears on its own (a freshly created Rollout can
 # briefly report one while the resources it references are still being
 # created) is not a failure.
@@ -19,8 +20,14 @@ deadline=$(( $(date +%s) + timeout ))
 degraded_checks=0
 
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  IFS='|' read -r generation observed phase aborted message < <(kubectl get rollout "$name" --namespace="$ns" \
-    -o jsonpath='{.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.status.phase}{"|"}{.status.abort}{"|"}{.status.message}{"\n"}')
+  # One failed call (an API server blip) must not fail a long canary wait.
+  if ! status=$(kubectl get rollout "$name" --namespace="$ns" \
+    -o jsonpath='{.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.status.phase}{"|"}{.status.abort}{"|"}{.status.message}{"\n"}'); then
+    echo "rollout/$name: kubectl get failed, retrying" >&2
+    sleep "${WAIT_FOR_ROLLOUT_INTERVAL:-10}"
+    continue
+  fi
+  IFS='|' read -r generation observed phase aborted message <<<"$status"
   echo "rollout/$name: phase=${phase:-unknown} observedGeneration=${observed:-none}/${generation}${message:+ ($message)}"
   if [ "${observed:-}" = "$generation" ]; then
     case "${phase:-}" in

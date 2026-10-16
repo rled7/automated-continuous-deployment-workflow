@@ -69,7 +69,9 @@ smoke_through_service() {
   kubectl -n "$ns" port-forward svc/my-app "$port:80" >/dev/null 2>&1 & pf_pid=$!
   step "service reachable$label" wait_http "http://127.0.0.1:$port/health/live" 30
   [ -d "$REPO_ROOT/tests/node_modules" ] || (cd "$REPO_ROOT/tests" && npm ci --no-audit --no-fund >&2)
-  run_smoke() { (cd "$REPO_ROOT/tests" && BASE_URL="http://127.0.0.1:$port" npm run test:smoke); }
+  # Read-only in production, as runSmokeTests('production') runs them.
+  local writes=true; [ "$ns" = production ] && writes=false
+  run_smoke() { (cd "$REPO_ROOT/tests" && BASE_URL="http://127.0.0.1:$port" SMOKE_WRITES=$writes npm run test:smoke); }
   step "smoke tests$label" run_smoke
   kill "$pf_pid" 2>/dev/null; pf_pid=""
 }
@@ -79,4 +81,14 @@ dump_cluster_state() {
   log "cluster state in $1:"
   kubectl -n "$1" get rollouts,deploy,rs,pods -o wide >&2 2>/dev/null
   kubectl -n "$1" get events --sort-by=.lastTimestamp 2>/dev/null | tail -n 40 >&2
+}
+
+# install_argo_rollouts — the Argo Rollouts controller production's Rollout
+# needs (cluster-prod; the pipeline stage's main build).
+ARGO_ROLLOUTS_VERSION=1.7.2
+install_argo_rollouts() {
+  kubectl create namespace argo-rollouts >/dev/null 2>&1
+  kubectl apply -n argo-rollouts --server-side -f \
+    "https://github.com/argoproj/argo-rollouts/releases/download/v${ARGO_ROLLOUTS_VERSION}/install.yaml" >/dev/null &&
+    kubectl -n argo-rollouts rollout status deploy/argo-rollouts --timeout=180s
 }

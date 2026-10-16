@@ -1,4 +1,4 @@
-import './lib/otel.js';
+import { shutdown as shutdownTracing } from './lib/otel.js';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import helmet from 'helmet';
@@ -17,13 +17,30 @@ import healthRouter, { setShuttingDown } from './routes/health.js';
 
 export const app = express();
 const PORT = process.env.PORT || 3000;
-const SHUTDOWN_TIMEOUT_MS = 55_000;
+// Shutdown: readiness fails for READINESS_GRACE_MS before the server closes;
+// SHUTDOWN_TIMEOUT_MS after the signal the process exits regardless, well
+// inside the pod's terminationGracePeriodSeconds (60 s).
+const READINESS_GRACE_MS = 5_000;
+const SHUTDOWN_TIMEOUT_MS = 45_000;
 
-// 1. Security headers + JSON body parser
+const positiveInt = (value, fallback) => {
+  const n = Number.parseInt(value ?? '', 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+};
+
+// Behind the ingress controller every request arrives from the controller's
+// pod, so without this req.ip is that pod's address and all clients share one
+// rate limit. TRUST_PROXY is the number of proxies in front of the app (1
+// behind ingress-nginx): req.ip is then the address the nearest proxy saw,
+// and X-Forwarded-For entries a client adds itself are ignored.
+const trustProxy = positiveInt(process.env.TRUST_PROXY, 0);
+if (trustProxy) app.set('trust proxy', trustProxy);
+
+// 1. Security headers
 app.use(helmet());
-app.use(express.json());
 
-// 2. Request ID (before logging so the logger can include it)
+// 2. Request ID (before logging so the logger can include it, and before the
+// body parser so a malformed body's 400 carries it too)
 app.use(requestIdMiddleware);
 
 // 3. Structured request logging
@@ -38,9 +55,11 @@ app.use(
 app.use(metricsMiddleware);
 
 // 5. Rate limiting — skip health and metrics endpoints
+// RATE_LIMIT_MAX: requests per client per minute (default 100); staging
+// raises it so a load test from one machine measures the app, not the limit.
 const limiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 100,
+  max: positiveInt(process.env.RATE_LIMIT_MAX, 100),
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) =>
@@ -48,7 +67,10 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// 6. /api/items — persisted via Postgres
+// 6. JSON body parser (a request over the rate limit is not parsed)
+app.use(express.json());
+
+// 7. /api/items — persisted via Postgres
 const createItemSchema = z.object({
   name: z.string().min(1).max(100),
 });
@@ -79,7 +101,7 @@ app.post('/api/items', async (req, res, next) => {
   }
 });
 
-// 7. Prometheus metrics endpoint
+// 8. Prometheus metrics endpoint
 app.get('/metrics', async (req, res) => {
   try {
     res.set('Content-Type', register.contentType);
@@ -89,10 +111,10 @@ app.get('/metrics', async (req, res) => {
   }
 });
 
-// 8. Health router
+// 9. Health router
 app.use('/health', healthRouter);
 
-// 9. Error handler (must be last)
+// 10. Error handler (must be last)
 app.use(errorHandler);
 
 /**
@@ -106,7 +128,10 @@ export function start(port = PORT) {
     logger.info({ port }, 'Server running');
   });
 
-  // Graceful shutdown
+  // Graceful shutdown: fail readiness, wait for the endpoints to drop the pod,
+  // stop accepting connections and let in-flight requests finish, and only
+  // then close the DB pool and Redis, which those requests may still use, and
+  // flush the spans.
   const shutdown = (signal) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
@@ -115,13 +140,25 @@ export function start(port = PORT) {
     // Flip the readiness flag so k8s stops routing new traffic
     setShuttingDown(true);
 
+    const forceExit = setTimeout(() => {
+      logger.error('Forced exit after shutdown timeout');
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS);
+    forceExit.unref();
+
     // Give in-flight readiness probes ~5s to observe the 503
     setTimeout(async () => {
-      const forceExit = setTimeout(() => {
-        logger.error('Forced exit after shutdown timeout');
-        process.exit(1);
-      }, SHUTDOWN_TIMEOUT_MS);
-      forceExit.unref();
+      let exitCode = 0;
+      try {
+        await new Promise((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve()));
+          server.closeIdleConnections?.();
+        });
+        logger.info('HTTP server closed');
+      } catch (err) {
+        logger.error({ err }, 'Error during server.close');
+        exitCode = 1;
+      }
 
       // Drain persistent connections — DB first (primary state), then Redis (cache)
       try {
@@ -136,16 +173,12 @@ export function start(port = PORT) {
       } catch (err) {
         logger.error({ err }, 'Error closing Redis connection');
       }
+      // Last, so spans from the drain are exported too
+      await shutdownTracing();
 
-      server.close((err) => {
-        if (err) {
-          logger.error({ err }, 'Error during server.close');
-          process.exit(1);
-        }
-        logger.info('Process terminated cleanly');
-        process.exit(0);
-      });
-    }, 5_000);
+      if (exitCode === 0) logger.info('Process terminated cleanly');
+      process.exit(exitCode);
+    }, READINESS_GRACE_MS);
   };
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));

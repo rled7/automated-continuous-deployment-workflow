@@ -2,6 +2,9 @@ import axios from 'axios';
 
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
 const client   = axios.create({ baseURL: BASE_URL, timeout: 10_000 });
+// SMOKE_WRITES=false skips the test that creates an item: production runs the
+// smoke tests after every deploy, and the API has no way to delete the row.
+const WRITES   = process.env.SMOKE_WRITES !== 'false';
 
 describe('Smoke Tests — Post Deploy', () => {
 
@@ -29,7 +32,7 @@ describe('Smoke Tests — Post Deploy', () => {
             expect(Array.isArray(res.data)).toBe(true);
         });
 
-        test('POST /api/items creates resource', async () => {
+        (WRITES ? test : test.skip)('POST /api/items creates resource', async () => {
             const res = await client.post('/api/items', { name: 'smoke-test-item' });
             expect(res.status).toBe(201);
             expect(res.data.id).toBeDefined();

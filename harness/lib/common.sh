@@ -72,6 +72,15 @@ pull_official() {
   docker pull -q "$src" >/dev/null && docker tag "$src" "$img"
 }
 
+# pull_base IMAGE — a Dockerfile's base image, for docker_build. The CI
+# builder (HARNESS_DOCKER_CACHE=gha, a BuildKit container with its own
+# registry mirror) pulls bases itself, often only their manifests when the
+# layers are cached, so there it is skipped.
+pull_base() {
+  [ "${HARNESS_DOCKER_CACHE:-}" = gha ] && { echo "the BuildKit builder pulls $1 itself"; return 0; }
+  pull_official "$1"
+}
+
 # ensure_docker — succeeds if a Docker daemon is reachable. In throwaway
 # sandboxes (running as root, dockerd installed but not started) it starts one.
 ensure_docker() {
@@ -107,11 +116,19 @@ DEPLOY_IMAGE="${DEPLOY_IMAGE:-my-app:verify-$(git -C "$REPO_ROOT" rev-parse --sh
 # deployToKubernetes() deploys it (image set to $DEPLOY_IMAGE, version label
 # from its tag) into the results dir as OUT_NAME.yaml and prints the path.
 # Works on a temp copy so the repo's kustomization.yaml is never modified.
+# db_without_tls K8S_DIR — production connects to Postgres over TLS
+# (DB_SSL=true); the harness's throwaway Postgres has no TLS. Switches it off
+# in a copy of the manifests, never in the repository's.
+db_without_tls() {
+  sed -i 's/^\(  DB_SSL:\) "true"/\1 "false"/' "$1/overlays/production/configmap-patch.yaml"
+}
+
 render_overlay() {
   local out="$RESULTS_DIR/rendered/${2:-$1}.yaml" tmp rc
   mkdir -p "$RESULTS_DIR/rendered"
   tmp=$(mktemp -d)
   cp -R "$REPO_ROOT/k8s" "$tmp/k8s"
+  db_without_tls "$tmp/k8s"
   (cd "$tmp/k8s/overlays/$1" &&
     kustomize edit set image "my-app=$DEPLOY_IMAGE" &&
     kustomize edit add label "version:${DEPLOY_IMAGE##*:}" --without-selector --include-templates &&
@@ -162,23 +179,43 @@ if [ -f /root/.ccr/ca-bundle.crt ]; then
 fi
 
 # docker_build DOCKERFILE CONTEXT [docker build args...] — builds an image like
-# `docker buildx build --load`, adding the sandbox trust above to every build
-# stage except the last, so it never reaches the final image.
+# `docker buildx build --load`. With the sandbox trust above, every shell-form
+# RUN gets it as a bind mount plus the variables curl, npm and Java read, so
+# it works in single-stage images too and never lands in a layer.
+#
+# With HARNESS_DOCKER_CACHE=gha (set by the CI workflow) layers are also read
+# from and written to the GitHub Actions cache, so unchanged layers are not
+# rebuilt on the next run. Needs a docker-container buildx builder and the
+# Actions runtime variables, which the workflow sets up.
 docker_build() {
   local dockerfile=$1 context=$2; shift 2
-  local args=() trust
+  local args=() trust env="" scope
+  if [ "${HARNESS_DOCKER_CACHE:-}" = gha ]; then
+    # One cache per Dockerfile, shared by every job that builds it.
+    scope=$(realpath --relative-to="$REPO_ROOT" "$dockerfile" | tr '/.' '--')
+    args+=(--cache-from "type=gha,scope=$scope" --cache-to "type=gha,mode=max,scope=$scope")
+  fi
   if [ -n "${HARNESS_CA_BUNDLE:-}${HARNESS_JAVA_TRUSTSTORE:-}" ]; then
     trust=$(mktemp -d)
-    [ -n "${HARNESS_CA_BUNDLE:-}" ] && cp "$HARNESS_CA_BUNDLE" "$trust/ca.crt"
-    [ -n "${HARNESS_JAVA_TRUSTSTORE:-}" ] && cp "$HARNESS_JAVA_TRUSTSTORE" "$trust/cacerts"
-    log "adding sandbox CA to the build stages of $(basename "$dockerfile")"
-    awk -v last="$(grep -c '^FROM' "$dockerfile")" -v pem="${HARNESS_CA_BUNDLE:+1}" -v jks="${HARNESS_JAVA_TRUSTSTORE:+1}" '
-      { print }
-      /^FROM/ && ++n < last {
-        print "COPY --from=harness-trust . /tmp/harness-trust/"
-        if (pem) print "ENV NODE_EXTRA_CA_CERTS=/tmp/harness-trust/ca.crt npm_config_cafile=/tmp/harness-trust/ca.crt"
-        if (jks) print "ENV JAVA_OPTS=-Djavax.net.ssl.trustStore=/tmp/harness-trust/cacerts"
-      }' "$dockerfile" > "$trust/Dockerfile"
+    if [ -n "${HARNESS_CA_BUNDLE:-}" ]; then
+      cp "$HARNESS_CA_BUNDLE" "$trust/ca.crt"
+      env="export SSL_CERT_FILE=/tmp/harness-trust/ca.crt CURL_CA_BUNDLE=/tmp/harness-trust/ca.crt NODE_EXTRA_CA_CERTS=/tmp/harness-trust/ca.crt npm_config_cafile=/tmp/harness-trust/ca.crt;"
+    fi
+    if [ -n "${HARNESS_JAVA_TRUSTSTORE:-}" ]; then
+      cp "$HARNESS_JAVA_TRUSTSTORE" "$trust/cacerts"
+      env="$env export JAVA_OPTS=-Djavax.net.ssl.trustStore=/tmp/harness-trust/cacerts;"
+    fi
+    log "adding sandbox CA to the RUN steps of $(basename "$dockerfile")"
+    # RUN [--flag...] cmd  →  RUN --mount=<trust> [--flag...] export ...; cmd
+    # (exec-form RUN ["..."] is left alone).
+    awk -v env="$env" '
+      /^RUN / && !/^RUN +\[/ {
+        rest = substr($0, 5); flags = ""
+        while (match(rest, /^ *--[^ ]+/)) { flags = flags substr(rest, 1, RLENGTH); rest = substr(rest, RLENGTH + 1) }
+        print "RUN --mount=type=bind,from=harness-trust,target=/tmp/harness-trust " flags " " env rest
+        next
+      }
+      { print }' "$dockerfile" > "$trust/Dockerfile"
     dockerfile="$trust/Dockerfile"
     args+=(--build-context "harness-trust=$trust")
   fi

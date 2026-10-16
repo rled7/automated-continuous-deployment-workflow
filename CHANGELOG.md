@@ -38,6 +38,9 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 **Date:** 2026-10-16
 **Scope:** Items left open after Build 028.
 
+### Added
+- `docs/go-live.md` — **Go-live runbook** for one VM with k3s: what to set up, in order, with a check for each step. It also lists what the repo still lacks for a lasting cluster: persistent Postgres and Redis, Jenkins and SonarQube manifests for real use, a multi-arch agent image, a bootstrap script.
+
 ### Changed
 - `.github/workflows/verify.yml`, `harness/stages/pipeline.sh` — **The pipeline group is three parallel jobs:** `pipeline-develop` (the develop build and the agent-forms job), `pipeline-main` (Deploy → Production) and `pipeline-tag` (Release), each on its own Jenkins. They ran one after another on one Jenkins. `PIPELINE_BUILDS` picks the builds; by default the harness still runs all four. Every pipeline job gets `NVD_API_KEY`, including a manual run of the `pipeline` stage.
 - `harness/stages/pipeline.sh` — `PIPELINE_BRANCH=main` works: the production namespace is set up for it, and the served repository no longer tries to re-point the branch it is on.

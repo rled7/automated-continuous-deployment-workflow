@@ -68,6 +68,8 @@ automated-continuous-deployment-workflow/
 
 ## Quick Start
 
+> **Going live?** [`docs/go-live.md`](docs/go-live.md) is the step-by-step checklist for running all of this on one VM with k3s (a laptop VM first, a cloud VM later): accounts and tokens, repo values, platform, secrets, Jenkins in the cluster, the first staging, production and release builds, and what is still missing from the repo.
+
 ### 1. Clone & Configure
 
 ```bash

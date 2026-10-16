@@ -23,9 +23,11 @@ useDefault = true
 [allowlist]
   description = "Repo-level false-positive suppressions for my-app"
 
-  # Regex allowlist — currently empty; add patterns here when gitleaks flags
-  # test fixtures, example config values, or documentation snippets.
-  regexes = []
+  # Regex allowlist — add patterns here when gitleaks flags test fixtures,
+  # example config values, or documentation snippets.
+  regexes = [
+    "^admin:admin$",   # reason: SonarQube's built-in first-login credentials, used once by harness/stages/pipeline.sh to set a password on its throwaway server
+  ]
 
   # Path allowlist — files that are known to contain high-entropy strings that
   # are NOT secrets (e.g. lockfiles with integrity hashes, test files with

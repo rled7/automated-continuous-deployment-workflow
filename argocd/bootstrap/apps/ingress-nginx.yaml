@@ -29,6 +29,18 @@ spec:
             nodePorts:
               http: "30080"
               https: "30443"
+            # Local: kube-proxy delivers external traffic only to a controller
+            # pod on the node it arrived at, without SNAT, so the controller
+            # sees the client's real address and passes it on in
+            # X-Forwarded-For. The app trusts exactly that one hop
+            # (TRUST_PROXY=1 in k8s/base/configmap.yaml) to rate-limit per
+            # client. With the default (Cluster) every request appears to come
+            # from a node IP and all clients share one rate limit.
+            # Nodes without a controller pod drop the traffic: on a multi-node
+            # kind cluster keep the controller on the node with the
+            # extraPortMappings; a cloud LoadBalancer health-checks nodes and
+            # only sends traffic to those with a controller pod.
+            externalTrafficPolicy: Local
           # Publish the node's IP into the Ingress status so nip.io URLs resolve.
           hostNetwork: false
           # Resource requests suitable for a single-node kind cluster

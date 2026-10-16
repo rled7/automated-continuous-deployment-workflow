@@ -3,6 +3,11 @@ kind: AnalysisTemplate
 metadata:
   name: success-rate
 spec:
+  args:
+    # The canary ReplicaSet's pod-template-hash. Every analysis step in the
+    # Rollout passes it (valueFrom.podTemplateHashValue: Latest), so the query
+    # judges only the new pods, not the stable ones next to them.
+    - name: canary-hash
   metrics:
     - name: success-rate
       # Measure every 30 s, 3 times; every measurement must pass before the
@@ -12,13 +17,25 @@ spec:
       count: 3
       successCondition: result[0] >= 0.99
       failureLimit: 0
-      # Two failed queries in a row (Prometheus unreachable, bad query) fail the
-      # analysis too, so a canary is never promoted without its metrics.
-      consecutiveErrorLimit: 1
+      # Three failed queries in a row (Prometheus unreachable, bad query) fail
+      # the analysis, so a canary is never promoted without its metrics; one
+      # transient error alone does not abort the release.
+      consecutiveErrorLimit: 2
       provider:
         prometheus:
           address: http://prometheus-operated.monitoring.svc.cluster.local:9090
+          # Share of the canary's requests that were not 5xx, from the app's
+          # prom-client histogram (http_request_duration_ms, labels method,
+          # route, status_code). The my-app scrape job in kube-prometheus-stack
+          # adds namespace and rollouts_pod_template_hash to every series.
+          # No 5xx series means no errors (`or vector(0)`). No series at all for
+          # the canary means nothing was measured, and that must not pass: the
+          # result is then empty, the measurement errors, and three in a row
+          # fail the analysis (consecutiveErrorLimit). Kubelet probes alone give
+          # every running pod traffic, so a scraped canary always has data.
           query: |
-            sum(rate(http_requests_total{status!~"5.."}[2m]))
-            /
-            sum(rate(http_requests_total[2m]))
+            1 - (
+              (sum(rate(http_request_duration_ms_count{namespace="production",rollouts_pod_template_hash="{{args.canary-hash}}",status_code=~"5.."}[2m])) or vector(0))
+              /
+              sum(rate(http_request_duration_ms_count{namespace="production",rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
+            )

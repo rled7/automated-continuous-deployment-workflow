@@ -2,6 +2,7 @@
 # Ref: https://openslo.com/
 # Evaluated by sloth / Pyrra / or read manually; kept here as the single source
 # of truth for SLO targets so Prometheus recording rules and burn-rate alerts
+# (additionalPrometheusRulesMap in argocd/bootstrap/apps/kube-prometheus-stack.yaml)
 # stay in sync with documented commitments.
 
 ---
@@ -31,13 +32,13 @@ spec:
             type: Prometheus
             spec:
               query: >-
-                sum(rate(http_request_duration_ms_count{status_code!~"5.."}[5m]))
+                sum(rate(http_request_duration_ms_count{job="my-app",namespace="production",status_code!~"5.."}[5m]))
         total:
           metricSource:
             type: Prometheus
             spec:
               query: >-
-                sum(rate(http_request_duration_ms_count[5m]))
+                sum(rate(http_request_duration_ms_count{job="my-app",namespace="production"}[5m]))
   timeWindow:
     - duration: 30d
       isRolling: true
@@ -73,7 +74,7 @@ spec:
             query: >-
               histogram_quantile(
                 0.95,
-                sum(rate(http_request_duration_ms_bucket[5m])) by (le)
+                sum(rate(http_request_duration_ms_bucket{job="my-app",namespace="production"}[5m])) by (le)
               )
             thresholdOperator: "<"
             threshold: 500

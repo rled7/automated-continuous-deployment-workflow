@@ -7,3 +7,16 @@ data:
   PORT: "3000"
   LOG_LEVEL: "info"
   REDIS_URL: "redis://redis:6379"
+  # Trust exactly one proxy hop: the app takes the client address from the
+  # last X-Forwarded-For entry, which ingress-nginx sets, so the rate
+  # limit applies per client instead of to everyone behind the controller.
+  # That entry is the real client only because nothing else sits in front of
+  # ingress-nginx and its Service uses externalTrafficPolicy: Local (no SNAT;
+  # argocd/bootstrap/apps/ingress-nginx.yaml). With a CDN or L7 load balancer
+  # in front, raise this to the number of proxies; with an L4 load balancer
+  # that hides client IPs, enable PROXY protocol on it and ingress-nginx.
+  TRUST_PROXY: "1"
+  # OTLP/HTTP endpoint of the OpenTelemetry collector
+  # (argocd/bootstrap/apps/otel-collector.yaml; the app appends /v1/traces).
+  # The allow-app-egress-otel NetworkPolicy lets the app reach it on 4318.
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.monitoring.svc.cluster.local:4318"

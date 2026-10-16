@@ -1,7 +1,8 @@
 # SLO burn-down dashboard.
 # Shows availability SLI vs 99.9% target, error budget remaining,
 # 1h and 6h burn rates, and current alert state.
-# Relies on recording rules defined in monitoring/prometheus.yaml.
+# Relies on the recording rules in kube-prometheus-stack's values
+# (argocd/bootstrap/apps/kube-prometheus-stack.yaml, additionalPrometheusRulesMap).
 apiVersion: v1
 kind: ConfigMap
 metadata:

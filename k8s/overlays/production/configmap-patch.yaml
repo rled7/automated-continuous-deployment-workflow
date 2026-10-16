@@ -10,3 +10,9 @@ data:
   DB_PORT: "5432"
   DB_USER: "appuser"
   DB_NAME: "appdb"
+  # TLS to Postgres, verifying the server certificate (rejectUnauthorized),
+  # for the app and the migration pod (knexfile's production block). A
+  # managed database whose CA is not in Node's bundle (e.g. Amazon RDS) also
+  # needs DB_SSL_CA: the path of a PEM CA bundle mounted into the pod, e.g.
+  # the RDS global bundle from a ConfigMap. See docs/database.md.
+  DB_SSL: "true"

@@ -9,14 +9,196 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 > - Phase D: cluster security (Build 016) — done
 > - Phase E: app data layer (Build 017) — done
 > - Phase F: operations (Build 018) — done
-> - **Phase G: verification (Builds 023–024) — in progress.** The local harness exercised the pipeline end to end for the first time and found 10 defects in phases C–F that blocked deploys, testing or rollback, plus 3 in its own changes; all are fixed in Builds 023–024. Remaining:
+> - **Phase G: verification (Builds 023–028) — in progress.** The local harness exercised the pipeline end to end for the first time and found 35 defects in phases B–F that blocked deploys, testing, rollback, Jenkins or its agents, plus 3 in its own changes; Builds 023–026 fix all of them. Remaining:
 >   - [x] Harness for manifests, app, image, pod, simulated cluster, Terraform (Build 023)
 >   - [x] Staging deploy on a real cluster in CI (Build 023)
 >   - [x] Production Rollout path on a real cluster: deploy, failed canary, rollback (`cluster-prod`, Build 024; passing in CI)
 >   - [ ] First production deploy with the Rollout-only overlay, watched (removes the stray Deployment)
->   - [ ] Whole Jenkinsfile run end to end (Jenkins controller + agent image in kind)
+>   - [x] Whole Jenkinsfile run end to end on a `develop` build (Jenkins controller + agent image in kind; `pipeline` stage passing in CI, commit 79f0bbf). Not run there: PR Preview (pull-request builds), Mutation Tests (nightly), Deploy → Production and Release (`main`; the production path is covered by `cluster-prod`)
+>     - [x] Jenkins starts from `docker/jenkins` with `jenkins.yaml`; credentials and declarative validation checked (`jenkins` stage, Build 025)
+>     - [x] The agent image builds and has every command the pipeline calls (Build 026)
+>     - [x] Every way of asking for an agent resolves to the `cicd-agent` pod, offline and in kind (Build 026)
+>     - [x] Jenkins runs the Jenkinsfile on kind (`pipeline` stage, Build 026): Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks pass
+>     - [x] Dependency Vulnerability Scan passes in CI with the NVD API key and a cached database
+>     - [x] SonarQube webhook to Jenkins created by the real setup (`scripts/sonarqube-setup.sh`, Build 026)
+>     - [x] Unit Tests stage can pass (coverage thresholds met by real tests; junit reports where Jenkins reads them) — checked locally
+>     - [x] Mutation tests run (Stryker score 75%, break threshold 50%) — checked locally
+>     - [x] The stages after the scan pass in CI: Build, Validate Manifests, Unit and Integration Tests, Docker Build & Push (multi-arch, Trivy, SBOM, signing and provenance), Scan SBOM, Deploy → Staging with migrations and smoke tests, Performance Tests, E2E Tests
+>     - [ ] Decisions: where the dependency-check database lives (shared volume + nightly job, or each build); signing key (`COSIGN_KEY`, e.g. KMS) or keyless; the real `STAGING_URL` / `PRODUCTION_URL`
+>   - [x] CI runs in about 6 minutes instead of 15.5 (parallel groups, cached layers and tools; Build 027)
+>   - [x] A `main` build runs Deploy → Production in Jenkins: approval, migrations, Rollout, smoke tests, DORA pushes (Build 028)
+>   - [x] Every path no build runs audited and fixed: tags, PRs, rollback, manifests, scripts, app (Build 028)
+>   - [ ] Real infrastructure: the repository has no Terraform for the cluster, database or network; only the harness's example module
 >   - [ ] Terraform stage pointed at the real infrastructure modules
 >   - [ ] Promote `require-pod-probes` to Enforce (now that it accepts valid probes)
+
+---
+
+## Build 028 — Every pipeline path run or audited; 50 defects fixed
+**Date:** 2026-10-14
+**Scope:** Build 027 ran the Jenkinsfile on a `develop` build. This build runs a `main` build too: Deploy → Production in Jenkins, with its approval gate, migrations, the Argo Rollout, smoke tests and DORA pushes. It also audits everything no build reaches: the tag, pull-request and failure paths, the manifests against a real cluster, the scripts, and the app. 50 defects were found and fixed. Each one was verified against the code, and most were reproduced first.
+
+### Fixed — would have failed in production
+- `k8s/overlays/production/analysis-template.yaml`, `rollout-patch.yaml` — **Every canary would have aborted.** The analysis queried `http_requests_total`, which the app doesn't export. It now queries `http_request_duration_ms_count{status_code}` for the canary's own pods (`podTemplateHashValue: Latest`), and handles the case where there is no traffic yet.
+- `argocd/bootstrap/apps/kube-prometheus-stack.yaml`, `monitoring/` — **Nothing scraped the app.** The alert and recording rules sat in ConfigMaps that nothing deployed, which the operator ignores anyway. Two of them also used metric names that don't exist. There is now a `my-app` scrape job (pods in staging and production, labelled with the Rollout's pod-template hash), the rules are loaded through `additionalPrometheusRulesMap` with the real metric names, the Pushgateway target is corrected, and the DORA dashboard queries what Jenkins pushes.
+- `Jenkinsfile` — **Auto-rollback never fired.** `PREVIOUS_IMAGE` was read without the deployer's kubeconfig, so it was always `none`. It is now read with the kubeconfig, from the Rollout's stable ReplicaSet. A build that ends ABORTED after the production deploy started also rolls back. The global timeout is 60 min, enough for the approval wait plus the canary.
+- `Jenkinsfile`, `docker/jenkins/jenkins.yaml`, `plugins.txt` — **Releases never built.** Tags were never discovered or built. This adds tag discovery and build strategies (`basic-branch-build-strategies`). `docker tag` also had no local image after `buildx --push`; it is replaced by `imagetools create`.
+- `Jenkinsfile`, `scripts/pr-preview-up.sh`, `jenkins/pr-preview-teardown.Jenkinsfile`, `jenkins.yaml` — **PR previews failed and were never torn down.**
+  - Previews deployed before the image existed, reused staging's host and had no secrets. The stage now runs after the push and deploys the build's image at `pr-<N>.$PREVIEW_DOMAIN`, with in-memory stores, then waits for the rollout.
+  - The teardown job had no checkout, JCasC blanked its PR number, and its action filter used an undefined variable. It now loads `jenkins/pr-preview-teardown.Jenkinsfile` from git, filters on `pull_request closed`, and validates the PR number.
+- `Jenkinsfile` — **DORA metrics never arrived.** The Service name was wrong, the body ended in a literal `\n`, and the instance contained a `/`. MTTR also counted past successes. The nightly cron fired on every branch, which parked `main` at the production approval each night; it now runs on `develop` only. `:latest` is pushed only from `main`.
+- `app/src/server.js` — **Shutdown ended the DB pool before the server stopped taking requests,** so in-flight requests got errors. Now: readiness off, grace period, server closed, then DB and Redis, with a force-exit well inside the 60 s grace period.
+- `app/src/routes/health.js` — **A Redis outage took every pod out of the Service,** though no route uses Redis. Redis down now reports `degraded` with 200; the database still gates readiness.
+- `policies/kyverno/require-resource-limits.yaml` — **The policy covered the whole cluster** and would have rejected the platform's own pods (ingress-nginx, Prometheus, Argo Rollouts…) on their next restart. It now applies to `production` and `staging` only.
+- `k8s/secrets/`, `scripts/setup.sh` — **The image pull secret's name didn't match** (`docker-registry-secret` vs `registry-credentials`), and staging had no `my-app-secrets`.
+- `argocd/Application-*.yaml` — **Argo CD and Jenkins would have fought.** Argo CD auto-synced `my-app:latest` with self-heal, which Kyverno rejects and which would revert every Jenkins deploy and rollback. Jenkins is now the deployer: the Applications are manual-sync and ignore the image and `version` label.
+- `k8s/overlays/production/quota-patch.yaml` — The quota now fits HPA `maxReplicas` plus a canary surge.
+- `argocd/bootstrap/apps/ingress-nginx.yaml` — `externalTrafficPolicy: Local`, so with `TRUST_PROXY=1` the app sees client addresses rather than a node's.
+- `argocd/bootstrap/apps/metrics-server.yaml` — metrics-server, without which the HPAs never scale.
+- `app/`, `k8s/overlays/production/configmap-patch.yaml` — The production database uses TLS (`DB_SSL=true`, `DB_SSL_CA` for a CA bundle such as RDS's). `DB_POOL_MAX` and `DB_POOL_MIN` size the pool against Postgres' connection limit, and `DB_STATEMENT_TIMEOUT_MS` stops a hung query from blocking shutdown. `knexfile.js` refuses to fall back to `localhost` in production.
+- `scripts/wait-for-rollout.sh` — A single failed `kubectl get` failed the 15-minute canary wait, which then triggered a rollback. It now retries until the deadline.
+- `scripts/setup.sh` — The Argo CD install couldn't work client-side (the CRD is too large); it is now server-side and pinned to v3.5.5. `kubectl apply -f monitoring/` failed on the OpenSLO file. The script now uses Compose v2 (2.24+) and checks only the tools each mode needs, with real readiness checks and timeouts.
+
+### Fixed — security and operations
+- App:
+  - credentials (`Authorization`, `Cookie`, `Set-Cookie`) redacted from logs;
+  - 5xx responses no longer echo internal errors;
+  - client `X-Request-Id` accepted only when it looks like an ID;
+  - the fake stores refused in staging and production;
+  - a bounded `route` label on the latency histogram (no raw 404 paths).
+- OpenTelemetry under ES modules: Express and ioredis weren't instrumented. The app now starts with `node --import ./dist/instrumentation.js`, and spans are flushed at the end of shutdown.
+- Node 20 reached end of life in April: the app image, the agent image (24.21.0), CI and the harness all move to Node 24.
+- docker-compose:
+  - SonarQube 10.7 (9.9 is frozen);
+  - Jenkins no longer runs as root, privileged, or with the host Docker socket;
+  - the docs say where builds actually run (Jenkins in a cluster).
+- Smaller fixes:
+  - probe timeouts that fit the health checks;
+  - a staging PDB that lets nodes drain;
+  - `ingressClassName`;
+  - the OTel endpoint set and the collector app made installable;
+  - Slack messages that name the branch, with the right colour;
+  - `seal-secret.sh` reads values from stdin.
+
+### Added — verification
+- `harness/stages/pipeline.sh`:
+  - a **`main` build** after the `develop` one. It approves the deploy gate through Jenkins' input API, then checks every stage, that the production Rollout ends Healthy on that build's image, and that the DORA metrics reached a Pushgateway;
+  - the harness's Postgres has no TLS, so `db_without_tls` turns `DB_SSL` off in its copies.
+- `harness/stages/cluster-real.sh` — runs `pr-preview-up.sh` and `pr-preview-down.sh` against the cluster, with smoke tests on the preview.
+- `harness/stages/jenkins.sh` — splits each Jenkinsfile's base64 into chunks, because Groovy literals stop at 65,535 characters.
+- App tests: 54 → 106. Coverage: 98% of lines, 95% of branches.
+
+### Added — after the audit (Build 028, continued)
+- `k8s/overlays/production/analysis-template.yaml` — **A canary with no measurements no longer passes.** The query used to score "no samples" as 1.0, so a broken scrape would have promoted every canary unmeasured. Now no series means an error, and three errors in a row fail the analysis.
+- `harness/stages/cluster-prod.sh` — **The canary analysis is proven on Prometheus data.**
+  - Prometheus runs with the real `my-app` scrape job, taken from the kube-prometheus-stack values.
+  - Traffic comes through the Service from a stand-in for the ingress controller.
+  - A healthy release must be promoted, and the new pods must have served real requests. The first run caught a traffic generator that reused one connection, so the canary only ever saw its probes.
+  - A release whose `GET /api/items` fails (probes still pass) must be failed on its measured 5xx rate, reported by `wait-for-rollout.sh`, and rolled back.
+- `Jenkinsfile`, `harness/stages/pipeline.sh` — **Release is split into "Tag the image" and "GitHub release",** and the harness builds a `v0.0.1` tag. The registry's `v0.0.1` must be the image the tag build pushed. The GitHub release needs GitHub, so it is the one failure the harness accepts.
+- `tests/smoke/smoke.test.js`, `Jenkinsfile` — **Production smoke tests are read-only** (`SMOKE_WRITES=false`): a deploy no longer leaves a test row in the production database.
+
+### Not verifiable here (needs real infrastructure)
+- The canary analysis against your production Prometheus (the harness runs the same scrape job and query against its own).
+- The GitHub release itself and the GitHub webhooks (they need GitHub and a public Jenkins).
+- Database TLS against a managed database.
+- `externalTrafficPolicy` behind a cloud load balancer.
+
+---
+
+## Build 027 — Faster CI: parallel groups, caches, skipping what already passed
+**Date:** 2026-10-13
+**Scope:** The `verify` workflow ran every harness stage one after another in one job, about 15.5 minutes. It now runs them as parallel groups that reuse earlier downloads and builds, skips groups whose inputs already passed, and the slowest stages overlap or drop waits that are not under test.
+
+### Changed
+
+- `.github/workflows/verify.yml` — Six jobs run in parallel: `checks` (static, app, image, pod, cluster-sim), `terraform`, `jenkins`, `cluster-real`, `cluster-prod` and `pipeline`. The workflow takes as long as its slowest group. A manual run with explicit stages still runs them in one job. Only the `pipeline` job gets the `NVD_API_KEY` secret.
+- `harness/lib/common.sh`, `.github/workflows/verify.yml` — Docker layers are read from and written to the GitHub Actions cache (`type=gha`, one scope per Dockerfile) when `HARNESS_DOCKER_CACHE=gha`, on a buildx builder whose Docker Hub pulls go through `mirror.gcr.io`. The pinned tools in `harness/.bin`, Terraform providers and npm packages are cached too. Local runs are unchanged.
+
+- `.github/workflows/verify.yml` — A group whose inputs (git blob hashes of the files its stages read, plus the harness and the ISO week) match a run that passed is skipped in seconds. A docs-only change skips every group; a Terraform change runs only `terraform`. `force` on a manual run runs everything. Runs on `main` fill the caches every pull request can read.
+- `.github/workflows/verify.yml`, `harness/stages/pipeline.sh`, `Jenkinsfile`, `docker/jenkins/jenkins.yaml` — dependency-check's vulnerability database is kept between runs: the Jenkinsfile passes `--data "$DEPENDENCY_CHECK_DATA"` when the pod template sets it; the `pipeline` stage mounts `harness/.cache/dependency-check` into agent pods through the kind node, and CI restores and saves the directory (one copy per day), so the scan updates it instead of downloading all of NVD. `jenkins.yaml` shows the persistent volume to add for the same effect in production.
+- `harness/stages/pipeline.sh` — The database is brought up to date in its own container before the build, the way a nightly job would, because the first download of NVD takes longer than the Jenkinsfile's 30-minute build timeout leaves the scan; the key is checked with NVD first (dependency-check retries a rejected key for a long time). The kind cluster is created while the images build, SonarQube starts as soon as the cluster is up, and the node pulls Docker Hub images through `mirror.gcr.io` instead of having them copied in.
+- `harness/stages/terraform.sh` — `terraform test` runs alongside apply → plan → destroy instead of before it: both spend most of their time on the AWS provider's SQS waits, and they use different names. Every check still runs. Locally 345 s → 195 s.
+- `harness/stages/cluster-prod.sh` — The failing canary pauses 10 s per step instead of 2 minutes in the harness's copy of the release; the analysis still has to fail it and the rollback still has to restore the previous image.
+- `harness/lib/common.sh` — With the CI builder, base images are no longer pulled into the Docker daemon first; BuildKit pulls what it needs.
+
+### Measured
+
+| Group | First run (empty cache) | Second run (cache filled) |
+|---|---|---|
+| checks | 4m10s | 2m49s |
+| jenkins | 3m11s | 1m24s |
+| cluster-real | 3m58s | 2m29s |
+| cluster-prod | 7m04s | 5m23s |
+| terraform | 6m03s | 6m00s |
+
+About 6 minutes in all, set by `terraform`: most of it is the AWS provider's built-in waits on the example module's two SQS queues (about 25 s to create and 42 s to delete each, and `terraform test` does it again), which caching cannot remove. `pipeline` takes about 8 minutes up to the dependency scan and will take longer once the scan and later stages run. Public repositories get these runner minutes free.
+
+---
+
+## Build 026 — The Jenkinsfile runs in Jenkins on kind; every agent block gets the agent pod
+**Date:** 2026-10-13
+**Scope:** Run the real Jenkinsfile in the real Jenkins (`docker/jenkins`, `jenkins.yaml`) inside a kind cluster with pods from the agent image. No build could ever have run: the agent image did not build, it lacked tools, the Jenkinsfile asked for a pod without them, and the pod template mounted a Docker socket Kubernetes nodes don't have. Jenkins now resolves every way of asking for an agent to the same pod (write-up: `docs/agent-resolution.md`). The run now passes Checkout, SonarQube Analysis with its quality gate, Lint and Gitleaks, and stopped at the Dependency Vulnerability Scan, which could never create its database; that is fixed and the scan has an NVD API key.
+
+### Fixed
+
+- `docker/jenkins-agent/Dockerfile` — The image did not build: Trivy's GitHub release tarballs return 404; `trivy` is now copied from `aquasec/trivy` at the same version. Once it built, it had no `docker` command (on Debian trixie, which the floating `latest-jdk17` base had moved to, `docker.io` is only the daemon) and no `sonar-scanner`, so Docker Build & Push and SonarQube Analysis could never run. The base is pinned to trixie; `docker-cli`, `docker-buildx` and a pinned SonarScanner CLI are installed and checked in the build's sanity step.
+- `Jenkinsfile`, `docker/jenkins/jenkins.yaml` (`pr-preview-teardown`) — `agent { kubernetes { label 'cicd-agent' } }` does not use the template with that label: the plugin builds a new pod with only its default `jnlp` container, so `defaultContainer 'cicd'` named a container that did not exist and no stage could run. Now `inheritFrom 'cicd-agent'`.
+- `docker/jenkins/jenkins.yaml` — Every agent pod failed to start ("hostPath type check failed: /var/run/docker.sock is not a socket file"): Kubernetes nodes run containerd. Each pod now runs `docker:27-dind` as a privileged sidecar listening only on `127.0.0.1:2375`, and the tools containers point `DOCKER_HOST` at it. `dockerd` is named in its args; otherwise the image's entrypoint adds a listener on `0.0.0.0:2375`, open to the cluster, which collides with the local one.
+- `app/src/__tests__/unit/*.test.js` — The Unit Tests stage runs the unit suite with coverage, and the project's thresholds (80% lines, 70% branches, 60% functions) applied to a suite that covered 29.6% of lines, so the stage could only fail. New unit tests for `lib/db.js`, `lib/redis.js`, `lib/otel.js` and `server.js` (routes, and graceful shutdown: readiness fails, DB and Redis drain even if one fails, the server closes, exit 0) bring it to 95% of lines, 85% of branches and 95% of functions; the Stryker mutation score is 75%.
+- `Jenkinsfile` — jest-junit ignores `--outputFile` and wrote `app/junit.xml`, so the `junit` steps of the unit, integration and smoke tests found no report and failed the build. The file is set with `JEST_JUNIT_OUTPUT_DIR`/`JEST_JUNIT_OUTPUT_NAME`, and the default reporter stays on so failures are explained in the log.
+- `Jenkinsfile`, `docker/jenkins/jenkins.yaml`, `.env.example` — The smoke tests called `https://<env>.my-app.internal`, the performance tests `https://staging.my-app.internal` and the E2E tests `https://staging.app.my-app.internal`, while the staging ingress serves `staging.app.127.0.0.1.nip.io`. `STAGING_URL` and `PRODUCTION_URL` now set where each environment is reached, once, for all three.
+- `docker/jenkins-agent/Dockerfile` — dependency-check 11.1.1 could not store some current NVD records (reference URLs longer than its 1000-character column), so its database could never be complete; 12.2.2, from Maven Central.
+- `app/package.json`, `app/package-lock.json`, `app/src/lib/otel.js` — The scan's first local run found high-severity vulnerabilities in production dependencies: `@grpc/grpc-js` 1.14.3 and `@opentelemetry/auto-instrumentations-node` ≤ 0.78 (OpenTelemetry 0.57). Upgraded to the OpenTelemetry 2.x SDK (`sdk-node` 0.223, auto-instrumentations 0.81, resources/core 2.12); `lib/otel.js` uses `resourceFromAttributes`. `npm audit --omit=dev` and dependency-check now find nothing.
+- `Jenkinsfile` — The Lint stage ran ESLint in a checkout with no `node_modules`, so ESLint was not found and `|| true` passed the stage: it never linted. It installs dependencies first, and ESLint errors fail it. The dependency scan installs the production dependencies in a directory of its own and scans those and `src/`; dependency-check 12's Yarn and pnpm analyzers, which fail without those tools, are off (the project uses npm).
+- `docker/jenkins-agent/Dockerfile` — Every Dependency Vulnerability Scan failed within a second with "Unable to connect to the dependency-check database": dependency-check creates its database in `/opt/dependency-check/data`, which belonged to root, and the agent runs as `jenkins`. The directory now belongs to `jenkins`; the `jenkins` stage checks that dependency-check can create its database as the agent user.
+- `Jenkinsfile`, `docker/jenkins/jenkins.yaml`, `.env.example`, `README.md`, `.github/workflows/verify.yml` — dependency-check had no NVD API key, so it could not download its vulnerability database and the Dependency Vulnerability Scan always failed. The key is the `nvd-api-key` credential (`NVD_API_KEY` in `.env`); the scan passes it with `--nvdApiKey`, and CI reads it from the `NVD_API_KEY` repo secret.
+- `scripts/nvd-api-key.sh`, `Jenkinsfile`, `scripts/dependency-check-db-update.sh` — NVD accepts a key only as `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX` and answers 404 to anything else, and a CI run failed on a key saved without its hyphens. The key is now taken with or without hyphens and with stray spaces or line breaks; when NVD still rejects it, the update says what is wrong with the value (length, shape) without printing it. The scan expands the key with shell tracing off, since Jenkins masks only the credential's stored value.
+- `Jenkinsfile`, `docker/jenkins/plugins.txt` — The Unit Tests stage failed after its tests passed: the Cobertura plugin calls a class current Jenkins no longer has (`NoClassDefFoundError: hudson/util/IOException2`). Coverage is now published with the Coverage plugin (`recordCoverage`, Cobertura parser, same report), which fails the build below 70% line coverage as `failUnhealthy` with targets `80, 70, 60` did. No other plugin in `plugins.txt` is deprecated or has a security warning on its current version.
+- `Jenkinsfile` — The SLSA provenance step could never have run: it passed the predicate with `<(…)` process substitution, which the agent's `/bin/sh` (dash) does not have. The predicate is now written to `reports/provenance.json` and archived. The image and its provenance are signed by the manifest list digest `docker buildx build --metadata-file` records, as the comments always said, rather than by the tag.
+- `Jenkinsfile`, `docker/jenkins/jenkins.yaml`, `.env.example`, `docs/cosign-trust.md`, `harness/stages/pipeline.sh` — Signing needed an OIDC identity a Jenkins agent does not have. `COSIGN_KEY` (a KMS URI, `k8s://namespace/secret` or a key file) now makes the stage sign with that key; empty, it signs keyless as before. `COSIGN_EXTRA_ARGS` adds flags such as `--tlog-upload=false`. The harness signs with a throwaway key against its plain-HTTP registry; the same commands were checked with `cosign verify` and `cosign verify-attestation`.
+- `docker/jenkins-agent/Dockerfile`, `Jenkinsfile` — E2E Tests ran `playwright install --with-deps`, which installs Chromium's libraries with apt as root; the agent runs as `jenkins` without sudo, so the stage could never pass. The agent image now carries the libraries and the headless shell for the Playwright version the lockfile pins (1.64.0, 278 MB; the full browser would add 400 MB), and the stage runs `playwright install --only-shell chromium`, which downloads nothing unless the app's Playwright moves ahead. Checked: the E2E suite passes in the agent image as `jenkins`, 7/7, with `junit-e2e.xml` where the stage reads it.
+- `app/src/server.js`, `k8s/base/configmap.yaml`, `k8s/overlays/staging/configmap-patch.yaml` — The rate limit (100 requests a minute per client) did not know the app runs behind ingress-nginx: without Express's `trust proxy`, every request came from the ingress controller's address, so all users together shared 100 requests a minute per replica. `TRUST_PROXY` (the number of proxies in front, `1` in the base ConfigMap) fixes that; addresses a client adds to `X-Forwarded-For` itself are ignored. The same limit made the Performance Tests stage impossible to pass (up to 100 virtual users from one agent pod; 7 of 107 requests got 429 at 10 users): `RATE_LIMIT_MAX` sets the limit, 100 by default, 100000 in staging. Five unit tests cover the default, the setting, and per-client limits with and without `TRUST_PROXY`.
+- `harness/stages/pipeline.sh` — The load test's 8-minute profile runs 30 s in the harness (`K6_STAGES`, which k6 prefers to the script's stages); the Jenkinsfile and the test are unchanged.
+- `docker/Dockerfile`, `docker/docker-compose.yml` — Docker Build & Push built and pushed the image, then failed its Trivy scan: every HIGH/CRITICAL finding was in the npm bundled with the Node base image (tar, minimatch, glob, cross-spawn…) or in Alpine's OpenSSL. The runtime stage now applies Alpine's security updates and removes npm, npx, Yarn and Corepack, which the app never runs (it starts with `node dist/server.js`; migrations run `node node_modules/knex/bin/cli.js`). docker-compose's app service, which ran `npm run migrate && npm start` in that image, runs the same commands with node. Checked: Trivy and grype (the Scan SBOM stage's syft → grype) find nothing HIGH or above; migrations, the API and the harness `image` and `pod` stages pass.
+- `harness/fixtures/deps.yaml`, `harness/stages/pod.sh` — The throwaway Postgres reported ready while it still refused network connections (its first-boot init runs a server on the Unix socket only, and the probe asked over that socket), so the migration pod could start too early and fail; seen once in CI. Readiness is now checked over TCP.
+- `.gitleaks.toml` — The Gitleaks stage flagged `curl -u admin:admin` in the harness: SonarQube's documented first-login credentials, used once to set a password on the harness's throwaway server. Allowed by exact match only; any other credential in a curl command is still reported.
+
+### Changed
+
+- `docker/jenkins/jenkins.yaml` — However a pipeline asks for its agent, it gets the `cicd-agent` pod: the cloud's `defaultsProviderTemplate: cicd-agent` makes every pod inherit the template (the deprecated `label`, a pod of the pipeline's own yaml); the template takes unlabelled builds (`nodeUsageMode: NORMAL`) and the controller has no executors, so `agent any` runs in the pod too; containers are container templates instead of pod yaml, because a pipeline's own yaml replaces the template's yaml but container templates are always merged; the `jnlp` container is the agent image with `DOCKER_HOST`, so steps that pick no container still have the tools and Docker.
+- `harness/lib/common.sh` — In sandboxes that intercept HTTPS, the CA reached only non-final build stages, so single-stage images (the agent) downloaded nothing. It is now a BuildKit bind mount on every shell-form `RUN`, with the variables curl, npm and Java read, and never lands in a layer.
+
+### Added
+
+- `harness/stages/pipeline.sh`, `harness/fixtures/jenkins-in-cluster.yaml`, `harness/fixtures/sonarqube.yaml` — Opt-in `pipeline` stage, run in CI: Jenkins in a kind cluster with the repo's `jenkins.yaml` launches agent pods from the agent image and builds this working tree as a multibranch branch (`develop` by default) from a git server in the cluster. Stand-ins: a local registry, placeholder secrets, an in-cluster kubeconfig, and SonarQube 10.7 in the cluster with a token and the `/sonarqube-webhook/` webhook that `waitForQualityGate` needs (nothing in the repo set that up). Each Jenkins stage is a step: pass, fail with its log, or skip (Jenkins' "skipped due to earlier failure(s)", which its stage API reports as failed). Jenkins is reached through a NodePort, and failed API calls print their HTTP status and body.
+- `harness/stages/jenkins.sh` — Builds the agent image and checks it has every command the pipeline calls (`docker buildx` included). Resolves every agent block of the Jenkinsfile, inline pipeline jobs and `harness/fixtures/agent-forms.Jenkinsfile` (one stage per syntax) with Jenkins' declarative parser and the Kubernetes plugin's own pod builder (`harness/lib/agent-resolution.groovy`), and checks the steps' container, `DOCKER_HOST`, the privileged `dind` sidecar and controller executors. Fails with the original defect when `defaultsProviderTemplate` is removed. Jenkins API helpers move to `harness/lib/jenkins.sh`.
+- `harness/stages/pipeline.sh` — After the Jenkinsfile build, runs `agent-forms.Jenkinsfile` as a job; each stage checks its pod has the tools and a Docker daemon. All five forms pass in CI.
+- `scripts/sonarqube-setup.sh`, `README.md`, `scripts/setup.sh` — Nothing in the repo created the SonarQube webhook to Jenkins that `waitForQualityGate` needs, so the quality gate would wait 5 minutes and fail every build. The script creates it and the token for Jenkins, idempotently; the README's setup steps and `setup.sh --local` point to it, and the `pipeline` stage sets up its SonarQube with it.
+- `Jenkinsfile` — The Docker Build & Push stage's buildx builder takes `BUILDKITD_CONFIG` when the pod template sets it (registry mirrors, a private registry's CA, a plain-HTTP registry in a test setup).
+- `harness/stages/pipeline.sh` — Staging is set up as a long-lived environment has it (namespace with its Pod Security labels, Postgres, Redis, the app's Secret, ConfigMap and NetworkPolicies), the stand-in registry is allowed over plain HTTP for dind, buildx, Trivy and Syft, and QEMU is registered for the arm64 build, so the stages after the scan can run.
+- `scripts/dependency-check-db-update.sh`, `jenkins/dependency-check-db-update.Jenkinsfile`, `docker/jenkins/jenkins.yaml`, `Jenkinsfile` — A nightly `dependency-check-db-update` job keeps the vulnerability database on a shared volume current; builds scan it with `--noupdate`, downloading nothing and needing no key. Without the volume, builds update their own copy as before. The harness runs the same script. (NVD's keyless data feeds were tried: dependency-check needs a "modified" feed NVD no longer publishes.)
+- `docs/agent-resolution.md` — How builds get their agent: the bug, the configuration with code, how the check works and what it still does not cover.
+
+---
+
+## Build 025 — Jenkins starts with its configuration; `jenkins` harness stage
+**Date:** 2026-10-08
+**Scope:** First step of running the Jenkinsfile end to end: boot the real Jenkins controller with the repo's plugins and `jenkins.yaml`, which showed it could never start with that configuration.
+
+### Fixed
+
+- `docker/jenkins/Dockerfile` (new), `docker/docker-compose.yml` — The stock `jenkins/jenkins` image does not install plugins from a mounted `plugins.txt`, so Jenkins ran with no plugins and, without configuration-as-code, silently ignored `jenkins.yaml`. Plugins are now installed at build time and compose builds the image. Compose also passed none of the variables `jenkins.yaml` substitutes; it now reads `../.env`.
+- `docker/jenkins/jenkins.yaml` — With the plugins installed, JCasC refused to start Jenkins on four errors: the `kubeconfig` file credential had no content (now read from `/run/secrets/kubeconfig`, which compose mounts from `$KUBECONFIG` or `kubeconfig.placeholder`); the NodeJS tool used a `version:` attribute the plugin lacks (now an installer); the `my-app` job used Job DSL's `github {}` shorthand with `credentialsId`/`traits`, which only the `branchSource { source { github {} } }` syntax supports; and `periodic(5)` is a freestyle trigger (multibranch jobs take `periodicFolderTrigger`).
+- `docker/jenkins/jenkins.yaml`, `Jenkinsfile`, `.env.example`, `README.md` — `docker-registry-url` (read in the Jenkinsfile's top-level `environment` block, so every build failed before its first stage) and `github-credentials` (the job's branch source and the Release stage) were never defined. Both now come from `.env`. `github-credentials` is username + PAT, as the README documented and the branch source needs; the Release stage read it as secret text and now reads the token as its password. The README's credentials section reflects that all six are created from `.env`.
+
+### Added
+
+- `harness/stages/jenkins.sh` — Builds `docker/jenkins/Dockerfile`, starts it with `jenkins.yaml` and placeholder secrets, and checks from inside the running Jenkins that it boots (printing the JCasC error if not), the jobs exist, every credential and agent label the Jenkinsfile uses is defined, and the declarative validator accepts the Jenkinsfile. Runs by default and in the `verify` workflow.
+
+### Changed
+
+- `harness/lib/common.sh` — `docker_build` adds the sandbox CA (PEM for npm, Java truststore for JVM tools) to the build stages of any Dockerfile; the `image` stage uses it. `pull_official` also pulls namespaced images (`jenkins/jenkins`) through the mirror.
 
 ---
 

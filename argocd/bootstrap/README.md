@@ -17,6 +17,7 @@ argocd/bootstrap/
 │   ├── cert-manager.yaml
 │   ├── cert-manager-issuers.yaml
 │   ├── argo-rollouts.yaml
+│   ├── metrics-server.yaml
 │   ├── kube-prometheus-stack.yaml
 │   ├── loki-stack.yaml
 │   └── otel-collector.yaml
@@ -40,8 +41,10 @@ argocd/bootstrap/
 
 ```bash
 kubectl create namespace argocd
-kubectl apply -n argocd \
-  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# Server-side apply: the ApplicationSet CRD is too big for client-side
+# apply's last-applied annotation. Same version as scripts/setup.sh.
+kubectl apply --server-side --force-conflicts -n argocd \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.5/manifests/install.yaml
 ```
 
 ### 2. Wait for Argo CD to be ready
@@ -122,7 +125,7 @@ kubectl port-forward svc/argo-rollouts-dashboard -n argo-rollouts 3100:3100
 
 | Wave | Components | Reason |
 |------|-----------|--------|
-| -10 | `sealed-secrets`, `ingress-nginx`, `cert-manager`, `argo-rollouts` | CRD controllers; must be ready before dependent resources |
+| -10 | `sealed-secrets`, `ingress-nginx`, `cert-manager`, `argo-rollouts`, `metrics-server` | CRD controllers and cluster add-ons; must be ready before dependent resources (the app's HPAs need metrics-server) |
 | 0 | `cert-manager-issuers`, `kube-prometheus-stack`, `loki-stack`, `otel-collector` | Require CRDs from wave -10 |
 
 ## Notes
@@ -135,6 +138,8 @@ kubectl port-forward svc/argo-rollouts-dashboard -n argo-rollouts 3100:3100
 - For cloud deployments, update the `cert-manager.io/cluster-issuer` annotation
   in `k8s/overlays/*/ingress-patch.yaml` from `selfsigned-issuer` to
   `letsencrypt-staging` or `letsencrypt-prod`.
-- OTel collector currently exports to the `logging` exporter (traces appear in
-  collector logs).  Replace with an `otlp` exporter pointing at Grafana Tempo
-  when Tempo is added to the stack.
+- OTel collector exports traces over OTLP to Grafana Tempo (`tempo.yaml`); OTLP
+  metrics and logs go to the `debug` exporter (collector logs). The app sends
+  its traces to the collector Service
+  `otel-collector-opentelemetry-collector.monitoring.svc.cluster.local:4318`
+  (`OTEL_EXPORTER_OTLP_ENDPOINT` in `k8s/base/configmap.yaml`).

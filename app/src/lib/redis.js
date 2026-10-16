@@ -22,6 +22,11 @@ import logger from './logger.js';
 const REDIS_URL  = process.env.REDIS_URL;
 const REDIS_FAKE = process.env.REDIS_FAKE === '1';
 
+// The fake is for tests only; refuse to load with it in staging or production.
+if (REDIS_FAKE && ['production', 'staging'].includes(process.env.NODE_ENV)) {
+  throw new Error(`REDIS_FAKE must not be set when NODE_ENV is ${process.env.NODE_ENV}`);
+}
+
 // Graceful "not configured" sentinel — module still loads, calls reject.
 const configured = REDIS_FAKE || !!REDIS_URL;
 

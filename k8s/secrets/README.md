@@ -16,7 +16,7 @@ private key can decrypt them.
 | File | Secret name | Type | Namespaces |
 |------|-------------|------|------------|
 | `my-app-secrets.template.yaml` | `my-app-secrets` | `Opaque` | `production`, `staging` |
-| `docker-registry-secret.template.yaml` | `docker-registry-secret` | `kubernetes.io/dockerconfigjson` | `production`, `staging` |
+| `docker-registry-secret.template.yaml` | `registry-credentials` | `kubernetes.io/dockerconfigjson` | `production`, `staging` |
 
 ## How to seal a secret
 

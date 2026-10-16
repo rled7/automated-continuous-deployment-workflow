@@ -42,8 +42,68 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # dependency-check's vulnerability database, for the pipeline jobs' scans:
+  # updated from NVD here, once, and saved to the cache (one copy a day), so
+  # the pipeline jobs only read it. Several updates at once with one NVD key
+  # get throttled; from an empty cache each one is a full download of NVD.
+  nvd-db:
+    name: dependency-check database
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    env:
+      DC_DATA: harness/.cache/dependency-check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Today's key
+        id: key
+        run: echo "key=dependency-check-${{ runner.os }}-$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - name: Already updated today?
+        id: today
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DC_DATA }}
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      # The newest copy: the update then only fetches what changed since.
+      - name: Restore the newest copy
+        if: steps.today.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DC_DATA }}
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: dependency-check-${{ runner.os }}-
+      # The version the agent image scans with: the database schema must match.
+      - name: Install dependency-check
+        if: steps.today.outputs.cache-hit != 'true'
+        run: |
+          v=$(sed -n 's/.*DEPENDENCY_CHECK_VERSION=\([0-9.]*\).*/\1/p' docker/jenkins-agent/Dockerfile)
+          [ -n "$v" ] || { echo "DEPENDENCY_CHECK_VERSION not found in docker/jenkins-agent/Dockerfile"; exit 1; }
+          curl -fsSLo "$RUNNER_TEMP/dc.zip" \
+            "https://repo1.maven.org/maven2/org/owasp/dependency-check-cli/$v/dependency-check-cli-$v-release.zip"
+          unzip -q "$RUNNER_TEMP/dc.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/dependency-check/bin" >> "$GITHUB_PATH"
+      - name: Update from NVD
+        if: steps.today.outputs.cache-hit != 'true'
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          scripts/dependency-check-db-update.sh "$DC_DATA" 2>&1 | grep -vE '^\s+at '
+          du -sh "$DC_DATA"
+      - name: Save
+        if: steps.today.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DC_DATA }}
+          key: ${{ steps.key.outputs.key }}
+
   verify:
     name: verify (${{ matrix.group }})
+    needs: nvd-db
+    # Every group runs even when the database job fails; only the pipeline
+    # groups need the database.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     strategy:
@@ -95,15 +155,10 @@ jobs:
       STAGES: ${{ inputs.stages || matrix.stages }}
       PIPELINE_BRANCH: ${{ inputs.pipeline_branch || 'develop' }}
       PIPELINE_BUILDS: ${{ matrix.builds }}   # empty (a manual run): all of them
-      # Only one job updates dependency-check's database from NVD: the pipeline
-      # jobs share one NVD key, which NVD throttles when several update at once.
-      # The others scan the cached copy as it is.
-      DC_UPDATE: ${{ (!matrix.builds || contains(matrix.builds, 'branch')) && '1' || '0' }}
+      # dependency-check's database comes from the nvd-db job, as it is.
+      DC_UPDATE: "0"
       HARNESS_DOCKER_CACHE: gha
       COMMON_INPUTS: .github/workflows/verify.yml harness/verify.sh harness/lib
-      # For the Dependency Vulnerability Scan (repo secret; empty on forks).
-      # Only the jobs that run the Jenkinsfile get it.
-      NVD_API_KEY: ${{ contains(inputs.stages || matrix.stages, 'pipeline') && secrets.NVD_API_KEY || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -173,16 +228,14 @@ jobs:
           key: terraform-plugins-${{ runner.os }}-${{ hashFiles('harness/terraform/**/*.tf', 'infra/**/*.tf') }}
           restore-keys: terraform-plugins-${{ runner.os }}-
 
-      # dependency-check's vulnerability database: the newest copy, which the
-      # scan only updates (downloading all of NVD takes 10+ minutes). One copy
-      # is saved per day.
+      # dependency-check's vulnerability database, as the nvd-db job left it
+      # (or the newest copy, if that job failed).
       - name: Restore the dependency-check database
-        id: dc-restore
         if: steps.gate.outputs.run == 'true' && contains(env.STAGES, 'pipeline')
         uses: actions/cache/restore@v4
         with:
           path: harness/.cache/dependency-check
-          key: dependency-check-${{ runner.os }}-${{ steps.plan.outputs.day }}
+          key: ${{ needs.nvd-db.outputs.key || 'none' }}
           restore-keys: dependency-check-${{ runner.os }}-
 
       # Docker layer caching: a BuildKit builder that can export to the
@@ -211,29 +264,6 @@ jobs:
           # STAGES is a space-separated list, split on purpose.
           # shellcheck disable=SC2086
           TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" harness/verify.sh $STAGES
-
-      # Saved even when the build fails later on: the update has run. Only by
-      # the job that updated it (DC_UPDATE), so a copy that was not updated
-      # never takes the day's key.
-      # Agent pods write it as another user; stale lock files would make the
-      # next scan wait.
-      - name: Prepare the dependency-check database for the cache
-        id: dc-prepare
-        if: always() && env.DC_UPDATE == '1' && steps.dc-restore.outcome == 'success' && steps.dc-restore.outputs.cache-hit != 'true'
-        run: |
-          dir=harness/.cache/dependency-check
-          if [ -n "$(sudo find "$dir" -name 'odc.mv.db' -size +1M 2>/dev/null)" ]; then
-            sudo find "$dir" -name '*.lock' -delete
-            sudo chmod -R a+rX "$dir"
-            du -sh "$dir"
-            echo "save=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Save the dependency-check database
-        if: always() && steps.dc-prepare.outputs.save == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: harness/.cache/dependency-check
-          key: dependency-check-${{ runner.os }}-${{ steps.plan.outputs.day }}
 
       - name: Summary
         if: always() && steps.gate.outputs.run == 'true'

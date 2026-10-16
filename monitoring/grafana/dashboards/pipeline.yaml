@@ -31,14 +31,14 @@ data:
       "panels": [
         {
           "id": 1,
-          "title": "Build Duration P95 (ms)",
+          "title": "Average Build Duration (ms)",
           "type": "timeseries",
           "gridPos": { "x": 0, "y": 0, "w": 16, "h": 8 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "targets": [
             {
-              "expr": "histogram_quantile(0.95, sum(rate(jenkins_builds_duration_milliseconds_summary_bucket[10m])) by (le, job_name))",
-              "legendFormat": "p95 {{job_name}}",
+              "expr": "sum by (jenkins_job) (rate(default_jenkins_builds_duration_milliseconds_summary_sum[1h])) / sum by (jenkins_job) (rate(default_jenkins_builds_duration_milliseconds_summary_count[1h]))",
+              "legendFormat": "{{jenkins_job}}",
               "refId": "A"
             }
           ],
@@ -57,7 +57,7 @@ data:
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "targets": [
             {
-              "expr": "100 * sum(increase(jenkins_builds_success_build_count_total[24h])) / (sum(increase(jenkins_builds_success_build_count_total[24h])) + sum(increase(jenkins_builds_failed_build_count_total[24h])))",
+              "expr": "100 * sum(increase(default_jenkins_builds_success_build_count_total[24h])) / (sum(increase(default_jenkins_builds_success_build_count_total[24h])) + sum(increase(default_jenkins_builds_failed_build_count_total[24h])))",
               "legendFormat": "success rate %",
               "refId": "A",
               "instant": true
@@ -83,13 +83,13 @@ data:
         },
         {
           "id": 3,
-          "title": "Stage-by-Stage Duration (bar chart)",
+          "title": "Stage Duration, Last Build (bar chart)",
           "type": "barchart",
           "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "targets": [
             {
-              "expr": "avg by (stage) (jenkins_builds_duration_milliseconds_summary{quantile=\"0.5\"})",
+              "expr": "avg by (stage) (default_jenkins_builds_last_stage_duration_milliseconds_summary_sum / default_jenkins_builds_last_stage_duration_milliseconds_summary_count)",
               "legendFormat": "{{stage}}",
               "refId": "A",
               "instant": true
@@ -115,12 +115,12 @@ data:
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "targets": [
             {
-              "expr": "sum(increase(jenkins_builds_success_build_count_total[10m]))",
+              "expr": "sum(increase(default_jenkins_builds_success_build_count_total[10m]))",
               "legendFormat": "success",
               "refId": "A"
             },
             {
-              "expr": "sum(increase(jenkins_builds_failed_build_count_total[10m]))",
+              "expr": "sum(increase(default_jenkins_builds_failed_build_count_total[10m]))",
               "legendFormat": "failed",
               "refId": "B"
             }

@@ -28,12 +28,14 @@ spec:
           # prom-client histogram (http_request_duration_ms, labels method,
           # route, status_code). The my-app scrape job in kube-prometheus-stack
           # adds namespace and rollouts_pod_template_hash to every series.
-          # With no requests at all both rates are 0 and the result is 1: the
-          # `or vector(0)` keeps each side a one-element vector and clamp_min
-          # avoids dividing by zero.
+          # No 5xx series means no errors (`or vector(0)`). No series at all for
+          # the canary means nothing was measured, and that must not pass: the
+          # result is then empty, the measurement errors, and three in a row
+          # fail the analysis (consecutiveErrorLimit). Kubelet probes alone give
+          # every running pod traffic, so a scraped canary always has data.
           query: |
             1 - (
               (sum(rate(http_request_duration_ms_count{namespace="production",rollouts_pod_template_hash="{{args.canary-hash}}",status_code=~"5.."}[2m])) or vector(0))
               /
-              clamp_min((sum(rate(http_request_duration_ms_count{namespace="production",rollouts_pod_template_hash="{{args.canary-hash}}"}[2m])) or vector(0)), 1e-9)
+              sum(rate(http_request_duration_ms_count{namespace="production",rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
             )

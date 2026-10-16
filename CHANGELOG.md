@@ -88,9 +88,19 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 - `harness/stages/jenkins.sh` — splits each Jenkinsfile's base64 into chunks, because Groovy literals stop at 65,535 characters.
 - App tests: 54 → 106. Coverage: 98% of lines, 95% of branches.
 
+### Added — after the audit (Build 028, continued)
+- `k8s/overlays/production/analysis-template.yaml` — **A canary with no measurements no longer passes.** The query used to score "no samples" as 1.0, so a broken scrape would have promoted every canary unmeasured. Now no series means an error, and three errors in a row fail the analysis.
+- `harness/stages/cluster-prod.sh` — **The canary analysis is proven on Prometheus data.**
+  - Prometheus runs with the real `my-app` scrape job, taken from the kube-prometheus-stack values.
+  - Traffic comes through the Service from a stand-in for the ingress controller.
+  - A healthy release must be promoted, and the new pods must have served real requests. The first run caught a traffic generator that reused one connection, so the canary only ever saw its probes.
+  - A release whose `GET /api/items` fails (probes still pass) must be failed on its measured 5xx rate, reported by `wait-for-rollout.sh`, and rolled back.
+- `Jenkinsfile`, `harness/stages/pipeline.sh` — **Release is split into "Tag the image" and "GitHub release",** and the harness builds a `v0.0.1` tag. The registry's `v0.0.1` must be the image the tag build pushed. The GitHub release needs GitHub, so it is the one failure the harness accepts.
+- `tests/smoke/smoke.test.js`, `Jenkinsfile` — **Production smoke tests are read-only** (`SMOKE_WRITES=false`): a deploy no longer leaves a test row in the production database.
+
 ### Not verifiable here (needs real infrastructure)
-- The canary analysis against a live Prometheus. The query and rules pass `promtool` unit tests.
-- Tag builds and the GitHub webhook (they need GitHub and a public Jenkins).
+- The canary analysis against your production Prometheus (the harness runs the same scrape job and query against its own).
+- The GitHub release itself and the GitHub webhooks (they need GitHub and a public Jenkins).
 - Database TLS against a managed database.
 - `externalTrafficPolicy` behind a cloud load balancer.
 

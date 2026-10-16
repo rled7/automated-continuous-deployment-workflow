@@ -82,7 +82,10 @@ spec:
 
 ---
 # 5. Allow ingress to app pods on port 3000 from the monitoring namespace
-# (Prometheus scrapes the /metrics endpoint). Selector targets Prometheus pods.
+# (Prometheus scrapes the /metrics endpoint). Selector targets Prometheus pods:
+# the operator labels kube-prometheus-stack's Prometheus pods
+# app.kubernetes.io/name: prometheus; the my-app scrape job is in
+# argocd/bootstrap/apps/kube-prometheus-stack.yaml.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -107,9 +110,12 @@ spec:
 
 ---
 # 6. Allow egress from app pods to the database (PostgreSQL on 5432) and cache
-# (Redis on 6379). These services will exist once Build 017 lands.
-# FORWARD-LOOKING: these pods/labels do not yet exist in the cluster.
-# The policy is applied now so it is in effect as soon as the DB/cache lands.
+# (Redis on 6379) running as pods in the same namespace (app=app-db,
+# app=redis). Nothing in this repo deploys them: with a managed database or
+# cache outside the cluster (RDS, ElastiCache, ...), add an ipBlock rule for
+# its subnet on these ports here and in allow-migrate-egress-db below, or the
+# default-deny policy blocks it. See docs/database.md ("Production: TLS and
+# where the database lives").
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -135,3 +141,27 @@ spec:
       ports:
         - protocol: TCP
           port: 6379
+
+---
+# Egress for the one-off migration pod started by runMigrations() in the
+# Jenkinsfile (k8s/migrations/). It is labelled app=my-app-migrate rather than
+# app=my-app so the Service never routes traffic to it, so it needs its own
+# allowance to reach Postgres.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-migrate-egress-db
+spec:
+  podSelector:
+    matchLabels:
+      app: my-app-migrate
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: app-db
+      ports:
+        - protocol: TCP
+          port: 5432

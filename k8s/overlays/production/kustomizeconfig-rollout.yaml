@@ -1,0 +1,7 @@
+# Tells kustomize where an Argo Rollout keeps its pod template, so labels
+# with includeTemplates reach the Rollout's pods (it only knows built-in kinds).
+templateLabels:
+  - path: spec/template/metadata/labels
+    create: true
+    group: argoproj.io
+    kind: Rollout

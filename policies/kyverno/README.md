@@ -19,7 +19,7 @@ See `docs/policy-promotion.md` for the full lifecycle, how to query
 
 | Policy | Mode | Scope | Summary |
 |--------|------|-------|---------|
-| `require-resource-limits` | **Enforce** | All namespaces (excl. kube-system, kyverno) | Every container must set CPU + memory requests and limits. Promoted Build 021. |
+| `require-resource-limits` | **Enforce** | `production`, `staging` | Every container must set CPU + memory requests and limits. Promoted Build 021. |
 | `require-labels` | **Enforce** | `production`, `staging` | Deployments and Rollouts must carry `app`, `env`, `version` labels. Promoted Build 021. |
 | `require-readonly-rootfs` | **Enforce** | `production`, `staging` | Containers must set `securityContext.readOnlyRootFilesystem: true`. Promoted Build 021. |
 | `disallow-latest-tag` | **Enforce** | `production` only | Images must use a pinned tag; `:latest` or untagged images are rejected. Enforce from Build 016. |

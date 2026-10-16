@@ -22,5 +22,10 @@ reports/
 .vscode/
 .idea/
 
-# Claude Code worktrees / agent state
-.claude/
+# Claude Code worktrees / agent state — except the shared settings and hooks
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+
+# Temporary overlays of scripts/pr-preview-up.sh
+k8s/overlays/.preview-*/

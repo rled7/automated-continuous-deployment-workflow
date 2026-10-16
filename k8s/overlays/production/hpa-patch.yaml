@@ -3,6 +3,12 @@ kind: HorizontalPodAutoscaler
 metadata:
   name: my-app
 spec:
+  # Production's workload is the Argo Rollout (the base Deployment is deleted);
+  # Rollouts expose the scale subresource, so the HPA can drive them directly.
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: my-app
   minReplicas: 3
   maxReplicas: 20
   metrics:

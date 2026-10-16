@@ -4,6 +4,15 @@ This guide spins up a local Kubernetes cluster with
 [kind](https://kind.sigs.k8s.io/), bootstraps Argo CD, and installs all
 platform components via the app-of-apps pattern.
 
+It is separate from the Docker Compose stack (`scripts/setup.sh --local`),
+which runs the Jenkins controller, SonarQube and a registry for trying them
+out but cannot run builds: the controller has no executors, and the
+Kubernetes cloud in `docker/jenkins/jenkins.yaml` expects Jenkins to run
+inside the cluster. To run the pipeline, run Jenkins in namespace `jenkins` of
+this cluster the way `harness/fixtures/jenkins-in-cluster.yaml` and
+`harness/stages/pipeline.sh` do (see "Running builds" in the
+[README](../README.md#running-builds)).
+
 ## Prerequisites
 
 | Tool | Purpose | Install |
@@ -62,8 +71,10 @@ kubectl cluster-info --context kind-cicd-demo
 ```bash
 # Create the argocd namespace and install Argo CD
 kubectl create namespace argocd
-kubectl apply -n argocd \
-  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# Server-side apply: the ApplicationSet CRD is too big for client-side
+# apply's last-applied annotation. Same version as scripts/setup.sh.
+kubectl apply --server-side --force-conflicts -n argocd \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.5/manifests/install.yaml
 
 # Wait for argocd-server to be ready
 kubectl rollout status -n argocd deployment/argocd-server --timeout=120s
@@ -88,7 +99,7 @@ sync them in sync-wave order:
 
 | Wave | Components |
 |------|-----------|
-| -10 | sealed-secrets, ingress-nginx, cert-manager, argo-rollouts |
+| -10 | sealed-secrets, ingress-nginx, cert-manager, argo-rollouts, metrics-server |
 | 0 | cert-manager-issuers, kube-prometheus-stack, loki-stack, otel-collector |
 
 Watch progress:

@@ -3,7 +3,9 @@
 
 jenkins:
   systemMessage: "Jenkins CI/CD — Configured via JCasC"
-  numExecutors: 4
+  # No builds on the controller: every build, whatever its agent block asks
+  # for (even `agent any`), runs in a cicd-agent pod. See docs/agent-resolution.md.
+  numExecutors: 0
   mode: NORMAL
   scmCheckoutRetryCount: 2
 
@@ -38,9 +40,35 @@ jenkins:
             value: "my-app"
           - key: DOCKER_REGISTRY
             value: "localhost:5000"
+          # Where the smoke, performance and E2E tests reach each environment
+          # (STAGING_URL / PRODUCTION_URL in .env).
+          - key: STAGING_URL
+            value: "${STAGING_URL:-https://staging.my-app.internal}"
+          - key: PRODUCTION_URL
+            value: "${PRODUCTION_URL:-https://production.my-app.internal}"
+          # PR previews are served at pr-<N>.<PREVIEW_DOMAIN> (a wildcard DNS
+          # record pointing at the ingress controller).
+          - key: PREVIEW_DOMAIN
+            value: "${PREVIEW_DOMAIN:-preview.my-app.internal}"
+          # The key the Docker Build & Push stage signs images with (COSIGN_KEY
+          # in .env): a KMS URI or k8s://namespace/secret. Empty: keyless,
+          # which needs an OIDC identity the agents can present.
+          - key: COSIGN_KEY
+            value: "${COSIGN_KEY:-}"
 
   # ── Kubernetes cloud: spawns pods from the custom agent image (Build 013) ──
   # The image bundles every CLI the Jenkinsfile invokes. See docs/agent-image.md.
+  #
+  # However a pipeline asks for its agent, it gets a cicd-agent pod
+  # (docs/agent-resolution.md):
+  #   - inheritFrom 'cicd-agent'            names the template (preferred);
+  #   - label 'cicd-agent', node('cicd-agent'), agent { label ... }
+  #                                         match the template's label;
+  #   - agent any                           matches it through nodeUsageMode NORMAL;
+  #   - anything else the plugin builds (the deprecated kubernetes `label`
+  #     option, a yaml-only pod) inherits it through defaultsProviderTemplate.
+  # And steps that don't pick a container run in jnlp, which is the agent
+  # image too.
   clouds:
     - kubernetes:
         name: "kubernetes"
@@ -51,44 +79,91 @@ jenkins:
         connectTimeout: 30
         readTimeout: 30
         containerCapStr: "10"
+        # Every pod this cloud creates inherits cicd-agent first.
+        defaultsProviderTemplate: "cicd-agent"
         templates:
           - name: "cicd-agent"
             label: "cicd-agent"
+            # Also used for builds that name no label (agent any).
+            nodeUsageMode: NORMAL
             namespace: "jenkins"
             serviceAccount: "jenkins-agent"
-            yaml: |
-              apiVersion: v1
-              kind: Pod
-              spec:
-                containers:
-                  - name: cicd
-                    image: "ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest"
-                    imagePullPolicy: Always
-                    command:
-                      - sleep
-                    args:
-                      - infinity
-                    tty: true
-                    resources:
-                      requests:
-                        cpu: "500m"
-                        memory: "1Gi"
-                      limits:
-                        cpu: "2"
-                        memory: "4Gi"
-                    volumeMounts:
-                      - name: docker-sock
-                        mountPath: /var/run/docker.sock
-                volumes:
-                  - name: docker-sock
-                    hostPath:
-                      path: /var/run/docker.sock
-                      type: Socket
+            # Containers are container templates, not pod yaml: a pipeline
+            # that brings its own yaml replaces this template's yaml (the
+            # plugin's default yamlMergeStrategy), but container templates are
+            # always merged in.
+            containers:
+              # The agent connection. Steps run here unless the pipeline picks
+              # a container, so it is the agent image as well.
+              - name: "jnlp"
+                image: "ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest"
+                alwaysPullImage: true
+                envVars:
+                  - envVar: {key: "DOCKER_HOST", value: "tcp://localhost:2375"}
+                resourceRequestCpu: "250m"
+                resourceRequestMemory: "512Mi"
+                resourceLimitCpu: "2"
+                resourceLimitMemory: "4Gi"
+              # Where the Jenkinsfile runs its steps (defaultContainer 'cicd').
+              - name: "cicd"
+                image: "ghcr.io/YOUR_ORG/jenkins-cicd-agent:latest"
+                alwaysPullImage: true
+                command: "sleep"
+                args: "infinity"
+                ttyEnabled: true
+                envVars:
+                  # docker and buildx talk to the dind sidecar.
+                  - envVar: {key: "DOCKER_HOST", value: "tcp://localhost:2375"}
+                resourceRequestCpu: "500m"
+                resourceRequestMemory: "1Gi"
+                resourceLimitCpu: "2"
+                resourceLimitMemory: "4Gi"
+              # Docker for the Docker Build & Push and Release stages.
+              # Kubernetes nodes run containerd and have no
+              # /var/run/docker.sock to mount, so each agent pod runs its own
+              # daemon. It must be privileged; it listens only inside the pod.
+              - name: "dind"
+                image: "docker:27-dind"
+                # `dockerd` first, or the image's entrypoint adds its own
+                # --host=tcp://0.0.0.0:2375 (open to the whole cluster), which
+                # also collides with this one.
+                args: "dockerd --host=tcp://127.0.0.1:2375 --tls=false"
+                privileged: true
+                envVars:
+                  - envVar: {key: "DOCKER_TLS_CERTDIR", value: ""}
+                resourceRequestCpu: "500m"
+                resourceRequestMemory: "1Gi"
+                resourceLimitCpu: "2"
+                resourceLimitMemory: "4Gi"
+            # dockerd's storage. Template volumes are mounted in every
+            # container; only dind uses this one.
+            volumes:
+              - emptyDirVolume:
+                  mountPath: "/var/lib/docker"
+                  memory: false
+              # dependency-check's vulnerability database, kept current by the
+              # nightly dependency-check-db-update job; builds then scan it
+              # without downloading anything (no NVD key needed in builds).
+              # Create a PVC in the jenkins namespace (ReadWriteMany if agents
+              # run on several nodes), then uncomment this and the envVars below.
+              # - persistentVolumeClaim:
+              #     claimName: "dependency-check-data"
+              #     mountPath: "/var/lib/dependency-check"
+              #     readOnly: false
+            # envVars:
+            #   - envVar: {key: "DEPENDENCY_CHECK_DATA", value: "/var/lib/dependency-check"}
 
+# Every credential the Jenkinsfile and the jobs below use, filled from the
+# environment (.env, passed in by docker/docker-compose.yml). A credential the
+# pipeline asks for but that is missing here fails the build at that step.
 credentials:
   system:
     domainCredentials:
       - credentials:
+          - string:
+              id: "docker-registry-url"
+              secret: "${DOCKER_REGISTRY}"
+              description: "Docker registry host (Jenkinsfile environment block)"
           - usernamePassword:
               id: "docker-registry-credentials"
               username: "${DOCKER_USER}"
@@ -98,10 +173,26 @@ credentials:
               id: "sonarqube-token"
               secret: "${SONAR_TOKEN}"
               description: "SonarQube Token"
+          # Dependency Vulnerability Scan: dependency-check downloads the NVD
+          # database with it.
+          - string:
+              id: "nvd-api-key"
+              secret: "${NVD_API_KEY}"
+              description: "NVD API key"
+          # A file credential must have content or Jenkins fails to start.
+          # docker-compose.yml mounts $KUBECONFIG (or a placeholder) here.
           - file:
               id: "kubeconfig"
               fileName: "kubeconfig"
+              secretBytes: "${readFileBase64:/run/secrets/kubeconfig}"
               description: "Kubernetes Config"
+          # Username + personal access token: the GitHub branch source of the
+          # my-app job needs this type, and the Release stage reads the token.
+          - usernamePassword:
+              id: "github-credentials"
+              username: "${GITHUB_USER}"
+              password: "${GITHUB_TOKEN}"
+              description: "GitHub PAT"
           - string:
               id: "slack-token"
               secret: "${SLACK_TOKEN}"
@@ -114,8 +205,14 @@ tool:
         home: git
   nodejs:
     installations:
-      - name: NodeJS-20
-        version: "20.0.0"
+      # The NodeJS plugin takes the version as an installer, not a `version:`
+      # attribute (which JCasC rejects, and Jenkins then refuses to start).
+      - name: NodeJS-24
+        properties:
+          - installSource:
+              installers:
+                - nodeJSInstaller:
+                    id: "24.21.0"
 
 unclassified:
   slackNotifier:
@@ -133,20 +230,51 @@ unclassified:
 jobs:
   - script: |
       multibranchPipelineJob('my-app') {
+          // The traits below only exist in Job DSL's generated
+          // branchSource/source syntax; the older github {} shorthand has no
+          // credentialsId or traits, and JCasC refuses to start Jenkins.
           branchSources {
-              github {
-                  id('my-app-github')
-                  repoOwner('YOUR_ORG')
-                  repository('my-app')
-                  credentialsId('github-credentials')
-                  traits {
-                      gitHubBranchDiscovery { strategyId(1) }
-                      gitHubPullRequestDiscovery { strategyId(1) }
+              branchSource {
+                  source {
+                      github {
+                          id('my-app-github')
+                          repoOwner('YOUR_ORG')
+                          repository('my-app')
+                          repositoryUrl('https://github.com/YOUR_ORG/my-app')
+                          configuredByUrl(false)
+                          credentialsId('github-credentials')
+                          traits {
+                              gitHubBranchDiscovery { strategyId(1) }
+                              gitHubPullRequestDiscovery { strategyId(1) }
+                              // vX.Y.Z tags run the Release stage (buildingTag()).
+                              gitHubTagDiscovery()
+                          }
+                      }
+                  }
+                  // Multibranch builds no tags unless a strategy says so
+                  // (basic-branch-build-strategies). Naming strategies replaces
+                  // the default, so branches and pull requests are listed too.
+                  // Tags up to a week old build when discovered; older ones are
+                  // left alone so a first scan does not rebuild every release.
+                  buildStrategies {
+                      buildRegularBranches()
+                      buildChangeRequests {
+                          ignoreTargetOnlyChanges(true)
+                          ignoreUntrustedChanges(true)
+                      }
+                      buildTags {
+                          atLeastDays('-1')
+                          atMostDays('7')
+                      }
                   }
               }
           }
+          // Rescan the repository every 5 minutes. (periodic(5) is the
+          // freestyle-job trigger; multibranch jobs take periodicFolderTrigger.)
           triggers {
-              periodic(5)
+              periodicFolderTrigger {
+                  interval('5m')
+              }
           }
           factory {
               workflowBranchProjectFactory {
@@ -155,85 +283,100 @@ jobs:
           }
       }
 
+  # ── Nightly dependency-check database update ──────────────────────────────
+  # Keeps the vulnerability database on the shared volume current, so builds
+  # scan it without downloading NVD (jenkins/dependency-check-db-update.Jenkinsfile).
+  # Does nothing until the pod template has DEPENDENCY_CHECK_DATA and its volume.
+  - script: |
+      pipelineJob('dependency-check-db-update') {
+          description('Nightly: brings the dependency-check vulnerability database on the shared volume up to date.')
+          properties {
+              pipelineTriggers {
+                  triggers {
+                      cron { spec('H 2 * * *') }
+                  }
+              }
+          }
+          definition {
+              cpsScm {
+                  scm {
+                      git {
+                          remote {
+                              url('https://github.com/YOUR_ORG/my-app')
+                              credentials('github-credentials')
+                          }
+                          branch('main')
+                      }
+                  }
+                  scriptPath('jenkins/dependency-check-db-update.Jenkinsfile')
+                  lightweight(true)
+              }
+          }
+      }
+
   # ── Build 015: PR preview teardown job ─────────────────────────────────────
-  # Triggered by a GitHub "pull_request closed" webhook via the
-  # Generic Webhook Trigger plugin (generic-webhook-trigger in plugins.txt).
+  # Triggered by GitHub's pull_request webhook through the Generic Webhook
+  # Trigger (generic-webhook-trigger in plugins.txt); it builds only when the
+  # event is pull_request and its action is "closed".
   # Webhook URL: http://JENKINS_URL/generic-webhook-trigger/invoke?token=pr-preview-teardown
-  # GitHub webhook payload filter: $.action == "closed" (configure in GitHub repo settings)
+  # (GitHub repo settings → Webhooks, content type application/json, event
+  # "Pull requests"). Rotate the token for a real installation.
   #
-  # The job reads CHANGE_ID from the webhook JSON body ($.number field).
-  # It then destroys the ephemeral PR preview namespace via pr-preview-down.sh.
+  # The pipeline (jenkins/pr-preview-teardown.Jenkinsfile) comes from the
+  # repository because it runs scripts/pr-preview-down.sh. CHANGE_ID is $.number
+  # from the payload. (No ${...} in this script: JCasC would substitute it.)
   - script: |
       pipelineJob('pr-preview-teardown') {
           description('Tears down the ephemeral PR preview environment when a GitHub PR is closed.')
           parameters {
               stringParam('CHANGE_ID', '', 'PR number from the GitHub pull_request closed webhook ($.number)')
           }
-          // Generic Webhook Trigger receives the GitHub pull_request event and
-          // extracts $.number into CHANGE_ID automatically when configured with:
-          //   Variable: CHANGE_ID, Expression: $.number, Expression type: JSONPath
-          triggers {
-              genericTrigger {
-                  genericVariables {
-                      genericVariable {
-                          key('CHANGE_ID')
-                          value('$.number')
-                          expressionType('JSONPath')
+          properties {
+              pipelineTriggers {
+                  triggers {
+                      genericTrigger {
+                          genericVariables {
+                              genericVariable {
+                                  key('CHANGE_ID')
+                                  value('$.number')
+                                  expressionType('JSONPath')
+                              }
+                              genericVariable {
+                                  key('action')
+                                  value('$.action')
+                                  expressionType('JSONPath')
+                              }
+                          }
+                          genericHeaderVariables {
+                              genericHeaderVariable {
+                                  key('x-github-event')
+                                  regexpFilter('')
+                              }
+                          }
+                          token('pr-preview-teardown')
+                          causeString('pull request #$CHANGE_ID closed')
+                          // Only a pull_request event whose action is "closed".
+                          regexpFilterText('$x_github_event $action')
+                          regexpFilterExpression('^pull_request closed$')
+                          printContributedVariables(false)
+                          printPostContent(false)
                       }
                   }
-                  token('pr-preview-teardown')
-                  // Only fire when the pull_request action is "closed"
-                  genericHeaderVariables {
-                      genericHeaderVariable {
-                          key('x-github-event')
-                          regexpFilter('pull_request')
-                      }
-                  }
-                  regexpFilterText('$action')
-                  regexpFilterExpression('closed')
               }
           }
           definition {
-              cps {
-                  script('''
-                      pipeline {
-                          agent {
-                              kubernetes {
-                                  label 'cicd-agent'
-                                  defaultContainer 'cicd'
-                              }
+              cpsScm {
+                  scm {
+                      git {
+                          remote {
+                              url('https://github.com/YOUR_ORG/my-app')
+                              credentials('github-credentials')
                           }
-                          stages {
-                              stage('Teardown PR Preview') {
-                                  steps {
-                                      withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
-                                          sh """
-                                              export KUBECONFIG=\\$KUBECONFIG_FILE
-                                              ./scripts/pr-preview-down.sh ${CHANGE_ID}
-                                          """
-                                      }
-                                  }
-                                  post {
-                                      success {
-                                          slackSend(
-                                              channel: '#deployments',
-                                              color: 'good',
-                                              message: "PR Preview #${CHANGE_ID} torn down — namespace pr-preview-${CHANGE_ID} deleted."
-                                          )
-                                      }
-                                      failure {
-                                          slackSend(
-                                              channel: '#deployments',
-                                              color: 'danger',
-                                              message: "WARNING: PR Preview #${CHANGE_ID} teardown FAILED — manual cleanup may be needed."
-                                          )
-                                      }
-                                  }
-                              }
-                          }
+                          branch('main')
                       }
-                  ''')
-                  sandbox(true)
+                  }
+                  scriptPath('jenkins/pr-preview-teardown.Jenkinsfile')
+                  lightweight(true)
               }
           }
       }

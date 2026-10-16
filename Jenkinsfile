@@ -2,9 +2,12 @@ pipeline {
     // Build 013: agents come from the custom Jenkins agent image (docs/agent-image.md).
     // The image bundles node, kubectl, kustomize, kubeconform, gitleaks, syft, cosign,
     // trivy, dependency-check.sh, k6, and gh — so no `tools {}` block is needed.
+    // inheritFrom selects the cicd-agent pod template in jenkins.yaml (with
+    // the cicd container). `label` alone makes the plugin generate a pod
+    // with only the jnlp container, so no stage could run in `cicd`.
     agent {
         kubernetes {
-            label 'cicd-agent'
+            inheritFrom 'cicd-agent'
             defaultContainer 'cicd'
         }
     }
@@ -25,7 +28,11 @@ pipeline {
     }
 
     options {
-        timeout(time: 30, unit: 'MINUTES')
+        // Covers a main build end to end: ~10 min of build and scans, up to
+        // 15 min waiting for the production approval, up to 15 min of canary.
+        // A build stopped by this timeout ends ABORTED; post { aborted } rolls
+        // back a production deploy it interrupted.
+        timeout(time: 60, unit: 'MINUTES')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '10'))
         timestamps()
@@ -45,7 +52,9 @@ pipeline {
         pollSCM('H/5 * * * *')
         // Build 020: nightly cron triggers mutation testing at 3 am UTC (±hash window).
         // The H hash spreads concurrent jobs across the hour to avoid thundering-herd.
-        cron('H 3 * * *')
+        // develop only: in a multibranch job every branch gets this trigger, and
+        // a nightly main build would wait at the production approval and abort.
+        cron(env.BRANCH_NAME == 'develop' ? 'H 3 * * *' : '')
     }
 
     stages {
@@ -57,7 +66,8 @@ pipeline {
                 script {
                     env.GIT_AUTHOR     = sh(script: "git log -1 --format='%an'", returnStdout: true).trim()
                     env.GIT_MESSAGE    = sh(script: "git log -1 --format='%s'",  returnStdout: true).trim()
-                    env.GIT_BRANCH_NAME = sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
+                    // The checkout is a detached HEAD: take the branch from the multibranch job.
+                    env.GIT_BRANCH_NAME = env.BRANCH_NAME ?: sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
                     // Bug 1 fix: compute ENV here instead of in environment{} block
                     // to avoid mixing Groovy function calls with declarative env vars
                     env.ENV = getEnvironment()
@@ -93,19 +103,54 @@ pipeline {
                 }
                 stage('Dependency Vulnerability Scan') {
                     steps {
-                        sh '''
-                            cd app
-                            mkdir -p reports/dependency-check
-                            # OWASP Dependency Check
-                            # Build 015: --failOnCVSS tightened from 8 to 7 to match
-                            # the Trivy HIGH threshold (CVSS 7.0 == HIGH boundary).
-                            dependency-check.sh \
-                              --project "${APP_NAME}" \
-                              --scan . \
-                              --format "HTML" \
-                              --out reports/dependency-check \
-                              --failOnCVSS 7
-                        '''
+                        // Two ways to get the vulnerability database:
+                        //   - DEPENDENCY_CHECK_DATA set (a volume on the pod
+                        //     template, see jenkins.yaml): a database the
+                        //     dependency-check-db-update job keeps current; the
+                        //     scan reads it and downloads nothing (--noupdate).
+                        //   - otherwise the scan updates its own copy from the
+                        //     NVD API with the nvd-api-key credential (without a
+                        //     key, NVD rate-limits it too hard to finish).
+                        withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+                            sh '''
+                                cd app
+                                mkdir -p reports/dependency-check
+                                # The production dependencies, installed in a directory of
+                                # their own: the Lint stage installs into app/ at the
+                                # same time.
+                                rm -rf ../dependency-check-src && mkdir ../dependency-check-src
+                                cp package.json package-lock.json ../dependency-check-src/
+                                (cd ../dependency-check-src && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
+                                if [ -n "${DEPENDENCY_CHECK_DATA:-}" ]; then
+                                    set -- --data "$DEPENDENCY_CHECK_DATA" --noupdate
+                                else
+                                    # The key as NVD wants it (scripts/nvd-api-key.sh);
+                                    # untraced, since Jenkins masks only the stored value.
+                                    set +x
+                                    set -- --nvdApiKey "$(../scripts/nvd-api-key.sh)"
+                                fi
+                                # OWASP Dependency Check
+                                # Build 015: --failOnCVSS tightened from 8 to 7 to match
+                                # the Trivy HIGH threshold (CVSS 7.0 == HIGH boundary).
+                                # Dev dependencies (Jest, ESLint, Stryker…) never reach
+                                # the image (docker/Dockerfile installs production
+                                # dependencies only), which Trivy scans as built. The
+                                # project uses npm: the Yarn and pnpm analyzers would
+                                # fail the scan for want of those tools.
+                                dependency-check.sh \
+                                  --project "${APP_NAME}" \
+                                  --scan ../dependency-check-src \
+                                  --scan src \
+                                  --nodeAuditSkipDevDependencies \
+                                  --nodePackageSkipDevDependencies \
+                                  --disableYarnAudit \
+                                  --disablePnpmAudit \
+                                  "$@" \
+                                  --format "HTML" \
+                                  --out reports/dependency-check \
+                                  --failOnCVSS 7
+                            '''
+                        }
                     }
                     post {
                         always {
@@ -120,10 +165,15 @@ pipeline {
                 }
                 stage('Lint') {
                     steps {
+                        // Nothing has installed dependencies yet at this point of
+                        // the pipeline, so without npm ci ESLint is not there to
+                        // run. ESLint exits non-zero on errors, which fails the
+                        // stage; warnings only show in the report.
                         sh '''
                             cd app
                             mkdir -p reports
-                            npm run lint -- --format checkstyle --output-file reports/eslint.xml || true
+                            npm ci --prefer-offline --no-audit --no-fund
+                            npm run lint -- --format checkstyle --output-file reports/eslint.xml
                         '''
                         recordIssues(tools: [esLint(pattern: 'app/reports/eslint.xml')])
                     }
@@ -192,23 +242,29 @@ pipeline {
             parallel {
                 stage('Unit Tests') {
                     steps {
+                        // jest-junit takes its file from JEST_JUNIT_* (it ignores
+                        // --outputFile); without the default reporter a failing
+                        // test leaves no explanation in the log.
                         sh '''
                             cd app
                             mkdir -p reports
+                            JEST_JUNIT_OUTPUT_DIR=reports JEST_JUNIT_OUTPUT_NAME=junit-unit.xml \
                             npm run test:unit -- \
                               --coverage \
                               --coverageReporters=cobertura \
-                              --reporters=jest-junit \
-                              --outputFile=reports/junit-unit.xml
+                              --reporters=default \
+                              --reporters=jest-junit
                         '''
                     }
                     post {
                         always {
                             junit 'app/reports/junit-unit.xml'
-                            cobertura coberturaReportFile: 'app/coverage/cobertura-coverage.xml',
-                                      failUnhealthy: true,
-                                      failUnstable: false,
-                                      lineCoverageTargets: '80, 70, 60'
+                            // Coverage plugin (the Cobertura plugin no longer runs
+                            // on current Jenkins). Fails the build below 70% line
+                            // coverage, as lineCoverageTargets '80, 70, 60' with
+                            // failUnhealthy did; jest's own thresholds are stricter.
+                            recordCoverage tools: [[parser: 'COBERTURA', pattern: 'app/coverage/cobertura-coverage.xml']],
+                                           qualityGates: [[metric: 'LINE', baseline: 'PROJECT', threshold: 70.0, criticality: 'FAILURE']]
                         }
                     }
                 }
@@ -217,9 +273,10 @@ pipeline {
                         sh '''
                             cd app
                             mkdir -p reports
+                            JEST_JUNIT_OUTPUT_DIR=reports JEST_JUNIT_OUTPUT_NAME=junit-integration.xml \
                             npm run test:integration -- \
-                              --reporters=jest-junit \
-                              --outputFile=reports/junit-integration.xml
+                              --reporters=default \
+                              --reporters=jest-junit
                         '''
                     }
                     post {
@@ -227,30 +284,6 @@ pipeline {
                             junit 'app/reports/junit-integration.xml'
                         }
                     }
-                }
-            }
-        }
-
-        // ─── STAGE 6: DEPLOY → PR PREVIEW ────────────────────────────────────
-        // Build 009 — point 29: wire scripts/pr-preview-up.sh (added in Build 011).
-        // This stage runs only on pull-request builds (changeRequest() condition).
-        // PR teardown lives in a separate Jenkins job triggered by the GitHub
-        // "pull_request closed" webhook — see scripts/pr-preview-down.sh.
-        stage('Deploy → PR Preview') {
-            when {
-                changeRequest()
-            }
-            steps {
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
-                    sh '''
-                        export KUBECONFIG=$KUBECONFIG_FILE
-                        ./scripts/pr-preview-up.sh ${CHANGE_ID}
-                    '''
-                }
-            }
-            post {
-                success {
-                    notifySlack("🌿 *PR Preview Ready* — PR #${CHANGE_ID}: https://preview-pr-${CHANGE_ID}.${APP_NAME}.internal")
                 }
             }
         }
@@ -264,12 +297,12 @@ pipeline {
         // Agent requirements for buildx multi-arch:
         //   - Docker daemon with the docker-container buildx driver (default on
         //     Docker ≥ 23 when BuildKit is enabled).
-        //   - binfmt_misc QEMU emulation for cross-arch builds. On kind clusters
-        //     this is available by default. On cloud VM agents without QEMU, run
-        //     once during agent bootstrap:
+        //   - binfmt_misc QEMU emulation for cross-arch builds, registered in
+        //     the node's kernel (the dind sidecar shares it). On nodes without
+        //     it, run once per node:
         //       docker run --privileged --rm tonistiigi/binfmt --install all
-        //   - The agent's docker socket must be accessible (already assumed by
-        //     earlier builds).
+        //   - A Docker daemon: the dind sidecar of the cicd-agent pod template
+        //     (docker/jenkins/jenkins.yaml), reached through DOCKER_HOST.
         stage('Docker Build & Push') {
             steps {
                 script {
@@ -286,17 +319,25 @@ pipeline {
                             # Ensure a buildx builder with the docker-container driver exists.
                             # The docker-container driver supports multi-platform builds via QEMU.
                             # If a builder named 'multiarch' already exists, reuse it.
-                            docker buildx create --use --name multiarch --driver docker-container || docker buildx use multiarch
+                            # BUILDKITD_CONFIG (optional, set on the pod template) is a
+                            # buildkitd.toml for the builder: registry mirrors, a private
+                            # registry's CA, or a plain-HTTP registry in a test setup.
+                            docker buildx create --use --name multiarch --driver docker-container \
+                              \${BUILDKITD_CONFIG:+--buildkitd-config "\$BUILDKITD_CONFIG"} || docker buildx use multiarch
 
                             # Build and push the multi-arch manifest list in one step.
                             # --push streams layers directly to the registry without a local load;
                             # this is required for multi-platform images (they cannot be loaded
                             # into the local Docker daemon simultaneously).
+                            # --metadata-file records the pushed manifest list's
+                            # digest, which the image is signed by below.
+                            mkdir -p reports
                             docker buildx build \
                               --platform linux/amd64,linux/arm64 \
                               --push \
+                              --metadata-file reports/build-metadata.json \
                               -t ${FULL_IMAGE} \
-                              -t ${DOCKER_REGISTRY}/${APP_NAME}:latest \
+                              ${env.BRANCH_NAME == 'main' ? "-t ${DOCKER_REGISTRY}/${APP_NAME}:latest" : ''} \
                               -f docker/Dockerfile \
                               --cache-from type=registry,ref=${DOCKER_REGISTRY}/${APP_NAME}:cache \
                               --cache-to   type=registry,ref=${DOCKER_REGISTRY}/${APP_NAME}:cache,mode=max \
@@ -320,23 +361,22 @@ pipeline {
                         syft "${FULL_IMAGE}" -o cyclonedx-json > reports/sbom.cdx.json
                     """
 
-                    // Build 019: Keyless cosign signing of the manifest list digest.
-                    // cosign sign targets the digest (immutable) rather than the mutable tag.
-                    // OIDC issuer: depends on the OIDC provider configured for the Jenkins agent.
-                    //   - GitHub Actions: https://token.actions.githubusercontent.com
-                    //   - On-prem Jenkins with Keycloak: your Keycloak realm OIDC URL
-                    //   - COSIGN_EXPERIMENTAL=1 is legacy; cosign v2+ uses keyless by default
-                    //     when no --key flag is provided and OIDC is available.
-                    sh """
-                        COSIGN_EXPERIMENTAL=1 cosign sign --yes "${FULL_IMAGE}"
-                    """
-
-                    // Build 019: SLSA provenance attestation.
-                    // Attaches a SLSA Build L2 provenance predicate to the image as a
-                    // cosign attestation. The attestation is stored in the same registry
-                    // OCI repository alongside the image (using the cosign tag convention).
+                    // Build 019: sign the image and attach SLSA provenance, by the
+                    // manifest list's digest (immutable) rather than the tag.
                     //
-                    // IMPORTANT — real vs. demo fields:
+                    // Signing identity:
+                    //   - COSIGN_KEY set (pod template or global env): a key
+                    //     reference cosign understands, e.g. awskms://alias/my-app-signing,
+                    //     gcpkms://…, hashivault://…, k8s://jenkins/cosign, or a key file
+                    //     (with COSIGN_PASSWORD). The usual choice for Jenkins.
+                    //   - unset: keyless (Fulcio + Rekor), which needs an OIDC token the
+                    //     agent can present (cloud workload identity, or a provider
+                    //     cosign detects). A plain Jenkins agent has none.
+                    // COSIGN_EXTRA_ARGS (optional) is added to both commands, e.g.
+                    // --tlog-upload=false for a private registry whose image names
+                    // should stay out of the public Rekor log.
+                    //
+                    // Provenance, real vs. demo fields:
                     //   - buildType: demo placeholder; a real SLSA L3 builder would use a
                     //     URI registered with slsa.dev and the identity would come from the
                     //     OIDC token, not be self-attested.
@@ -346,9 +386,16 @@ pipeline {
                     //     byte-for-byte due to timestamps in npm artefacts.
                     //   - For a verifiable SLSA L3 builder, replace this with a build service
                     //     that mints the provenance from an OIDC token it controls.
+                    //
+                    // The predicate is written to a file: the agent's /bin/sh is dash,
+                    // which has no <(…) process substitution.
                     sh '''
-                        cosign attest --yes --type slsaprovenance \
-                          --predicate <(cat <<EOF
+                        digest=$(jq -r '."containerimage.digest" // empty' reports/build-metadata.json)
+                        [ -n "$digest" ] || { echo "buildx recorded no image digest"; exit 1; }
+                        IMAGE_REF="${FULL_IMAGE%:*}@$digest"
+                        echo "$IMAGE_REF" > reports/image-ref.txt
+
+                        cat > reports/provenance.json <<EOF
 {
   "buildType": "https://jenkins.io/buildType/v1",
   "builder": {"id": "${JENKINS_URL}"},
@@ -370,10 +417,14 @@ pipeline {
   }
 }
 EOF
-) ${FULL_IMAGE}
+                        if [ -n "${COSIGN_KEY:-}" ]; then set -- --key "$COSIGN_KEY"; else set --; fi
+                        # COSIGN_EXTRA_ARGS is a list of flags: split on purpose.
+                        cosign sign --yes "$@" ${COSIGN_EXTRA_ARGS:-} "$IMAGE_REF"
+                        cosign attest --yes "$@" ${COSIGN_EXTRA_ARGS:-} \
+                          --type slsaprovenance --predicate reports/provenance.json "$IMAGE_REF"
                     '''
 
-                    archiveArtifacts artifacts: 'reports/sbom.cdx.json', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'reports/sbom.cdx.json, reports/provenance.json, reports/image-ref.txt', allowEmptyArchive: true
                 }
             }
         }
@@ -397,6 +448,29 @@ EOF
             post {
                 always {
                     archiveArtifacts artifacts: 'reports/grype.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ─── STAGE 7c: DEPLOY → PR PREVIEW ───────────────────────────────────
+        // Build 009 — point 29: scripts/pr-preview-up.sh deploys this build's
+        // image into namespace preview-pr-<N>, reachable at
+        // pr-<N>.${PREVIEW_DOMAIN}. Runs on pull-request builds only, after the
+        // image is built, scanned and pushed. PR teardown lives in the
+        // pr-preview-teardown job, triggered by GitHub's "pull_request closed"
+        // webhook — see scripts/pr-preview-down.sh.
+        stage('Deploy → PR Preview') {
+            when {
+                changeRequest()
+            }
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh './scripts/pr-preview-up.sh "$CHANGE_ID" "$FULL_IMAGE" "pr-$CHANGE_ID.$PREVIEW_DOMAIN"'
+                }
+            }
+            post {
+                success {
+                    notifySlack("🌿 *PR Preview Ready* — PR #${CHANGE_ID}: https://pr-${CHANGE_ID}.${PREVIEW_DOMAIN}")
                 }
             }
         }
@@ -427,7 +501,7 @@ EOF
                     mkdir -p reports
                     k6 run \
                       --out json=reports/k6-results.json \
-                      --env BASE_URL=https://staging.${APP_NAME}.internal \
+                      --env BASE_URL="$STAGING_URL" \
                       tests/performance/load-test.js
 
                     node tests/performance/compare-baseline.js \
@@ -450,12 +524,12 @@ EOF
         // Build 020: Playwright E2E tests run against the staging environment
         // after the staging deploy and performance tests succeed.
         //
-        // `playwright install --with-deps chromium` calls apt to install system
-        // dependencies (fonts, libnss3, etc.).  This works because the custom
-        // Jenkins agent image is Debian-based.  For air-gapped environments,
-        // bake the browser into the agent image:
-        //   RUN npx playwright install --with-deps chromium
-        // in docker/jenkins-agent/Dockerfile.
+        // The agent image carries Chromium's system libraries and the browser
+        // for the Playwright version the lockfile pins (docker/jenkins-agent/
+        // Dockerfile): installing the libraries needs apt and root, which the
+        // pipeline does not have. `playwright install --only-shell chromium` is
+        // then a no-op, or downloads a newer one if the app's Playwright moved
+        // ahead. Tests run headless, which needs only the headless shell.
         stage('E2E Tests') {
             when { branch 'develop' }
             steps {
@@ -463,8 +537,8 @@ EOF
                     sh '''
                         mkdir -p reports
                         npm ci --prefer-offline
-                        npx playwright install --with-deps chromium
-                        BASE_URL=https://staging.app.${APP_NAME}.internal npm run test:e2e
+                        npx playwright install --only-shell chromium
+                        BASE_URL="$STAGING_URL" npm run test:e2e
                     '''
                 }
             }
@@ -517,11 +591,23 @@ EOF
                     input message: "Deploy ${IMAGE_TAG} to PRODUCTION?", ok: 'Deploy Now'
                 }
                 script {
-                    // Save current image for potential rollback
-                    env.PREVIOUS_IMAGE = sh(
-                        script: "kubectl get deployment ${APP_NAME} -n production -o jsonpath='{.spec.template.spec.containers[0].image}' || echo 'none'",
-                        returnStdout: true
-                    ).trim()
+                    // The release to roll back to: the image the Rollout's stable
+                    // ReplicaSet runs (its pod template may hold an aborted
+                    // release). Read with the deployer's kubeconfig; the agent
+                    // pod's own service account cannot see production.
+                    withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                        env.PREVIOUS_IMAGE = sh(
+                            script: '''
+                                stable=$(kubectl get rollout/"$APP_NAME" -n production -o jsonpath='{.status.stableRS}' 2>/dev/null || true)
+                                image=""
+                                [ -n "$stable" ] && image=$(kubectl get rs -n production -l rollouts-pod-template-hash="$stable" \\
+                                    -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || true)
+                                echo "${image:-none}"
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                    }
+                    echo "Previous production image: ${env.PREVIOUS_IMAGE}"
 
                     // Build 015 — DORA: capture build start epoch and git author date
                     // for lead-time computation in post.success below.
@@ -539,6 +625,8 @@ EOF
                         returnStdout: true
                     ).trim()
 
+                    // From here on a failed or aborted build rolls production back.
+                    env.PRODUCTION_DEPLOY_STARTED = 'true'
                     // Build 017: run migrations before deploy (expand-contract pattern)
                     runMigrations('production', FULL_IMAGE)
                     deployToKubernetes('production', FULL_IMAGE)
@@ -562,17 +650,15 @@ EOF
                         pushDoraMetric('lead_time_seconds', leadTime)
 
                         // ── DORA: MTTR ─────────────────────────────────────
-                        // Walk back through previousBuild history to find the
-                        // most recent failed production build and compute the
-                        // elapsed seconds from that failure to this success.
-                        // If no previous failure is found, push 0 (no outage).
+                        // Time from the first failure of the failure streak this
+                        // deploy ends to now: walk back over the builds since the
+                        // last success. No failure since then: push 0.
                         def prevBuild = currentBuild.previousBuild
                         def failedBuildTs = null
-                        while (prevBuild != null) {
+                        while (prevBuild != null && prevBuild.result != 'SUCCESS') {
                             if (prevBuild.result == 'FAILURE') {
                                 // getTimeInMillis() returns epoch-ms; convert to seconds
                                 failedBuildTs = (prevBuild.getTimeInMillis() / 1000).toLong()
-                                break
                             }
                             prevBuild = prevBuild.previousBuild
                         }
@@ -606,21 +692,33 @@ EOF
                 buildingTag()
                 tag pattern: "v\\d+\\.\\d+\\.\\d+", comparator: "REGEXP"
             }
-            steps {
-                // Re-tag the already-built image with the SemVer tag and push
-                sh '''
-                    docker tag ${FULL_IMAGE} ${DOCKER_REGISTRY}/${APP_NAME}:${TAG_NAME}
-                    docker push ${DOCKER_REGISTRY}/${APP_NAME}:${TAG_NAME}
-                '''
-                // Create a GitHub Release via gh CLI.
-                // gh requires a GitHub token; wrap in withCredentials so the
-                // token is available as GH_TOKEN without leaking into the log.
-                withCredentials([string(credentialsId: 'github-credentials', variable: 'GH_TOKEN')]) {
-                    sh '''
-                        gh release create ${TAG_NAME} \
-                          --title "Release ${TAG_NAME}" \
-                          --notes "Automated release for ${TAG_NAME}. See CHANGELOG.md for details."
-                    '''
+            // Two steps, so a failure says which half broke: the image in the
+            // registry, or the release page on GitHub.
+            stages {
+                stage('Tag the image') {
+                    steps {
+                        // Tag the image this build pushed with the SemVer tag, in
+                        // the registry: buildx pushed a multi-arch manifest list
+                        // that was never loaded into the local daemon, so `docker
+                        // tag` has nothing to tag. imagetools copies the whole
+                        // list, every platform.
+                        sh 'docker buildx imagetools create -t "$DOCKER_REGISTRY/$APP_NAME:$TAG_NAME" "$FULL_IMAGE"'
+                    }
+                }
+                stage('GitHub release') {
+                    steps {
+                        // gh requires a GitHub token; wrap in withCredentials so the
+                        // token is available as GH_TOKEN without leaking into the log.
+                        // github-credentials is a username + PAT (the branch source
+                        // needs that type), so read the token as its password.
+                        withCredentials([usernamePassword(credentialsId: 'github-credentials', usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
+                            sh '''
+                                gh release create ${TAG_NAME} \\
+                                  --title "Release ${TAG_NAME}" \\
+                                  --notes "Automated release for ${TAG_NAME}. See CHANGELOG.md for details."
+                            '''
+                        }
+                    }
                 }
             }
         }
@@ -634,12 +732,16 @@ EOF
         }
         failure {
             script {
-                notifySlack("🚨 *Pipeline FAILED* — ${APP_NAME} #${BUILD_NUMBER}\n*Stage:* ${env.STAGE_NAME}\n*Branch:* ${env.GIT_BRANCH_NAME}")
-                if (env.BRANCH_NAME == 'main' && env.PREVIOUS_IMAGE && env.PREVIOUS_IMAGE != 'none') {
-                    echo "⚠️  Production deploy failed — initiating automatic rollback to ${env.PREVIOUS_IMAGE}"
-                    rollback('production', env.PREVIOUS_IMAGE)
-                    notifySlack("🔁 *Auto-Rollback Completed* — ${APP_NAME} rolled back to `${env.PREVIOUS_IMAGE}`")
-                }
+                notifySlack("🚨 *Pipeline FAILED* — ${APP_NAME} #${BUILD_NUMBER}\n*Branch:* ${env.GIT_BRANCH_NAME}\n${env.BUILD_URL}")
+                rollbackInterruptedDeploy()
+            }
+        }
+        // The global timeout, or someone stopping the build, ends it ABORTED:
+        // a production deploy it interrupted is rolled back the same way.
+        aborted {
+            script {
+                notifySlack("⏹️ *Pipeline ABORTED* — ${APP_NAME} #${BUILD_NUMBER}\n*Branch:* ${env.GIT_BRANCH_NAME}\n${env.BUILD_URL}")
+                rollbackInterruptedDeploy()
             }
         }
         unstable {
@@ -654,38 +756,100 @@ EOF
 
 // ─── SHARED FUNCTIONS ─────────────────────────────────────────────────────────
 
+// After a failed or aborted main build: if Deploy → Production had started,
+// put production back on the release it ran before.
+def rollbackInterruptedDeploy() {
+    if (env.BRANCH_NAME == 'main' && env.PRODUCTION_DEPLOY_STARTED == 'true' &&
+            env.PREVIOUS_IMAGE && env.PREVIOUS_IMAGE != 'none') {
+        echo "⚠️  Production deploy did not complete — rolling back to ${env.PREVIOUS_IMAGE}"
+        rollback('production', env.PREVIOUS_IMAGE)
+        notifySlack("🔁 *Auto-Rollback Completed* — ${APP_NAME} rolled back to `${env.PREVIOUS_IMAGE}`")
+    }
+}
+
+// Production runs an Argo Rollout (k8s/overlays/production replaces the base
+// Deployment with it); every other namespace runs the plain Deployment.
+def workloadRef(String namespace) {
+    return namespace == 'production' ? "rollout/${APP_NAME}" : "deployment/${APP_NAME}"
+}
+
+// Shell snippet that blocks until the namespace's workload has rolled out.
+// Rollouts take longer than the 5 min Deployment budget: the canary steps
+// alone pause 4 min plus two analysis runs.
+def waitForWorkload(String namespace) {
+    if (namespace == 'production') {
+        return "scripts/wait-for-rollout.sh ${namespace} ${APP_NAME} 900"
+    }
+    return "kubectl rollout status deployment/${APP_NAME} --namespace=${namespace} --timeout=300s"
+}
+
+// The tag part of an image reference (registry:5000/my-app:42-abc1234 →
+// 42-abc1234), used as the pod template's version label.
+def imageTag(String image) {
+    return image.substring(image.lastIndexOf(':') + 1)
+}
+
 def deployToKubernetes(String namespace, String image) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
         sh """
             export KUBECONFIG=\${KUBECONFIG}
 
             # Set the image in the Kustomize overlay and apply
-            cd k8s/overlays/${namespace}
-            kustomize edit set image my-app=${image}
-            kubectl apply -k . --namespace=${namespace}
+            (
+              cd k8s/overlays/${namespace}
+              kustomize edit set image my-app=${image}
+              # require-labels (Kyverno) needs a version label on the pod template
+              kustomize edit add label version:${imageTag(image)} --without-selector --include-templates
+              kubectl apply -k . --namespace=${namespace}
+            )
 
-            # Wait for rollout to complete (timeout 5 min)
-            kubectl rollout status deployment/${APP_NAME} \
-              --namespace=${namespace} \
-              --timeout=300s
+            ${waitForWorkload(namespace)}
 
             echo "✅ Deployed to ${namespace}"
         """
+        if (namespace == 'production') {
+            // Earlier versions of the production overlay failed to delete the
+            // base Deployment, so clusters deployed before the fix run it next
+            // to the Rollout. `kubectl apply` never prunes it; remove it once
+            // the Rollout is healthy and serving.
+            sh """
+                export KUBECONFIG=\${KUBECONFIG}
+                kubectl delete deployment/${APP_NAME} --namespace=${namespace} --ignore-not-found
+            """
+        }
     }
 }
 
 def rollback(String namespace, String previousImage) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-        sh """
-            export KUBECONFIG=\${KUBECONFIG}
-            kubectl set image deployment/${APP_NAME} \
-              ${APP_NAME}=${previousImage} \
-              --namespace=${namespace}
-            kubectl rollout status deployment/${APP_NAME} \
-              --namespace=${namespace} \
-              --timeout=180s
-            echo "🔁 Rollback complete → ${previousImage}"
-        """
+        if (namespace == 'production') {
+            // `kubectl set image` only supports built-in workloads, so patch the
+            // Rollout's pod template back to the previous release: its image and
+            // the version label deployToKubernetes() derived from it. With both
+            // restored the template matches the stable ReplicaSet, so Argo
+            // Rollouts switches straight back instead of running the canary
+            // steps again.
+            sh """
+                export KUBECONFIG=\${KUBECONFIG}
+                kubectl patch rollout/${APP_NAME} --namespace=${namespace} --type=json -p '[
+                  {"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": "${previousImage}"},
+                  {"op": "replace", "path": "/spec/template/metadata/labels/version", "value": "${imageTag(previousImage)}"}
+                ]'
+                ${waitForWorkload(namespace)}
+                echo "🔁 Rollback complete → ${previousImage}"
+            """
+        } else {
+            sh """
+                export KUBECONFIG=\${KUBECONFIG}
+                kubectl set image deployment/${APP_NAME} \
+                  ${APP_NAME}=${previousImage} \
+                  --namespace=${namespace}
+                kubectl rollout status deployment/${APP_NAME} \
+                  --namespace=${namespace} \
+                  --timeout=180s
+                echo "🔁 Rollback complete → ${previousImage}"
+            """
+        }
     }
 }
 
@@ -694,13 +858,19 @@ def runSmokeTests(String env) {
     // fragile because the working directory is not guaranteed across sh steps.
     // Bug 2 fix: run npm ci before the test command so smoke-test deps are
     // installed (the tests/ directory has its own package.json).
+    // STAGING_URL / PRODUCTION_URL: where the agents reach each environment
+    // (Jenkins global environment, from .env).
+    def baseUrl = (env == 'production') ? PRODUCTION_URL : STAGING_URL
+    // Production: read-only (SMOKE_WRITES=false), so deploys leave no test rows.
+    def writes = (env == 'production') ? 'false' : 'true'
     dir('tests') {
         sh """
             npm ci --prefer-offline --no-audit --no-fund
-            BASE_URL=https://${env}.${APP_NAME}.internal \
+            BASE_URL=${baseUrl} SMOKE_WRITES=${writes} \
+            JEST_JUNIT_OUTPUT_DIR=reports JEST_JUNIT_OUTPUT_NAME=junit-smoke-${env}.xml \
             npm run test:smoke -- \
-              --reporters=jest-junit \
-              --outputFile=reports/junit-smoke-${env}.xml
+              --reporters=default \
+              --reporters=jest-junit
         """
     }
     junit "tests/reports/junit-smoke-${env}.xml"
@@ -709,7 +879,7 @@ def runSmokeTests(String env) {
 def notifySlack(String message) {
     slackSend(
         channel: env.SLACK_CHANNEL,
-        color: currentBuild.result == 'SUCCESS' ? 'good' : 'danger',
+        color: currentBuild.currentResult == 'SUCCESS' ? 'good' : 'danger',
         message: message
     )
 }
@@ -726,9 +896,13 @@ def getEnvironment() {
 // Design notes:
 //   - Uses `kubectl run --rm --attach` (not a Job manifest) for simplicity;
 //     the pod is deleted automatically after completion.
-//   - The app image already contains knex + knexfile.js (copied by Dockerfile).
-//   - serviceaccount=my-app must have `get/list/watch pods` if you use --attach;
-//     in practice `kubectl run --rm` needs the same RBAC as kubectl run.
+//   - The app image contains knex, knexfile.js and migrations/ (Dockerfile).
+//   - The pod spec lives in k8s/migrations/migrate-pod-overrides.json: it gets
+//     the same ConfigMap and DB secret as the app and satisfies the Kyverno Pod
+//     policies. kubectl >= 1.24 has no --serviceaccount flag, and a bare
+//     `kubectl run` pod has no DB settings at all. See k8s/migrations/README.md.
+//   - The jenkins credentials in KUBECONFIG need create/get/delete on pods and
+//     pods/attach in the target namespace.
 //   - Expand-contract pattern assumed: migrations are additive (new columns
 //     nullable or with defaults, no DROP/RENAME) so old pods keep running
 //     during the deployment rollout window.  Destructive cleanup migrations
@@ -739,12 +913,14 @@ def runMigrations(String namespace, String image) {
     withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
         sh """
             export KUBECONFIG=\${KUBECONFIG}
-            kubectl run my-app-migrate-${BUILD_NUMBER} \
+            POD=my-app-migrate-${BUILD_NUMBER}
+            OVERRIDES=\$(sed -e "s|__NAME__|\$POD|" -e "s|__IMAGE__|${image}|" k8s/migrations/migrate-pod-overrides.json)
+            kubectl run \$POD \
               --namespace=${namespace} \
               --image=${image} \
+              --labels=app=my-app-migrate \
               --rm --restart=Never --attach=true \
-              --serviceaccount=my-app \
-              -- node node_modules/.bin/knex migrate:latest --knexfile=knexfile.js
+              --overrides="\$OVERRIDES"
         """
     }
 }
@@ -757,9 +933,14 @@ def runMigrations(String namespace, String image) {
 //   job      = "jenkins"   (groups all Jenkins pushes together in Prometheus)
 //   instance = JOB_NAME-BUILD_NUMBER (unique per build for cardinality control)
 def pushDoraMetric(String metric, String value) {
-    sh """
-        curl -sf --data-binary '${metric}{job="jenkins",instance="${env.JOB_NAME}-${env.BUILD_NUMBER}"} ${value}\\n' \
-            http://prometheus-pushgateway.monitoring.svc.cluster.local:9091/metrics/job/jenkins/instance/${env.JOB_NAME}-${env.BUILD_NUMBER} \
-            || echo "WARN: pushgateway push failed for ${metric} — continuing"
-    """
+    // instance: app and build number; JOB_NAME of a multibranch job contains a
+    // slash, which would add a path segment to the grouping key.
+    withEnv(["DORA_METRIC=${metric}", "DORA_VALUE=${value}", "DORA_INSTANCE=${APP_NAME}-${BUILD_NUMBER}"]) {
+        sh '''
+            printf '%s{job="jenkins",instance="%s"} %s\n' "$DORA_METRIC" "$DORA_INSTANCE" "$DORA_VALUE" |
+              curl -sf --data-binary @- \
+                "http://pushgateway.monitoring.svc.cluster.local:9091/metrics/job/jenkins/instance/$DORA_INSTANCE" ||
+              echo "WARN: pushgateway push failed for $DORA_METRIC — continuing"
+        '''
+    }
 }

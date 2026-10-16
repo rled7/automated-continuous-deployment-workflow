@@ -5,12 +5,21 @@ metadata:
 spec:
   hard:
     # Production runs more replicas and heavier workloads than the base defaults.
-    # These values reflect a small-to-medium production deployment; scale up as
-    # the team grows. Staging intentionally uses the conservative base values.
+    # Staging intentionally uses the conservative base values.
+    #
+    # Sized for the worst case the HPA and a canary can reach together: the
+    # HPA's maxReplicas (20, hpa-patch.yaml) plus the canary's 25% surge is
+    # 25 pods at 200m/256Mi requests and 1 CPU/1Gi limits (rollout-patch.yaml),
+    # plus the migration pod (100m/128Mi, 500m/256Mi limits;
+    # k8s/migrations/migrate-pod-overrides.json):
+    #   requests  5.1 CPU, ~6.4Gi     limits  25.5 CPU, ~25.3Gi
+    # A quota below that leaves the canary's new pods Pending (FailedCreate:
+    # exceeded quota) and the release stalls. Raise these with maxReplicas or
+    # the per-pod resources.
     requests.cpu: "8"
     requests.memory: "8Gi"
-    limits.cpu: "16"
-    limits.memory: "16Gi"
+    limits.cpu: "26"
+    limits.memory: "26Gi"
 
     # More pods for multi-replica deployments + canary pods during Rollout.
     pods: "50"

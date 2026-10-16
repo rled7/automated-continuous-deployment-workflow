@@ -2,8 +2,11 @@
 # resource (rollout-patch.yaml) takes over as the workload controller for production.
 # Argo Rollouts manages its own ReplicaSets and does not coexist with a Deployment
 # of the same name.
+#
+# `$patch: delete` must be a top-level key of the patch: nested under metadata
+# kustomize ignores it and the Deployment is still rendered next to the Rollout.
+$patch: delete
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: my-app
-  $patch: delete

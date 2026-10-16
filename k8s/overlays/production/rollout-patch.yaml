@@ -13,6 +13,13 @@ spec:
         app: my-app
     spec:
       terminationGracePeriodSeconds: 60
+      # Same pod-level settings as k8s/base/deployment.yaml. The production
+      # namespace enforces Pod Security "restricted", which rejects any pod
+      # without a seccompProfile, so without this the Rollout creates no pods.
+      serviceAccountName: my-app
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       imagePullSecrets:
         - name: registry-credentials
       containers:
@@ -35,6 +42,18 @@ spec:
           env:
             - name: NODE_ENV
               value: production
+            # The SealedSecret keys are db-host / db-password; map them to the
+            # names the app reads (same as k8s/base/deployment.yaml).
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: my-app-secrets
+                  key: db-host
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: my-app-secrets
+                  key: db-password
           startupProbe:
             httpGet:
               path: /health/live
@@ -47,12 +66,17 @@ spec:
               port: 3000
             initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 2
           readinessProbe:
             httpGet:
               path: /health/ready
               port: 3000
             initialDelaySeconds: 5
             periodSeconds: 5
+            # /health/ready waits up to ~1.5 s for its database check; the
+            # default 1 s timeout would mark a healthy pod unready whenever
+            # the database is slightly slow.
+            timeoutSeconds: 3
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -71,6 +95,10 @@ spec:
         - analysis:
             templates:
               - templateName: success-rate
+            args:
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
         # Step 2: ramp to 50%
         - setWeight: 50
         - pause:
@@ -78,5 +106,9 @@ spec:
         - analysis:
             templates:
               - templateName: success-rate
+            args:
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
         # Step 3: promote to 100%
         - setWeight: 100

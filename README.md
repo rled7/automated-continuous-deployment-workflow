@@ -30,7 +30,7 @@ Developer Push
 ## Project Structure
 
 ```
-jenkins-cicd/
+automated-continuous-deployment-workflow/
 ├── Jenkinsfile                  # Full pipeline definition
 ├── .env.example                 # Environment variables template
 ├── app/
@@ -44,15 +44,24 @@ jenkins-cicd/
 │   ├── jenkins.yaml             # Jenkins Configuration as Code (JCasC)
 │   └── plugins.txt              # Required Jenkins plugins
 ├── k8s/
-│   ├── production/deployment.yaml   # HPA, PDB, rolling update, ingress
-│   └── staging/deployment.yaml
+│   ├── base/                    # Deployment, Service, HPA, PDB, NetworkPolicies, quota
+│   ├── overlays/staging/        # Staging: Deployment
+│   ├── overlays/production/     # Production: Argo Rollout (canary + analysis)
+│   └── migrations/              # Pod spec runMigrations() uses
 ├── monitoring/
-│   └── prometheus.yaml          # Prometheus scrape + alert rules
+│   ├── pushgateway.yaml         # Pushgateway for the DORA metrics Jenkins pushes
+│   ├── slo.yaml                 # SLO definitions (OpenSLO; not applied to the cluster)
+│   └── grafana/                 # Dashboards (scrape config and alert rules live in
+│                                #   argocd/bootstrap/apps/kube-prometheus-stack.yaml)
 ├── tests/
 │   ├── performance/load-test.js # k6 load test (ramp → spike → ramp down)
 │   └── smoke/smoke.test.js      # Post-deploy smoke tests
-└── scripts/
-    └── setup.sh                 # Bootstrap script
+├── scripts/
+│   ├── setup.sh                 # Bootstrap script
+│   └── wait-for-rollout.sh      # Waits for the production Rollout (no plugin needed)
+├── harness/                     # Local verification harness (see below)
+├── .github/workflows/verify.yml # Runs the harness on every PR
+└── .claude/hooks/               # Sets up Claude Code cloud sessions to run the harness
 ```
 
 ---
@@ -62,34 +71,91 @@ jenkins-cicd/
 ### 1. Clone & Configure
 
 ```bash
-git clone https://github.com/YOUR_ORG/my-app
-cd jenkins-cicd
+git clone https://github.com/rled7/automated-continuous-deployment-workflow
+cd automated-continuous-deployment-workflow
 cp .env.example .env
 # Edit .env with your credentials
 ```
 
 ### 2. Start Local CI Stack
 
+The Docker Compose stack in `docker/` is for trying the Jenkins controller
+(its plugins, `jenkins.yaml` and credentials), SonarQube and the registry. It
+does not run builds: see [Running builds](#running-builds). It needs Docker
+Compose v2.24 or newer (`docker compose version`).
+
 ```bash
 chmod +x scripts/setup.sh
 ./scripts/setup.sh --local
 ```
 
-Opens:
+It waits until each service answers (Jenkins `/login`, SonarQube
+`/api/system/status` UP), failing after a timeout, and opens:
 - Jenkins  → http://localhost:8080
 - SonarQube → http://localhost:9000
+- Registry → http://localhost:5000
+
+Upgrading a stack you started before: Jenkins now runs as the image's
+`jenkins` user instead of root, so give it back the files root wrote in its
+volume; SonarQube moved from 9.9 to 10.7, so open http://localhost:9000/setup
+once to upgrade its database (`setup.sh` stops and says so when it is needed).
+
+```bash
+docker compose -f docker/docker-compose.yml run --rm --no-deps --user root jenkins \
+    find /var/jenkins_home -xdev -user root -exec chown jenkins:jenkins {} +
+```
 
 ### 3. Configure Jenkins
 
-Jenkins auto-configures itself via `jenkins/jenkins.yaml` (JCasC). Add these credentials manually in **Manage Jenkins → Credentials**:
+Jenkins is built with the plugins in `docker/jenkins/plugins.txt` and configures itself from `docker/jenkins/jenkins.yaml` (JCasC). The credentials below are created from your `.env` at startup — no manual setup:
 
-| ID | Type | Description |
+| ID | Type | From `.env` |
 |----|------|-------------|
-| `docker-registry-credentials` | Username/Password | Docker registry |
-| `kubeconfig` | Secret file | Kubernetes config |
-| `sonarqube-token` | Secret text | SonarQube token |
-| `slack-token` | Secret text | Slack bot token |
-| `github-credentials` | Username/Password | GitHub PAT |
+| `docker-registry-url` | Secret text | `DOCKER_REGISTRY` |
+| `docker-registry-credentials` | Username/Password | `DOCKER_USER`, `DOCKER_PASSWORD` |
+| `kubeconfig` | Secret file | the file at `KUBECONFIG` |
+| `sonarqube-token` | Secret text | `SONAR_TOKEN` |
+| `nvd-api-key` | Secret text | `NVD_API_KEY` |
+| `slack-token` | Secret text | `SLACK_TOKEN` |
+| `github-credentials` | Username/Password | `GITHUB_USER`, `GITHUB_TOKEN` |
+
+After changing `.env` or `plugins.txt`, recreate Jenkins: `docker compose up -d --build jenkins`.
+
+#### Connect SonarQube to Jenkins
+
+The SonarQube Analysis stage needs a token for Jenkins, and its quality gate needs SonarQube to send results back to Jenkins through a webhook. Without the webhook, `waitForQualityGate` waits its 5 minutes and fails every build. Log in to SonarQube (http://localhost:9000) as `admin` / `admin`, set a new password, then:
+
+```bash
+SONAR_ADMIN_PASSWORD=<new password> scripts/sonarqube-setup.sh
+```
+
+It creates the webhook to `http://jenkins:8080/sonarqube-webhook/` (set `JENKINS_WEBHOOK_URL` for another Jenkins address) and a token, and prints `SONAR_TOKEN=...` once; put that in `.env` and recreate Jenkins. Running it again changes nothing. The `pipeline` harness stage sets up its SonarQube with the same script.
+
+#### Running builds
+
+The Compose Jenkins cannot run the pipeline: it has no executors
+(`numExecutors: 0`), and the only cloud in `docker/jenkins/jenkins.yaml` is a
+Kubernetes cloud that expects Jenkins inside the cluster (API server
+`https://kubernetes.default.svc`, controller
+`http://jenkins.jenkins.svc.cluster.local:8080`, agents connecting back to
+`jenkins-agent.jenkins.svc:50000`, SonarQube at `http://sonarqube:9000`). To
+run builds, run the same image (built from `docker/jenkins/Dockerfile`) in
+namespace `jenkins` of your cluster:
+
+- [`harness/fixtures/jenkins-in-cluster.yaml`](harness/fixtures/jenkins-in-cluster.yaml)
+  is a working example: the namespace, service accounts and RBAC for agent
+  pods, the `jenkins` and `jenkins-agent` Services, and a Deployment that reads
+  `jenkins.yaml` from the `jenkins-casc` ConfigMap, the `.env` variables from
+  the `jenkins-env` Secret and the kubeconfig credential from the
+  `jenkins-kubeconfig` Secret.
+- [`harness/stages/pipeline.sh`](harness/stages/pipeline.sh) does the whole
+  setup on a kind cluster, SonarQube included, and runs the Jenkinsfile
+  (`harness/verify.sh pipeline`).
+
+The fixture is made for a throwaway cluster: for one that lasts, give Jenkins a
+persistent volume for `/var/jenkins_home` and the deployer narrower rights
+than cluster-admin. [`docs/cluster-setup.md`](docs/cluster-setup.md) sets up
+a kind cluster with Argo CD for the app itself.
 
 ### 4. Set Up Kubernetes (Production)
 
@@ -97,7 +163,14 @@ Jenkins auto-configures itself via `jenkins/jenkins.yaml` (JCasC). Add these cre
 ./scripts/setup.sh --k8s
 ```
 
+It creates the `production`, `staging` and `monitoring` namespaces, the
+`registry-credentials` pull secret and `my-app-secrets` (from `DOCKER_*`,
+`DB_HOST` and `DB_PASSWORD` in `.env`) in both app namespaces, and the
+Prometheus Pushgateway.
+
 ### 5. Push to Trigger the Pipeline
+
+With Jenkins running in a cluster (see [Running builds](#running-builds)):
 
 ```bash
 git checkout -b develop
@@ -107,6 +180,28 @@ git checkout main
 git merge develop
 git push origin main      # → triggers production deploy (with approval gate)
 ```
+
+---
+
+## Verify Changes Locally
+
+`harness/verify.sh` checks a change the way you would by hand, without a
+cloud account or a long-lived cluster, and writes machine-readable results
+(`harness/.results/results.json`) that agents can act on:
+
+```bash
+harness/verify.sh --list                      # what each stage checks
+harness/verify.sh                             # static, app, image, pod, cluster-sim, terraform
+harness/verify.sh cluster-real cluster-prod   # real kind clusters (your machine or CI)
+```
+
+It covers the rendered manifests and the repo's Kyverno and Pod Security
+rules, the app's lint and tests, the Docker image, the app running as its
+staging pod next to Postgres/Redis, every overlay on a simulated cluster,
+Terraform against a local AWS emulator, and the Jenkinsfile's staging and
+production deploy paths (including a failed canary and the automatic
+rollback) on real kind clusters. The `verify` GitHub workflow runs all of it
+on every pull request. Details: [`harness/README.md`](harness/README.md).
 
 ---
 
@@ -137,7 +232,8 @@ git push origin main      # → triggers production deploy (with approval gate)
 - **HPA** — Auto-scales from 3 → 20 pods based on CPU/memory
 - **Pod Disruption Budget** — Guarantees ≥2 pods available during node maintenance
 - **Graceful shutdown** — SIGTERM handler closes connections cleanly in 55s
-- **Automatic rollback** — If production deploy fails, Jenkins reverts to previous image automatically
+- **Canary releases in production** — An Argo Rollout shifts traffic 25% → 50% → 100%, checking the success rate from Prometheus between steps
+- **Automatic rollback** — If production deploy fails, Jenkins reverts the Rollout to the previous image automatically
 - **Prometheus alerts** — Pages on-call if error rate, latency, or pod restarts spike
 
 ---
@@ -146,19 +242,20 @@ git push origin main      # → triggers production deploy (with approval gate)
 
 **Automatic** (triggered on pipeline failure):
 ```
-Jenkins detects deploy failure → kubectl set image → previous image → done
+Production: Jenkins detects deploy failure → patches the Rollout's image and version label
+            back to the previous release → Argo switches back to the stable ReplicaSet
+Staging:    Jenkins detects deploy failure → kubectl set image → previous image
 ```
 
 **Manual** (any time):
 ```bash
-# Roll back to previous revision
-kubectl rollout undo deployment/my-app --namespace=production
+# Production (Argo Rollout) — needs the kubectl-argo-rollouts plugin
+kubectl argo rollouts undo my-app --namespace=production
+kubectl argo rollouts get rollout my-app --namespace=production   # status and history
 
-# Roll back to specific revision
-kubectl rollout undo deployment/my-app --to-revision=3 --namespace=production
-
-# Check rollout history
-kubectl rollout history deployment/my-app --namespace=production
+# Staging (Deployment)
+kubectl rollout undo deployment/my-app --namespace=staging
+kubectl rollout history deployment/my-app --namespace=staging
 ```
 
 ---
@@ -192,7 +289,7 @@ Packages the app and all its dependencies into a portable, reproducible image. C
 Multi-stage Dockerfile
 A specific Docker pattern used to keep the final production image small. The build tools and dev dependencies are used in earlier stages and thrown away — only the compiled output and production node_modules end up in the final image. Alternatives like single-stage builds produce images 3–5x larger.
 Docker Compose
-Used to run the local development infrastructure (Jenkins, SonarQube, PostgreSQL, Redis, local registry) as a single stack. Chosen over running everything manually because one command (docker-compose up) boots the entire CI environment reproducibly.
+Used to run the local development infrastructure (Jenkins, SonarQube, PostgreSQL, Redis, local registry) as a single stack. Chosen over running everything manually because one command (`docker compose up`) boots it reproducibly. Builds run on Jenkins inside a Kubernetes cluster instead (see [Running builds](#running-builds)).
 
 Container Orchestration
 Kubernetes

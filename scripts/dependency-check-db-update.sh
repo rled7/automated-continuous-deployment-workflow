@@ -13,6 +13,11 @@
 #
 # The first run downloads every year of NVD data (several hundred MB, 10+
 # minutes); later runs only fetch what changed.
+#
+# DATA_DIR/update-complete holds the time (Unix seconds) of the last update
+# that finished. It is removed when an update starts, so a database left
+# half-downloaded by a failed or interrupted update has none, and the
+# Dependency Vulnerability Scan refuses to scan with it.
 set -euo pipefail
 
 data=${1:?usage: dependency-check-db-update.sh DATA_DIR}
@@ -40,4 +45,6 @@ case $status in
     exit 1 ;;
   *) echo "NVD API answered HTTP $status to a test request" >&2; exit 1 ;;
 esac
-exec dependency-check.sh --updateonly --data "$data" --nvdApiKey "$NVD_API_KEY"
+rm -f "$data/update-complete"
+dependency-check.sh --updateonly --data "$data" --nvdApiKey "$NVD_API_KEY"
+date -u +%s > "$data/update-complete"

@@ -34,6 +34,31 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 029 — Shared rate limit, pipeline dashboard, faster pipeline CI
+**Date:** 2026-10-16
+**Scope:** Items left open after Build 028.
+
+### Added
+- `docs/go-live.md` — **Go-live runbook** for one VM with k3s: what to set up, in order, with a check for each step. It also lists what the repo still lacks for a lasting cluster: persistent Postgres and Redis, Jenkins and SonarQube manifests for real use, a multi-arch agent image, a bootstrap script.
+
+### Fixed — dependency updates
+- `.github/dependabot.yml` — **Dependabot was paused**, not broken: none of its 22 pull requests was ever merged, so GitHub stopped it after one sat open for 90 days (its last pull request is from 5 August). Changing this file resumes it. Its Docker updates now cover the Jenkins controller and agent images too; Node majors are left to a deliberate choice of LTS line (it proposed Node 25, a non-LTS release); and every GitHub Actions bump, majors included, arrives as one pull request (the actions still run on the deprecated Node 20).
+- `.github/workflows/verify.yml` — Pull requests without the NVD key (Dependabot's, unless the key is also a Dependabot secret; forks) use the newest complete cached database instead of failing in `nvd-db`; the scan's age limit still applies.
+
+### Fixed — security
+- `Jenkinsfile`, `scripts/dependency-check-db-update.sh` — **The Dependency Vulnerability Scan no longer passes against an incomplete or stale database.** An update that crashed partway left a partial database, and the scan, which reads it without updating (`--noupdate`), reported SUCCESS against it: the first parallel CI run did exactly that with 12–29% of NVD. The update script now writes `update-complete` when an update finishes (and removes it when one starts); the scan stage fails without it, or when it is older than `DEPENDENCY_CHECK_MAX_AGE_DAYS` (default 3). Builds that update their own copy go through the same script and the same check.
+- `.github/workflows/verify.yml` — The CI cache could hold such a partial database (any job saved any copy over 1 MB). Only the `nvd-db` job saves now, after a finished update, under new `dependency-check-v2-` keys.
+
+### Changed
+- `.github/workflows/verify.yml`, `harness/stages/pipeline.sh` — **The pipeline group is three parallel jobs:** `pipeline-develop` (the develop build and the agent-forms job), `pipeline-main` (Deploy → Production) and `pipeline-tag` (Release), each on its own Jenkins. They ran one after another on one Jenkins. `PIPELINE_BUILDS` picks the builds; by default the harness still runs all four. dependency-check's database is updated from NVD once, by a new `nvd-db` job that saves it to the cache (one copy a day); the pipeline jobs wait for it and scan that copy as it is (`DC_UPDATE=0`), and only that job gets `NVD_API_KEY`. With a cached database the three jobs take 14.6–16 minutes (the single job took about 35); a full download in `nvd-db`, from an empty cache, takes about 42. The first parallel run showed why: with nothing in the cache, all three jobs downloaded the whole of NVD at once with one key, were throttled, and after 37 minutes one had 29% and crashed.
+- `harness/stages/pipeline.sh` — `PIPELINE_BRANCH=main` works: the production namespace is set up for it, and the served repository no longer tries to re-point the branch it is on.
+
+### Fixed
+- `app/src/lib/rate-limit-store.js`, `app/src/server.js` — **The rate limit is per client across all replicas.** It was counted in each pod's memory, so the real limit was `RATE_LIMIT_MAX` × replicas (up to 20 × in production with the HPA). It is now counted in Redis (one `MULTI`: `SET NX PX`, `INCR`, `PTTL`). While Redis is not connected, or a command fails, the pod counts in memory instead, so requests never wait on a Redis that is down. `rate-limit-redis` was not used: with Redis down at startup it leaves an unhandled rejection, which ends the process on Node 24. Checked against a real Redis: two clients share one count, and an outage falls back immediately and recovers.
+- `monitoring/grafana/dashboards/pipeline.yaml` — **The pipeline dashboard shows data.** Its queries used metric names the Jenkins Prometheus plugin does not export. They now use `default_jenkins_builds_*` with the `jenkins_job` label, read from a running Jenkins.
+
+---
+
 ## Build 028 — Every pipeline path run or audited; 50 defects fixed
 **Date:** 2026-10-14
 **Scope:** Build 027 ran the Jenkinsfile on a `develop` build. This build runs a `main` build too: Deploy → Production in Jenkins, with its approval gate, migrations, the Argo Rollout, smoke tests and DORA pushes. It also audits everything no build reaches: the tag, pull-request and failure paths, the manifests against a real cluster, the scripts, and the app. 50 defects were found and fixed. Each one was verified against the code, and most were reproduced first.

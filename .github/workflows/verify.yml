@@ -2,8 +2,9 @@ name: verify
 
 # Runs the local verification harness (harness/verify.sh). Stage groups run as
 # parallel jobs, so the workflow takes as long as its slowest group instead of
-# the sum of all stages; pipeline (the Jenkinsfile run by Jenkins in kind) is
-# one of them.
+# the sum of all stages. The pipeline stage (the Jenkinsfile run by Jenkins in
+# kind) is three of them: develop, main and tag builds, each on its own
+# Jenkins.
 #
 # Two layers of caching:
 #   - A group whose inputs (the files it reads, hashed from git) are exactly
@@ -41,8 +42,82 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # dependency-check's vulnerability database, for the pipeline jobs' scans:
+  # updated from NVD here, once, and saved to the cache (one copy a day), so
+  # the pipeline jobs only read it. Several updates at once with one NVD key
+  # get throttled; from an empty cache each one is a full download of NVD.
+  # Only complete databases are saved: the update script marks one when it
+  # finishes (update-complete), and Save runs only after it succeeded. (v1
+  # keys could hold a half-downloaded copy, saved by any job.)
+  nvd-db:
+    name: dependency-check database
+    runs-on: ubuntu-24.04
+    # A full download of NVD (an empty cache, after a week unused) took 41.5
+    # minutes; a daily update takes one or two.
+    timeout-minutes: 90
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    env:
+      DC_DATA: harness/.cache/dependency-check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Today's key
+        id: key
+        run: echo "key=dependency-check-v2-${{ runner.os }}-$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - name: Already updated today?
+        id: today
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DC_DATA }}
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+      # The newest copy: the update then only fetches what changed since.
+      - name: Restore the newest copy
+        if: steps.today.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DC_DATA }}
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: dependency-check-v2-${{ runner.os }}-
+      # The version the agent image scans with: the database schema must match.
+      - name: Install dependency-check
+        if: steps.today.outputs.cache-hit != 'true'
+        run: |
+          v=$(sed -n 's/.*DEPENDENCY_CHECK_VERSION=\([0-9.]*\).*/\1/p' docker/jenkins-agent/Dockerfile)
+          [ -n "$v" ] || { echo "DEPENDENCY_CHECK_VERSION not found in docker/jenkins-agent/Dockerfile"; exit 1; }
+          curl -fsSLo "$RUNNER_TEMP/dc.zip" \
+            "https://repo1.maven.org/maven2/org/owasp/dependency-check-cli/$v/dependency-check-cli-$v-release.zip"
+          unzip -q "$RUNNER_TEMP/dc.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/dependency-check/bin" >> "$GITHUB_PATH"
+      # Without the key (forks; Dependabot, unless it has the secret too) the
+      # newest complete copy is used as it is; the scan's age limit decides
+      # whether it is recent enough.
+      - name: Update from NVD
+        id: update
+        if: steps.today.outputs.cache-hit != 'true'
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          if [ -z "$NVD_API_KEY" ] && [ -s "$DC_DATA/update-complete" ]; then
+            echo "::warning::NVD_API_KEY is not available: using the cached database from $(date -u -d @"$(cat "$DC_DATA/update-complete")" +%F) without an update"
+            exit 0
+          fi
+          scripts/dependency-check-db-update.sh "$DC_DATA" 2>&1 | grep -vE '^\s+at '
+          du -sh "$DC_DATA"
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+      - name: Save
+        if: steps.update.outputs.updated == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DC_DATA }}
+          key: ${{ steps.key.outputs.key }}
+
   verify:
     name: verify (${{ matrix.group }})
+    needs: nvd-db
+    # Every group runs even when the database job fails; only the pipeline
+    # groups need the database.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     strategy:
@@ -77,17 +152,27 @@ jobs:
               app tests docker/Dockerfile .dockerignore docker/.dockerignore k8s scripts
               harness/fixtures harness/stages/image.sh harness/stages/cluster-prod.sh
           # The Jenkinsfile lints, tests, scans and builds the whole tree.
-          - group: pipeline
+          # builds: PIPELINE_BUILDS, which builds this job's Jenkins runs.
+          - group: pipeline-develop
             stages: "pipeline"
+            builds: "branch forms"
+            inputs: ". :(exclude)docs :(exclude)*.md"
+          - group: pipeline-main
+            stages: "pipeline"
+            builds: "main"
+            inputs: ". :(exclude)docs :(exclude)*.md"
+          - group: pipeline-tag
+            stages: "pipeline"
+            builds: "tag"
             inputs: ". :(exclude)docs :(exclude)*.md"
     env:
       STAGES: ${{ inputs.stages || matrix.stages }}
       PIPELINE_BRANCH: ${{ inputs.pipeline_branch || 'develop' }}
+      PIPELINE_BUILDS: ${{ matrix.builds }}   # empty (a manual run): all of them
+      # dependency-check's database comes from the nvd-db job, as it is.
+      DC_UPDATE: "0"
       HARNESS_DOCKER_CACHE: gha
       COMMON_INPUTS: .github/workflows/verify.yml harness/verify.sh harness/lib
-      # For the Dependency Vulnerability Scan (repo secret; empty on forks).
-      # Only the job that runs the Jenkinsfile gets it.
-      NVD_API_KEY: ${{ matrix.group == 'pipeline' && secrets.NVD_API_KEY || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -157,17 +242,15 @@ jobs:
           key: terraform-plugins-${{ runner.os }}-${{ hashFiles('harness/terraform/**/*.tf', 'infra/**/*.tf') }}
           restore-keys: terraform-plugins-${{ runner.os }}-
 
-      # dependency-check's vulnerability database: the newest copy, which the
-      # scan only updates (downloading all of NVD takes 10+ minutes). One copy
-      # is saved per day.
+      # dependency-check's vulnerability database, as the nvd-db job left it
+      # (or the newest copy, if that job failed).
       - name: Restore the dependency-check database
-        id: dc-restore
         if: steps.gate.outputs.run == 'true' && contains(env.STAGES, 'pipeline')
         uses: actions/cache/restore@v4
         with:
           path: harness/.cache/dependency-check
-          key: dependency-check-${{ runner.os }}-${{ steps.plan.outputs.day }}
-          restore-keys: dependency-check-${{ runner.os }}-
+          key: ${{ needs.nvd-db.outputs.key || 'none' }}
+          restore-keys: dependency-check-v2-${{ runner.os }}-
 
       # Docker layer caching: a BuildKit builder that can export to the
       # Actions cache, with Docker Hub pulls going through Google's mirror
@@ -195,27 +278,6 @@ jobs:
           # STAGES is a space-separated list, split on purpose.
           # shellcheck disable=SC2086
           TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" harness/verify.sh $STAGES
-
-      # Saved even when the build fails later on: the scan has updated it.
-      # Agent pods write it as another user; stale lock files would make the
-      # next scan wait.
-      - name: Prepare the dependency-check database for the cache
-        id: dc-prepare
-        if: always() && steps.dc-restore.outcome == 'success' && steps.dc-restore.outputs.cache-hit != 'true'
-        run: |
-          dir=harness/.cache/dependency-check
-          if [ -n "$(sudo find "$dir" -name 'odc.mv.db' -size +1M 2>/dev/null)" ]; then
-            sudo find "$dir" -name '*.lock' -delete
-            sudo chmod -R a+rX "$dir"
-            du -sh "$dir"
-            echo "save=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Save the dependency-check database
-        if: always() && steps.dc-prepare.outputs.save == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: harness/.cache/dependency-check
-          key: dependency-check-${{ runner.os }}-${{ steps.plan.outputs.day }}
 
       - name: Summary
         if: always() && steps.gate.outputs.run == 'true'

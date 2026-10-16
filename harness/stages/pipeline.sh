@@ -4,7 +4,14 @@
 # cicd-agent pods from docker/jenkins-agent/Dockerfile, building this working
 # tree as a branch (PIPELINE_BRANCH, default develop) of a multibranch job.
 # Each Jenkins stage becomes a step here, with the console log in
-# logs/pipeline-console.log.
+# logs/pipeline-console-<branch>.log.
+#
+# PIPELINE_BUILDS picks the builds, run in this order on one Jenkins:
+#   branch  PIPELINE_BRANCH (default develop)
+#   main    main: Deploy -> Production, the Rollout, the DORA pushes
+#   tag     the tag v0.0.1: Release
+#   forms   the agent-forms job: every way of asking for an agent
+# Default: all four. CI runs them as parallel jobs, each on its own cluster.
 #
 # Stand-ins, the only changes to jenkins.yaml:
 #   - registry: a local registry (kind-registry:5000), for DOCKER_REGISTRY and
@@ -29,6 +36,8 @@ source "$HARNESS_DIR/lib/kind.sh"
 
 CLUSTER=harness-pipeline
 BRANCH="${PIPELINE_BRANCH:-develop}"
+PIPELINE_BUILDS="${PIPELINE_BUILDS:-branch main tag forms}"
+wants() { [[ " $PIPELINE_BUILDS " == *" $1 "* ]]; }
 RELEASE_TAG=v0.0.1                 # the tag the served repository carries (Release)
 REGISTRY=kind-registry:5000        # how the cluster and the pipeline address it
 HOST_REGISTRY=localhost:5001       # how this host pushes to it
@@ -51,7 +60,8 @@ JENKINS_AUTH="admin:verify"
 source "$HARNESS_DIR/lib/jenkins.sh"
 
 need_tools kind kubectl kustomize || exit 1
-[ -n "${NVD_API_KEY:-}" ] || log "NVD_API_KEY is not set: the Dependency Vulnerability Scan will fail"
+[ "${DC_UPDATE:-1}" = 0 ] || [ -n "${NVD_API_KEY:-}" ] ||
+  log "NVD_API_KEY is not set: the Dependency Vulnerability Scan will fail"
 ensure_docker || exit 1
 
 work=$(mktemp -d)
@@ -137,9 +147,25 @@ step "build docker/jenkins-agent/Dockerfile" \
 # then reads it without downloading anything (--noupdate, since the pod
 # template sets DEPENDENCY_CHECK_DATA). Needs an NVD_API_KEY NVD accepts.
 # Runs while the cluster and Jenkins come up.
-( timeout 2400 docker run --rm -e NVD_API_KEY -v "$DC_DATA:/data" -v "$REPO_ROOT/scripts:/scripts:ro" \
-    --entrypoint bash harness-agent:local /scripts/dependency-check-db-update.sh /data > "$work/dc-update.log" 2>&1
-  echo $? > "$work/dc-update.rc" ) &
+#
+# DC_UPDATE=0 uses the database as it is, without NVD: CI updates it once, in
+# its own job, for all the pipeline jobs (several updates at once with one NVD
+# key are throttled, and from an empty cache each is a full download).
+# update-complete: written by scripts/dependency-check-db-update.sh when an
+# update finishes (a half-downloaded database has none).
+dc_have_db() { [ -s "$DC_DATA/update-complete" ]; }
+if [ "${DC_UPDATE:-1}" = 0 ]; then
+  ( if dc_have_db; then
+      echo "DC_UPDATE=0: using the database in $DC_DATA as it is"; echo 0 > "$work/dc-update.rc"
+    else
+      echo "DC_UPDATE=0, but there is no complete database in $DC_DATA (in CI: did the nvd-db job fail?)"
+      echo 1 > "$work/dc-update.rc"
+    fi ) > "$work/dc-update.log" &
+else
+  ( timeout 2400 docker run --rm -e NVD_API_KEY -v "$DC_DATA:/data" -v "$REPO_ROOT/scripts:/scripts:ro" \
+      --entrypoint bash harness-agent:local /scripts/dependency-check-db-update.sh /data > "$work/dc-update.log" 2>&1
+    echo $? > "$work/dc-update.rc" ) &
+fi
 dc_pid=$!
 
 cluster_ready() { wait "$cluster_pid"; cat "$work/cluster.log"; return "$(cat "$work/cluster.rc" 2>/dev/null || echo 1)"; }
@@ -178,11 +204,12 @@ EOF
 step "staging ConfigMap and NetworkPolicies in place" env_state staging "$staging_rendered"
 
 # ── Production, for a main build's Deploy → Production ──────────────────────
-# After the $BRANCH build, a main build runs the production path in Jenkins:
-# the approval gate (approved by the harness), migrations, the Argo Rollout,
-# smoke tests, the DORA pushes. PIPELINE_MAIN=0 skips it.
+# A main build runs the production path in Jenkins: the approval gate
+# (approved by the harness), migrations, the Argo Rollout, smoke tests, the
+# DORA pushes. It is the main build, or the branch build with
+# PIPELINE_BRANCH=main.
 MAIN_BUILD=0
-[ "$BRANCH" != main ] && [ "${PIPELINE_MAIN:-1}" = 1 ] && MAIN_BUILD=1
+if wants main || { wants branch && [ "$BRANCH" = main ]; }; then MAIN_BUILD=1; fi
 if [ "$MAIN_BUILD" = 1 ]; then
   ( install_argo_rollouts > "$work/argo.log" 2>&1; echo $? > "$work/argo.rc" ) &
   argo_pid=$!
@@ -243,7 +270,7 @@ git_up() {
     git -C "$tree" add -A &&
     git -C "$tree" -c user.name=harness -c user.email=harness@verify.local \
       commit -q -m "$(git -C "$REPO_ROOT" log -1 --format=%s 2>/dev/null || echo 'working tree')" &&
-    git -C "$tree" branch -f main &&
+    { [ "$BRANCH" = main ] || git -C "$tree" branch -f main; } &&
     git -C "$tree" -c user.name=harness -c user.email=harness@verify.local \
       tag -a "$RELEASE_TAG" -m "harness release" &&
     git clone -q --bare "$tree" "$bare" &&
@@ -563,12 +590,20 @@ pipeline_build() {
 }
 
 step "dependency-check database up to date (started with the cluster)" dc_updated
-pipeline_build "$BRANCH" "Jenkins stage" || finish_stage
-
 if [ "$MAIN_BUILD" = 1 ]; then
   argo_ready() { wait "$argo_pid"; cat "$work/argo.log"; return "$(cat "$work/argo.rc" 2>/dev/null || echo 1)"; }
   step "Argo Rollouts controller installed (started with production)" argo_ready || finish_stage
-  pipeline_build main "Jenkins stage (main)"
+fi
+
+if wants branch; then
+  pipeline_build "$BRANCH" "Jenkins stage" || finish_stage
+fi
+
+if [ "$MAIN_BUILD" = 1 ]; then
+  # Unless the branch build above was the main build.
+  if ! { wants branch && [ "$BRANCH" = main ]; }; then
+    pipeline_build main "Jenkins stage (main)"
+  fi
   # What Deploy → Production left behind: a healthy Rollout on that build's image.
   production_released() {
     local phase image
@@ -592,8 +627,8 @@ fi
 # ── A release: a build of the tag runs Release ──────────────────────────────
 # Tag the image must pass. GitHub release needs GitHub, which the harness does
 # not have, so it is expected to fail (with its parent stage, Release) and
-# nothing else may. PIPELINE_RELEASE=0 skips it.
-if [ "${PIPELINE_RELEASE:-1}" = 1 ]; then
+# nothing else may.
+if wants tag; then
   pipeline_build "$RELEASE_TAG" "Jenkins stage (tag)" "Release|GitHub release"
   # The registry's digest for a tag (a multi-arch manifest list).
   manifest_digest() {
@@ -617,25 +652,27 @@ fi
 # deprecated kubernetes label, a yaml-only pod, label, any), each checking its
 # steps have the tools and a Docker daemon. The jenkins stage resolves the
 # same file offline. See docs/agent-resolution.md.
-FORMS=/job/agent-forms
-run_agent_forms() {
-  groovy "
+if wants forms; then
+  FORMS=/job/agent-forms
+  run_agent_forms() {
+    groovy "
 import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
 import org.jenkinsci.plugins.workflow.job.WorkflowJob
 def job = jenkins.model.Jenkins.get().createProject(WorkflowJob, 'agent-forms')
 job.definition = new CpsFlowDefinition(new String(Base64.decoder.decode('$(base64 -w0 "$HARNESS_DIR/fixtures/agent-forms.Jenkinsfile")'), 'UTF-8'), true)
 job.save()
 println('created')" | grep -qx created || { echo "could not create the agent-forms job"; return 1; }
-  jenkins_post "$FORMS/build" >/dev/null || return 1
-  local deadline=$(( $(date +%s) + 1800 ))
-  until [ "$(jenkins_get "$FORMS/1/api/json" | jq -r .building)" = false ]; do
-    [ "$(date +%s)" -gt "$deadline" ] && { echo "agent-forms still running after 30 minutes"; jenkins_post "$FORMS/1/stop" >/dev/null; return 1; }
-    sleep 10
-  done
-  jenkins_get "$FORMS/1/consoleText" > "$RESULTS_DIR/logs/pipeline-agent-forms.log"
-  jenkins_get "$FORMS/1/api/json" | jq -r '"result: \(.result)"'
-}
-step "agent-forms job runs" run_agent_forms
-[ -n "$(record_stages "$FORMS/1" "agent form")" ] && STEP_FAILURES=$((STEP_FAILURES + 1))
+    jenkins_post "$FORMS/build" >/dev/null || return 1
+    local deadline=$(( $(date +%s) + 1800 ))
+    until [ "$(jenkins_get "$FORMS/1/api/json" | jq -r .building)" = false ]; do
+      [ "$(date +%s)" -gt "$deadline" ] && { echo "agent-forms still running after 30 minutes"; jenkins_post "$FORMS/1/stop" >/dev/null; return 1; }
+      sleep 10
+    done
+    jenkins_get "$FORMS/1/consoleText" > "$RESULTS_DIR/logs/pipeline-agent-forms.log"
+    jenkins_get "$FORMS/1/api/json" | jq -r '"result: \(.result)"'
+  }
+  step "agent-forms job runs" run_agent_forms
+  [ -n "$(record_stages "$FORMS/1" "agent form")" ] && STEP_FAILURES=$((STEP_FAILURES + 1))
+fi
 
 finish_stage

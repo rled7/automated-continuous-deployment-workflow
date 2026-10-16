@@ -10,6 +10,7 @@ import logger from './lib/logger.js';
 import { register } from './lib/metrics.js';
 import * as db from './lib/db.js';
 import * as redis from './lib/redis.js';
+import { RedisFallbackStore } from './lib/rate-limit-store.js';
 import requestIdMiddleware from './middleware/requestId.js';
 import metricsMiddleware from './middleware/metrics.js';
 import errorHandler from './middleware/error.js';
@@ -57,9 +58,12 @@ app.use(metricsMiddleware);
 // 5. Rate limiting — skip health and metrics endpoints
 // RATE_LIMIT_MAX: requests per client per minute (default 100); staging
 // raises it so a load test from one machine measures the app, not the limit.
+// Counted in Redis when REDIS_URL is set, so the limit is per client across
+// all replicas (lib/rate-limit-store.js); in memory per pod otherwise.
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: positiveInt(process.env.RATE_LIMIT_MAX, 100),
+  store: redis.client ? new RedisFallbackStore(redis.client) : undefined,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) =>

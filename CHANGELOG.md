@@ -34,6 +34,16 @@ All notable file-level changes to this repo, tracked per build. Newest first.
 
 ---
 
+## Build 029 — Shared rate limit, pipeline dashboard, faster pipeline CI
+**Date:** 2026-10-16
+**Scope:** Items left open after Build 028.
+
+### Fixed
+- `app/src/lib/rate-limit-store.js`, `app/src/server.js` — **The rate limit is per client across all replicas.** It was counted in each pod's memory, so the real limit was `RATE_LIMIT_MAX` × replicas (up to 20 × in production with the HPA). It is now counted in Redis (one `MULTI`: `SET NX PX`, `INCR`, `PTTL`). While Redis is not connected, or a command fails, the pod counts in memory instead, so requests never wait on a Redis that is down. `rate-limit-redis` was not used: with Redis down at startup it leaves an unhandled rejection, which ends the process on Node 24. Checked against a real Redis: two clients share one count, and an outage falls back immediately and recovers.
+- `monitoring/grafana/dashboards/pipeline.yaml` — **The pipeline dashboard shows data.** Its queries used metric names the Jenkins Prometheus plugin does not export. They now use `default_jenkins_builds_*` with the `jenkins_job` label, read from a running Jenkins.
+
+---
+
 ## Build 028 — Every pipeline path run or audited; 50 defects fixed
 **Date:** 2026-10-14
 **Scope:** Build 027 ran the Jenkinsfile on a `develop` build. This build runs a `main` build too: Deploy → Production in Jenkins, with its approval gate, migrations, the Argo Rollout, smoke tests and DORA pushes. It also audits everything no build reaches: the tag, pull-request and failure paths, the manifests against a real cluster, the scripts, and the app. 50 defects were found and fixed. Each one was verified against the code, and most were reproduced first.

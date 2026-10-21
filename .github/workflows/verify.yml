@@ -172,7 +172,7 @@ jobs:
       # Docker layer caching: a BuildKit builder that can export to the
       # Actions cache, with Docker Hub pulls going through Google's mirror
       # (Docker Hub rate-limits shared runner IPs).
-      - uses: crazy-max/ghaction-github-runtime@v3
+      - uses: crazy-max/ghaction-github-runtime@v4
         if: steps.gate.outputs.run == 'true'
       - uses: docker/setup-buildx-action@v3
         if: steps.gate.outputs.run == 'true'

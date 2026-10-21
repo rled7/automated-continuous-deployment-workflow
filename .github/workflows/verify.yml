@@ -89,7 +89,7 @@ jobs:
       # Only the job that runs the Jenkinsfile gets it.
       NVD_API_KEY: ${{ matrix.group == 'pipeline' && secrets.NVD_API_KEY || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The key names the exact content of every file the group reads (git
       # blob hashes), so identical inputs give an identical key.
